@@ -675,7 +675,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-            await ctx.bot.send_message(chat, f"✅ {deleted} پیام زیر لیست پاک شد.")
+            #await ctx.bot.send_message(chat, f"✅ {deleted} پیام زیر لیست پاک شد.")
         except Exception as e:
             await ctx.bot.send_message(chat, f"❌ خطا در پاکسازی: {e}")
         return
