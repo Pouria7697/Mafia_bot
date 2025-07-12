@@ -388,7 +388,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.last_vote_msg_id = msg.message_id
     g.vote_start_msg_id = msg.message_id  # ذخیره پیام شروع رأی‌گیری برای شمارش آرا
-    g.vote_start_time = datetime.datetime.now(datetime.timezone.utc)
+    g.vote_start_time = datetime.now(datetime.timezone.utc)
     g.vote_messages = []  # 🆕 برای ذخیره پیام‌های رأی‌گیری
     store.save()
 
