@@ -92,7 +92,7 @@ class GameState:
         self.last_name_prompt_msg_id = self.last_name_prompt_msg_id or {}
         self.user_names = {}
         self.selected_defense = []
-
+        self.vote_messages: list = []
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -388,13 +388,15 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.last_vote_msg_id = msg.message_id
     g.vote_start_msg_id = msg.message_id  # ذخیره پیام شروع رأی‌گیری برای شمارش آرا
-    g.vote_start_time = msg.date  # ذخیره زمان شروع رأی‌گیری
+    g.vote_start_time = datetime.datetime.now(datetime.timezone.utc)
+    g.vote_messages = []  # 🆕 برای ذخیره پیام‌های رأی‌گیری
     store.save()
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
     g.vote_type = "counting"
+    g.vote_messages = []
     store.save()
 
     start_msg = await ctx.bot.send_message(
@@ -404,7 +406,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
 
     g.vote_start_msg_id = start_msg.message_id
-    g.vote_start_time = start_msg.date
+    g.vote_start_time = datetime.datetime.now(datetime.timezone.utc)
     store.save()
 
     await asyncio.sleep(5)
@@ -422,44 +424,30 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     from collections import defaultdict
-    from telegram.constants import MessageEntityType
 
-    tally = defaultdict(int)
-    seen = defaultdict(set)  # {seat: set(user_ids)}
+    tally = defaultdict(list)
+    seen = defaultdict(set)
 
-    async for msg in ctx.bot.get_chat_history(chat_id, limit=20):
-        if msg.date < g.vote_start_time:
-            break
-        if msg.message_id <= g.vote_start_msg_id:
-            continue
-        if g.vote_end_msg_id and msg.message_id >= g.vote_end_msg_id:
-            continue
-
+    for msg in g.vote_messages:
         uid = msg.from_user.id
         text = (msg.text or '').strip()
 
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
             continue
 
-        if not msg.reply_to_message:
-            continue
-
-        vote_target = None
-        for s in g.vote_candidates:
-            if msg.reply_to_message.message_id == g.last_vote_msg_id:
-                vote_target = g.current_vote_target
-                break
-
+        vote_target = g.current_vote_target
         if vote_target is None:
             continue
 
         if uid in seen[vote_target]:
             continue
 
-        tally[vote_target] += 1
+        tally[vote_target].append(uid)
         seen[vote_target].add(uid)
 
-    return dict(tally)
+    g.tally = dict(tally)
+    store.save()
+    return g.tally
 
 import jdatetime
 
@@ -1087,6 +1075,15 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = msg.from_user.id
     g    = gs(chat)
     text = msg.text.strip()
+    # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
+    if g.vote_type == "counting":
+        g.vote_messages.append({
+            "uid": msg.from_user.id,
+            "text": (msg.text or "").strip(),
+            "reply_to": msg.reply_to_message.message_id if msg.reply_to_message else None
+        })
+        store.save()
+        return  # 👈 چون رأی بوده، بقیهٔ شرط‌ها اجرا نشن
 
     # ─────────────────────────────────────────────────────────────
     # 1) راوی نام خود را وارد می‌کند
