@@ -288,7 +288,7 @@ CTRL  = "controls"   # فقط دکمه‌های کنترلی
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     """متن لیست صندلی‌ها را با اطلاعات سناریو به‌روز می‌کند"""
     today = jdatetime.date.today().strftime("%Y/%m/%d")
-    header = f"📅 {today}   |   ⏰ {g.event_time or '---'}\n"
+    header = f"📅 {today} \n  ⏰ {g.event_time or '---'}\n"
     
     # اطلاعات سناریو اگر وجود دارد
     scenario_info = ""
@@ -1214,10 +1214,6 @@ async def addscenario(update: Update, ctx):
     save_scenarios_to_gist(store.scenarios)
 
     await update.message.reply_text(f"✅ Scenario '{name}' added with roles: {roles}")
-
-
-
-
 
 
 async def addseat(update: Update, ctx):
