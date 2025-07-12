@@ -1396,7 +1396,13 @@ async def main():
 
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame))
-    app.add_handler(MessageHandler(filters.Regex(r"^/\d+(@PouriaMafiaBot)?$") & filters.ChatType.GROUPS, handle_simple_seat_command))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^/\d+(@PouriaMafiaBot)?$")
+            & filters.ChatType.GROUPS,
+            handle_simple_seat_command
+        )
+    )
     app.add_handler(CommandHandler("resetgame", resetgame))
     app.add_handler(CommandHandler("addscenario", addscenario))
     app.add_handler(CommandHandler("listscenarios", list_scenarios))
@@ -1404,11 +1410,33 @@ async def main():
     app.add_handler(CommandHandler("add", add_seat_cmd))
     app.add_handler(CommandHandler("god", transfer_god_cmd))
     app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/\d+s$"), dynamic_timer))
-    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, name_reply))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.REPLY, handle_direct_name_input))
+    app.add_handler(
+        MessageHandler(
+            filters.COMMAND & filters.Regex(r"^/\d+s$"),
+            dynamic_timer
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.REPLY
+            & filters.TEXT
+            & filters.Regex(r"^\d+$"),
+            auto_register_reply
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.REPLY & filters.TEXT,
+            name_reply
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.REPLY,
+            handle_direct_name_input
+        )
+    )
 
- 
        
     # ✅ initialize application
     await app.initialize()
