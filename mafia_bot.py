@@ -880,7 +880,8 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    print("🟡 handle_simple_seat_command called", file=sys.stdout)
+    import sys
+    print("✅ STILL ALIVE", file=sys.stdout)  # 👈 اینجا بذار
     msg = update.message
     chat_id = msg.chat.id
     uid = msg.from_user.id
