@@ -406,7 +406,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
 
     g.vote_start_msg_id = start_msg.message_id
-    g.vote_start_time = datetime.datetime.now(datetime.timezone.utc)
+    g.vote_start_time = datetime.now(timezone.utc)  # ✅ این خط اصلاح شده
     store.save()
 
     await asyncio.sleep(5)
