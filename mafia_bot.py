@@ -245,7 +245,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("❌ حذف بازیکن", callback_data=BTN_DELETE),
-            InlineKeyboardButton("🧹 پاکسازی زیر پیام", callback_data="cleanup_below")
+            InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup_below")
         ],
         [
             InlineKeyboardButton("↩️ لغو ثبت‌نام", callback_data="cancel_self"),
@@ -418,31 +418,42 @@ async def announce_winner(ctx, update, g: GameState):
         group_link = group_title  # گروه خصوصی لینک‌نداره
 
     lines = [
-        f"🎮 گروه: {group_link}",
-        f"📅 تاریخ: {date_str}",
-        f"🧠 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
-        f"🧩 سناریو: {scenario_name}",
+        f"░⚜️🎮 گروه: {group_link}",
+        f"░⚜️📅 تاریخ: {date_str}",
+        f"░💡🔱 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+        f"░⚜️📃 سناریو: {scenario_name}",
         "",
-        "♣️ لیست بازیکنان ♣️",
+        "⬇️ لیست بازیکنان ░⚜️💫",
         "",
     ]
 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
-        lines.append(f"🌹{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role}")
+        lines.append(f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role}")
+
 
     lines.append("")
-    lines.append(f"🏆 نتیجه بازی: برد {g.winner_side}")
+
+    result_line = f"🏆 نتیجه بازی: برد {g.winner_side}"
+    if getattr(g, "clean_win", False):
+        result_line += " (کلین‌شیت)"
+    lines.append(result_line)
 
     g.phase = "ended"
     store.save()
 
-    await ctx.bot.send_message(
+    msg = await ctx.bot.send_message(
         chat.id,
         "\n".join(lines),
         parse_mode="HTML"  # لازم برای لینک
     )
+
+    try:
+        await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
+    except Exception as e:
+        print("⚠️ خطا در پین کردن پیام:", e)
+
 # ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
@@ -598,12 +609,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chat,
             "🏁 بازی تمام! تیم برنده؟",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏙 شهر",  callback_data="winner_city")],
-                [InlineKeyboardButton("😈 مافیا", callback_data="winner_mafia")],
-                [InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")],
+                [InlineKeyboardButton("🏙 شهر",          callback_data="winner_city")],
+                [InlineKeyboardButton("😈 مافیا",         callback_data="winner_mafia")],
+                [InlineKeyboardButton("🏙 کلین‌شیت شهر",   callback_data="clean_city")],
+                [InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")],
+                [InlineKeyboardButton("⬅️ بازگشت",        callback_data="back_endgame")],
             ])
         )
         return
+
 
     if data == "back_endgame" and uid == g.god_id:
         g.awaiting_winner = False
@@ -619,6 +633,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data in {"winner_city", "winner_mafia"} and g.awaiting_winner:
         g.awaiting_winner = False
         g.winner_side = "شهر" if data == "winner_city" else "مافیا"
+        store.save()
+        await announce_winner(ctx, update, g)
+        return
+    if data in {"clean_city", "clean_mafia"} and g.awaiting_winner:
+        g.awaiting_winner = False
+        g.winner_side = "شهر" if data == "clean_city" else "مافیا"
+        g.clean_win = True  # 🟢 نشونه کلین‌شیت
         store.save()
         await announce_winner(ctx, update, g)
         return
