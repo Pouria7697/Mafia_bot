@@ -6,6 +6,7 @@ import telegram.error
 import jdatetime
 import requests
 import json, httpx
+import sys
 import subprocess  # ✅ برای push به GitHub
 from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
