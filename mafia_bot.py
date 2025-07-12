@@ -172,7 +172,7 @@ def load_usernames_from_gist():
         if response.status_code == 200:
             gist_data = response.json()
             content = gist_data["files"].get(USERNAMES_FILENAME, {}).get("content", "{}")
-            return json.loads(content)
+            return json.loads(content) or {}  # 🔄 این تغییر را اعمال کنید
         else:
             print("❌ user_names gist fetch failed:", response.status_code)
             return {}
@@ -880,14 +880,14 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    import sys
-    print("✅ STILL ALIVE", file=sys.stdout)  # 👈 اینجا بذار
     msg = update.message
     chat_id = msg.chat.id
     uid = msg.from_user.id
     g = gs(chat_id)
 
-
+    # 🔄 این خط رو اضافه کنید
+    if not hasattr(g, 'user_names') or g.user_names is None:
+        g.user_names = load_usernames_from_gist()
 
     command_text = msg.text.split('@')[0]
     try:
@@ -1133,8 +1133,9 @@ async def newgame(update: Update, ctx):
     store.games[chat] = GameState(max_seats=int(ctx.args[0]))
     g = gs(chat)
 
-    # 🛠 حتماً این خط باشه
-    g.user_names = load_usernames_from_gist()
+    # 🔄 این خط رو اضافه کنید تا نام‌ها همیشه تازه باشند
+    g.user_names = load_usernames_from_gist()  # بارگذاری نام‌ها از Gist
+    save_usernames_to_gist(g.user_names)  # ذخیره مجدد برای اطمینان
 
     g.from_startgame = True
     g.awaiting_scenario = True
@@ -1143,21 +1144,17 @@ async def newgame(update: Update, ctx):
     await show_scenario_selection(ctx, chat, g)
 
 
-
 async def resetgame(update: Update, ctx):
     chat_id = update.effective_chat.id
     old = gs(chat_id)
 
-    # نگه‌داشتن نام‌های ذخیره‌شده
-    saved_user_names = old.user_names.copy()
+    # 🔄 این خط رو اضافه کنید
+    usernames = load_usernames_from_gist()
 
-    # ساختن گیم جدید
     store.games[chat_id] = GameState()
     g = store.games[chat_id]
-
-    # برگردوندن نام‌ها
-    g.user_names = saved_user_names
-    save_usernames_to_gist(g.user_names)  # 👈 این خطو اضافه کن
+    g.user_names = usernames  # استفاده از نام‌های ذخیره شده
+    save_usernames_to_gist(g.user_names)  # ذخیره مجدد
 
     store.save()
     await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
