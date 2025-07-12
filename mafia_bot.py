@@ -172,7 +172,8 @@ def load_usernames_from_gist():
         if response.status_code == 200:
             gist_data = response.json()
             content = gist_data["files"].get(USERNAMES_FILENAME, {}).get("content", "{}")
-            return json.loads(content) or {}  # 🔄 این تغییر را اعمال کنید
+            data = json.loads(content) or {}
+            return {int(k): v for k, v in data.items()}  # 👈 کلیدها رو تبدیل کن به عدد
         else:
             print("❌ user_names gist fetch failed:", response.status_code)
             return {}
@@ -210,7 +211,11 @@ for g in store.games.values():
 
 
 def gs(chat_id):
-    return store.games.setdefault(chat_id, GameState())
+    g = store.games.setdefault(chat_id, GameState())
+    if not g.user_names:
+        g.user_names = load_usernames_from_gist()  # ← بارگذاری اسامی از Gist
+    return g
+
 
 def seat_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = []
