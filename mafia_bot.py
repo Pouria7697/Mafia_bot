@@ -646,18 +646,19 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         try:
             deleted = 0
-            # فقط پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم
-            async for m in ctx.bot.get_chat_history(chat, limit=100):
-                if m.message_id > g.last_seating_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat, m.message_id)
-                        deleted += 1
-                    except:
-                        pass
+            # 🔄 پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم (حداکثر 100 عدد)
+            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 100):
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
+                    deleted += 1
+                except:
+                    pass
+
             await ctx.bot.send_message(chat, f"✅ {deleted} پیام زیر لیست پاک شد.")
         except Exception as e:
             await ctx.bot.send_message(chat, f"❌ خطا در پاکسازی: {e}")
         return
+
 
     # ────────────────────────────────────────────────────────────
     #  بخش‌های قدیمی (seat_ / cancel_ / strike_out / …)
