@@ -1071,10 +1071,16 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    chat = msg.chat.id
-    uid  = msg.from_user.id
-    g    = gs(chat)
     text = msg.text.strip()
+    uid = msg.from_user.id
+    chat = msg.chat.id
+    g = gs(chat)
+
+    print("✉️ name_reply received:", text)
+    print("🔍 g.vote_type =", g.vote_type)
+    print("🔍 g.god_id =", g.god_id, " | uid =", uid)
+
+
     # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
     if g.vote_type == "counting":
         g.vote_messages.append({
