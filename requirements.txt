@@ -1,0 +1,7 @@
+python-telegram-bot==20.3
+jdatetime
+flask
+aiohttp
+GitPython
+requests
+httpx
