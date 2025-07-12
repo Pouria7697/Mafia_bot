@@ -879,12 +879,12 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
+    print("🟡 handle_simple_seat_command called", file=sys.stdout)    msg = update.message
     chat_id = msg.chat.id
     uid = msg.from_user.id
     g = gs(chat_id)
 
-    print("👥 user_names = ", g.user_names)  # ✅ لاگ دیباگ
+
 
     command_text = msg.text.split('@')[0]
     try:
@@ -902,6 +902,7 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
 
     # ✅ اگر اسم کاربر از قبل ذخیره شده، مستقیماً ثبتش کن
     if uid in g.user_names:
+        print(f"🟢 Found stored name: {g.user_names[uid]}", file=sys.stdout)
         g.seats[seat_no] = (uid, g.user_names[uid])
         store.save()
         await publish_seating(ctx, chat_id, g)
