@@ -879,7 +879,8 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    print("🟡 handle_simple_seat_command called", file=sys.stdout)    msg = update.message
+    print("🟡 handle_simple_seat_command called", file=sys.stdout)
+    msg = update.message
     chat_id = msg.chat.id
     uid = msg.from_user.id
     g = gs(chat_id)
