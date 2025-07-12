@@ -884,6 +884,8 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     uid = msg.from_user.id
     g = gs(chat_id)
 
+    print("👥 user_names = ", g.user_names)  # ✅ لاگ دیباگ
+
     command_text = msg.text.split('@')[0]
     try:
         seat_no = int(command_text[1:])
@@ -907,10 +909,12 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
 
     # اگر اسم ذخیره نشده بود، ازش بخواه وارد کنه
     g.awaiting_name_input[uid] = seat_no
-    sent_msg = await ctx.bot.send_message(chat_id, f"✏️ نام خود را برای صندلی {seat_no}  (بدون ریپلای کردن این پیام!) وارد کنید:")
+    sent_msg = await ctx.bot.send_message(
+        chat_id,
+        f"✏️ نام خود را برای صندلی {seat_no} (بدون ریپلای کردن این پیام!) وارد کنید:"
+    )
     g.last_name_prompt_msg_id[uid] = sent_msg.message_id  # ذخیره آیدی پیام
     store.save()
-
 
 
 
@@ -1116,26 +1120,22 @@ async def show_scenario_selection(ctx, chat_id: int, g: GameState):
 
 
 async def newgame(update: Update, ctx):
-    """دستور شروع بازی جدید"""
     chat = update.effective_chat.id
 
     if not ctx.args:
         await update.message.reply_text("Usage: /newgame <seats>")
         return
 
-    # ایجاد بازی جدید
     store.games[chat] = GameState(max_seats=int(ctx.args[0]))
     g = gs(chat)
 
-    # استفاده از کش‌شده‌ی usernames بالا
-    g.user_names = usernames.copy()
+    # 🛠 حتماً این خط باشه
+    g.user_names = load_usernames_from_gist()
 
-    # علامت‌گذاری اینکه این انتخاب سناریو از مرحله اول (قبل از گاد) است
     g.from_startgame = True
     g.awaiting_scenario = True
     store.save()
 
-    # نمایش لیست سناریوها
     await show_scenario_selection(ctx, chat, g)
 
 
