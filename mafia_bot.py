@@ -240,15 +240,16 @@ def seat_keyboard(g: GameState) -> InlineKeyboardMarkup:
 def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("✏️ ثبت نام راوی",   callback_data=BTN_GOD),
-            InlineKeyboardButton("⏰ تغییر ساعت",      callback_data="change_time")
+            InlineKeyboardButton("✏️ ثبت نام راوی", callback_data=BTN_GOD),
+            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
         ],
         [
-            InlineKeyboardButton("❌ حذف بازیکن",       callback_data=BTN_DELETE)
+            InlineKeyboardButton("❌ حذف بازیکن", callback_data=BTN_DELETE),
+            InlineKeyboardButton("🧹 پاکسازی زیر پیام", callback_data="cleanup_below")
         ],
         [
-            InlineKeyboardButton("↩️ لغو ثبت‌نام",      callback_data="cancel_self"),
-            InlineKeyboardButton("✏️ تغییر نام",        callback_data="change_name")
+            InlineKeyboardButton("↩️ لغو ثبت‌نام", callback_data="cancel_self"),
+            InlineKeyboardButton("✏️ تغییر نام", callback_data="change_name")
         ]
     ]
 
@@ -256,7 +257,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     if g.god_id and len(g.seats) == g.max_seats:
         rows.append([
             InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"),
-            InlineKeyboardButton("🔊 صدا زدن",   callback_data=BTN_CALL)
+            InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL)
         ])
 
     return InlineKeyboardMarkup(rows)
@@ -637,6 +638,25 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         store.save()
+        return
+    if data == "cleanup_below":
+        if uid != g.god_id:
+            await q.answer("⚠️ فقط راوی می‌تونه این کار رو انجام بده!", show_alert=True)
+            return
+
+        try:
+            deleted = 0
+            # فقط پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم
+            async for m in ctx.bot.get_chat_history(chat, limit=100):
+                if m.message_id > g.last_seating_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat, m.message_id)
+                        deleted += 1
+                    except:
+                        pass
+            await ctx.bot.send_message(chat, f"✅ {deleted} پیام زیر لیست پاک شد.")
+        except Exception as e:
+            await ctx.bot.send_message(chat, f"❌ خطا در پاکسازی: {e}")
         return
 
     # ────────────────────────────────────────────────────────────
