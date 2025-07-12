@@ -25,6 +25,8 @@ GIST_ID = os.environ.get("GIST_ID")
 GIST_FILENAME = "gistfile1.txt"
 GIST_API_URL = f"https://api.github.com/gists/{GIST_ID}"
 
+
+USERNAMES_FILENAME = "usernames.json" 
 TOKEN = os.environ.get("TOKEN")
 PERSIST_FILE = "mafia_data.pkl"
 SEAT_EMOJI = "👤"; LOCKED_EMOJI = "🔒"; GOD_EMOJI = "👳🏻‍♂️"; START_EMOJI = "🚀"
@@ -157,9 +159,54 @@ def load_scenarios_from_gist():
     except Exception as e:
         print("❌ load_scenarios error:", e)
         return []
+def load_usernames_from_gist():
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        response = httpx.get(url, headers=headers)
+        if response.status_code == 200:
+            gist_data = response.json()
+            content = gist_data["files"].get(USERNAMES_FILENAME, {}).get("content", "{}")
+            return json.loads(content)
+        else:
+            print("❌ user_names gist fetch failed:", response.status_code)
+            return {}
+    except Exception as e:
+        print("❌ load_usernames error:", e)
+        return {}
+
+def save_usernames_to_gist(usernames: dict[int, str]):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        data = {
+            "files": {
+                USERNAMES_FILENAME: {
+                    "content": json.dumps(usernames, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        httpx.patch(url, headers=headers, json=data)
+    except Exception as e:
+        print("❌ save_usernames error:", e)
+
 
 store = Store()
 store.scenarios = load_scenarios_from_gist()
+
+# لود کردن نام‌های کاربران از Gist برای تمام گیم‌ها
+usernames = load_usernames_from_gist()
+for g in store.games.values():
+    g.user_names = usernames
+
+
 
 def gs(chat_id):
     return store.games.setdefault(chat_id, GameState())
@@ -972,8 +1019,10 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         g.seats[seat] = (uid, text)
         g.user_names[uid] = text  # ✅ ذخیره نام بازیکن برای استفاده‌های بعدی
+        save_usernames_to_gist(g.user_names)  # 👈 ذخیره در Gist
         store.save()
         await publish_seating(ctx, chat, g)
+
 
         # حذف پیام قبلی "نام خود را وارد کنید"
         if uid in g.pending_name_msgs:
@@ -1090,9 +1139,11 @@ async def resetgame(update: Update, ctx):
 
     # برگردوندن نام‌ها
     g.user_names = saved_user_names
+    save_usernames_to_gist(g.user_names)  # 👈 این خطو اضافه کن
 
     store.save()
     await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
+
 
 async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
@@ -1295,6 +1346,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         g.seats[seat_no] = (uid, text)
         g.user_names[uid] = text  # ✅ ذخیره نام برای استفاده در آینده
+        save_usernames_to_gist(g.user_names)  # 👈 حتماً اضافه کن
         store.save()
 
         # حذف پیام "✏️ نام خود را برای صندلی X وارد کنید:"
@@ -1309,7 +1361,6 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             del g.last_name_prompt_msg_id[uid]
 
         await publish_seating(ctx, chat_id, g)
-
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
