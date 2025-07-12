@@ -91,6 +91,7 @@ class GameState:
         self.awaiting_name_input = self.awaiting_name_input or {}
         self.last_name_prompt_msg_id = self.last_name_prompt_msg_id or {}
         self.user_names = {}
+        self.selected_defense = []
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -379,29 +380,87 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     back_code = "back_vote_init" if stage == "initial_vote" else "back_vote_final"
     btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data=back_code)])
 
-    title = "🗳 رأی‌گیری اولیه – انتخاب هدف:" \
-            if stage == "initial_vote" else \
-            "🗳 رأی‌گیری نهایی – انتخاب حذف:"
+    title = (
+        "🗳 رأی‌گیری اولیه – انتخاب هدف:" if stage == "initial_vote"
+        else "🗳 رأی‌گیری نهایی – انتخاب حذف:"
+    )
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
-    g.last_vote_msg_id = msg.message_id  # 🧹 ذخیره پیام رأی‌گیری
+    g.last_vote_msg_id = msg.message_id
+    g.vote_start_msg_id = msg.message_id  # ذخیره پیام شروع رأی‌گیری برای شمارش آرا
+    g.vote_start_time = msg.date  # ذخیره زمان شروع رأی‌گیری
     store.save()
-
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
-    await ctx.bot.send_message(
+    g.vote_type = "counting"
+    store.save()
+
+    start_msg = await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> شروع شد! فقط ۵ ثانیه وقت دارید.",
         parse_mode="HTML"
     )
+
+    g.vote_start_msg_id = start_msg.message_id
+    g.vote_start_time = start_msg.date
+    store.save()
+
     await asyncio.sleep(5)
-    await ctx.bot.send_message(
+
+    end_msg = await ctx.bot.send_message(
         chat_id,
         f"🛑 رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> به پایان رسید.",
         parse_mode="HTML"
     )
+
+    g.vote_end_msg_id = end_msg.message_id
+    g.vote_type = None
+    store.save()
+
+
+async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
+    from collections import defaultdict
+    from telegram.constants import MessageEntityType
+
+    tally = defaultdict(int)
+    seen = defaultdict(set)  # {seat: set(user_ids)}
+
+    async for msg in ctx.bot.get_chat_history(chat_id, limit=20):
+        if msg.date < g.vote_start_time:
+            break
+        if msg.message_id <= g.vote_start_msg_id:
+            continue
+        if g.vote_end_msg_id and msg.message_id >= g.vote_end_msg_id:
+            continue
+
+        uid = msg.from_user.id
+        text = (msg.text or '').strip()
+
+        if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
+            continue
+
+        if not msg.reply_to_message:
+            continue
+
+        vote_target = None
+        for s in g.vote_candidates:
+            if msg.reply_to_message.message_id == g.last_vote_msg_id:
+                vote_target = g.current_vote_target
+                break
+
+        if vote_target is None:
+            continue
+
+        if uid in seen[vote_target]:
+            continue
+
+        tally[vote_target] += 1
+        seen[vote_target].add(uid)
+
+    return dict(tally)
+
 import jdatetime
 
 async def announce_winner(ctx, update, g: GameState):
@@ -657,9 +716,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             g.last_vote_msg_id = None
 
+        # 🧮 اگر مرحلهٔ رأی‌گیری اولیه بود، رأی‌ها را بشمار و ذخیره کن
+        if g.vote_stage == "initial_vote":
+            g.tally = await count_votes(ctx, chat, g)
+
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         store.save()
         return
+
+
     if data == "cleanup_below":
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تونه این کار رو انجام بده!", show_alert=True)
@@ -830,27 +895,29 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!", show_alert=True)
             return
-        g.vote_type = "awaiting_defense"
+
+        g.vote_type = "awaiting_defense_threshold"
         store.save()
+
         msg = await ctx.bot.send_message(
             chat,
-            "📢 صندلی‌های دفاع را وارد کنید (مثال: 1 3 5):",
-            reply_markup=ForceReply(selective=True)
+            "🔢 چند رأی برای ورود به دفاعیه لازم است؟ فقط عدد را ارسال کنید.",
+            reply_markup=ForceReply(selective=False)  # نیازی به ریپلای نیست
         )
-        g.defense_prompt_msg_id = msg.message_id  # 👈 این خطو اضافه کن
+        g.defense_prompt_msg_id = msg.message_id
         store.save()
         return
 
     if data == "back_vote_final" and uid == g.god_id:
-        g.phase = "defense_selection"
-        g.vote_type = "awaiting_defense"
+        g.phase = "defense_threshold_input"
+        g.vote_type = "awaiting_defense_threshold"
         store.save()
         msg = await ctx.bot.send_message(
             chat,
-            "↩️ دوباره صندلی‌های دفاع را وارد کنید:",
+            "↩️ لطفاً مجدداً تعداد رأی لازم برای دفاع را وارد کنید:",
             reply_markup=ForceReply(selective=True)
         )
-        g.defense_prompt_msg_id = msg.message_id  
+        g.defense_prompt_msg_id = msg.message_id
         store.save()
         return
 
@@ -862,6 +929,39 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if seat_str.isdigit():
             await handle_vote(ctx, chat, g, int(seat_str))
         return
+
+    if data.startswith("defense_") and uid == g.god_id:
+        seat_str = data.split("_")[1]
+        if seat_str.isdigit():
+            seat = int(seat_str)
+            if seat in g.defense_candidates and seat not in g.defense_seats:
+                g.defense_seats.append(seat)
+                store.save()
+        return
+
+    if data == "defense_done" and uid == g.god_id:
+        # 🧹 حذف پیام انتخاب صندلی دفاع
+        if g.defense_prompt_msg_id:
+            try:
+                await ctx.bot.delete_message(
+                    chat_id=chat,
+                    message_id=g.defense_prompt_msg_id
+                )
+            except:
+                pass
+            g.defense_prompt_msg_id = None
+
+        g.defense_seats = g.selected_defense or []
+        g.selected_defense = []
+        store.save()
+
+        await ctx.bot.send_message(
+            chat,
+            f"✅ صندلی‌های دفاع: {', '.join(map(str, g.defense_seats))}"
+        )
+        await start_vote(ctx, chat, g, "final")
+        return
+
 
 
 
@@ -1059,26 +1159,42 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await publish_seating(ctx, chat, g)
             return
 
-    # -------------- defense seats by God ------------------
-    if g.vote_type == "awaiting_defense" and uid == g.god_id:
-        nums = [int(n) for n in text.split() if n.isdigit() and int(n) in g.seats]
-        g.defense_seats = nums
+    # -------------- defense threshold by God ------------------
+    if g.vote_type == "awaiting_defense_threshold" and uid == g.god_id:
+        try:
+            threshold = int(text.strip())
+        except:
+            await ctx.bot.send_message(chat, "❗ فقط عدد بنویسید (مثلاً: 4)")
+            return
 
-        # 🧹 حذف پیام درخواست صندلی‌های دفاع
-        if g.defense_prompt_msg_id:
-            try:
-                await ctx.bot.delete_message(
-                    chat_id=chat,
-                    message_id=g.defense_prompt_msg_id
-                )
-            except:
-                pass
-            g.defense_prompt_msg_id = None
+        qualified = [s for s, votes in g.tally.items() if len(set(votes)) == threshold]
 
+        if not qualified:
+            await ctx.bot.send_message(chat, f"❗ هیچکس دقیقاً {threshold} رأی نیاورده.")
+            return
+
+        g.defense_candidates = qualified
+        g.vote_type = "awaiting_defense_selection"
+
+        # دکمه‌ها برای انتخاب صندلی دفاع
+        buttons = [
+            [InlineKeyboardButton(f"{s}. {g.seats[s][1]}", callback_data=f"defense_{s}")]
+            for s in qualified
+        ]
+        buttons.append([
+            InlineKeyboardButton("✅ پایان انتخاب", callback_data="defense_done"),
+            InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_final")
+        ])
+
+        msg = await ctx.bot.send_message(
+            chat,
+            f"🛡 صندلی‌هایی با {threshold} رأی:\nلطفاً انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        g.defense_prompt_msg_id = msg.message_id  # ← برای حذف بعد از پایان انتخاب
         store.save()
-        await ctx.bot.send_message(chat, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
-        await start_vote(ctx, chat, g, "final")
         return
+
 
     # -------------- normal seat assignment ----------------
     if uid in g.waiting_name:
