@@ -288,7 +288,7 @@ CTRL  = "controls"   # فقط دکمه‌های کنترلی
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     """متن لیست صندلی‌ها را با اطلاعات سناریو به‌روز می‌کند"""
     today = jdatetime.date.today().strftime("%Y/%m/%d")
-    header = f"📅 {today} \n  ⏰ {g.event_time or '---'}\n"
+    header = f"📅 {today} \n⏰ {g.event_time or '---'}\n"
     
     # اطلاعات سناریو اگر وجود دارد
     scenario_info = ""
