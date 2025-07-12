@@ -877,11 +877,20 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, f"⚠️ شمارهٔ صندلی معتبر نیست (بین 1 تا {g.max_seats}).")
         return
 
+    # ✅ اگر اسم کاربر ذخیره شده بود، مستقیم ثبت‌نام کن
+    if uid in g.user_names:
+        g.seats[seat] = (uid, g.user_names[uid])
+        store.save()
+        await publish_seating(ctx, chat, g)
+        return
+
+    # در غیر این صورت، منتظر اسم باش
     g.awaiting_players.add(uid)
     g.awaiting_seat[uid] = seat
     store.save()
 
     await ctx.bot.send_message(chat, f"👤 لطفاً نام خود را برای صندلی {seat} وارد کنید:")
+
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
