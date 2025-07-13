@@ -424,10 +424,10 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     ]
 
     count = len(set(valid_votes))
-    await ctx.bot.send_message(
-        chat_id,
-        f"📊 صندلی {target_seat} مجموعاً {count} رأی معتبر دریافت کرد."
-    )
+    #await ctx.bot.send_message(
+        #chat_id,
+        #f"📊 صندلی {target_seat} مجموعاً {count} رأی معتبر دریافت کرد."
+   # )
 
     g.tally[target_seat] = list(set(valid_votes))
 
@@ -723,19 +723,20 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.tally = await count_votes(ctx, chat, g)
 
             # 🔍 نمایش tally در تلگرام برای تست
-            if g.tally:
-                debug_msg = "📊 شمارش آرا:\n" + "\n".join([
-                    f"• صندلی {s}: {len(set(votes))} رأی"
-                    for s, votes in g.tally.items()
-                ])
-            else:
-                debug_msg = "⚠️ هیچ رأیی ثبت نشده!"
+            debug_lines = ["📊 شمارش آرا:"]
+            for seat in g.seats:
+                if seat in g.tally:
+                    count = len(set(g.tally[seat]))
+                else:
+                    count = 0
+                debug_lines.append(f"• صندلی {seat}: {count} رأی")
 
-            await ctx.bot.send_message(chat, debug_msg)
+            await ctx.bot.send_message(chat, "\n".join(debug_lines))
 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         store.save()
         return
+
 
     if data == "cleanup_below":
         if uid != g.god_id:
