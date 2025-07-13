@@ -422,7 +422,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     store.save()
 
 
-from collections import defaultdict
 
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     from collections import defaultdict
@@ -1101,10 +1100,16 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if g.vote_type == "counting":
         g.vote_messages.append({
             "uid": msg.from_user.id,
-            "text": (msg.text or "").strip(),
+            "text": (msg.text or "").strip()
         })
         store.save()
-        return  # 👈 چون رأی بوده، بقیهٔ شرط‌ها اجرا نشن
+
+        await ctx.bot.send_message(
+            chat,
+            f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {(msg.text or '').strip()}"
+        )
+        return
+
 
     # ─────────────────────────────────────────────────────────────
     # 1) راوی نام خود را وارد می‌کند
