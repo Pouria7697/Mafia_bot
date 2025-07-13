@@ -389,7 +389,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.last_vote_msg_id = msg.message_id
     g.vote_start_msg_id = msg.message_id
     g.vote_start_time = datetime.now(timezone.utc)
-    g.vote_messages = []  # 🆕 برای ذخیره پیام‌های رأی‌گیری
+    g.vote_messages = []
     store.save()
 
 
@@ -418,19 +418,18 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
 
     # 📊 نمایش تعداد آرا برای این صندلی
-    count = len(set([
+    valid_votes = [
         v["uid"] for v in g.vote_messages
         if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
-    ]))
+    ]
+
+    count = len(set(valid_votes))
     await ctx.bot.send_message(
         chat_id,
         f"📊 صندلی {target_seat} مجموعاً {count} رأی معتبر دریافت کرد."
     )
 
-    g.tally[target_seat] = [
-        v["uid"] for v in g.vote_messages
-        if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
-    ]
+    g.tally[target_seat] = list(set(valid_votes))
 
     g.vote_end_msg_id = end_msg.message_id
     g.vote_type = None
@@ -440,11 +439,11 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     from collections import defaultdict
 
-    tally = defaultdict(set)  # {seat_no: set(user_ids)}
+    tally = defaultdict(set)
 
     for msg in g.vote_messages:
-        uid    = msg["uid"]
-        text   = msg["text"]
+        uid = msg["uid"]
+        text = msg["text"]
         target = msg.get("target")
 
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
@@ -456,9 +455,12 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
 
         tally[target].add(uid)
 
-    g.tally = {seat: list(voters) for seat, voters in tally.items()}
+    for seat in tally:
+        g.tally[seat] = list(tally[seat])
+
     store.save()
     return g.tally
+
 
 
 import jdatetime
@@ -1162,7 +1164,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         qualified = [s for s, votes in g.tally.items() if len(set(votes)) >= threshold]
 
         if not qualified:
-            await ctx.bot.send_message(chat, f"❗ هیچکس دقیقاً {threshold} رأی نیاورده.")
+            await ctx.bot.send_message(chat, f"❗ هیچکس حداقل {threshold} رأی نیاورده.")
             return
 
         g.defense_seats = qualified         # ✅ این‌ها میرن رأی‌گیری نهایی
