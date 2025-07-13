@@ -426,22 +426,22 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     from collections import defaultdict
 
-    tally = defaultdict(set)  # ← استفاده از set برای جلوگیری از رأی تکراری
+    tally = defaultdict(set)
 
     for msg in g.vote_messages:
-        uid      = msg["uid"]
-        text     = msg["text"]
-         # فقط رأی‌های معتبر را در نظر بگیر
+        uid = msg["uid"]
+        text = msg["text"]
+        target = msg.get("target")
+
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
             continue
-
-        # از ثبت رأی تکراری جلوگیری کن
-        if uid in tally[g.current_vote_target]:
+        if not target:
+            continue
+        if uid in tally[target]:
             continue
 
-        tally[g.current_vote_target].add(uid)
+        tally[target].add(uid)
 
-    # تبدیل به لیست برای ذخیره‌سازی
     g.tally = {k: list(v) for k, v in tally.items()}
     store.save()
     return g.tally
@@ -1052,14 +1052,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = msg.chat.id
     g = gs(chat)
 
- 
-    if g.god_id == uid:
-        await ctx.bot.send_message(
-            chat,
-            f"📥 پیام شما دریافت شد. (vote_type = {g.vote_type})"
-        )
-
-
     # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
     #if g.vote_type == "counting":
        # g.vote_messages.append({
@@ -1154,7 +1146,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "❗ فقط عدد بنویسید (مثلاً: 4)")
             return
 
-        qualified = [s for s, votes in g.tally.items() if len(set(votes)) == threshold]
+        qualified = [s for s, votes in g.tally.items() if len(set(votes)) >= threshold]
 
         if not qualified:
             await ctx.bot.send_message(chat, f"❗ هیچکس دقیقاً {threshold} رأی نیاورده.")
@@ -1527,15 +1519,12 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if g.vote_type == "counting":
         g.vote_messages.append({
             "uid": uid,
-            "text": text
+            "text": text,
+            "target": g.current_vote_target  # 👈 مشخص کردن هدف رأی
         })
         store.save()
+        return  # بدون ارسال پیام
 
-        await ctx.bot.send_message(
-            chat_id,
-            f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {text}"
-        )
-        return
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
