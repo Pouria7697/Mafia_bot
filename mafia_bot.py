@@ -388,7 +388,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.last_vote_msg_id = msg.message_id
     g.vote_start_msg_id = msg.message_id  # ذخیره پیام شروع رأی‌گیری برای شمارش آرا
-    g.vote_start_time = datetime.now(datetime.timezone.utc)
+    g.vote_start_time = datetime.now(timezone.utc)
     g.vote_messages = []  # 🆕 برای ذخیره پیام‌های رأی‌گیری
     store.save()
 
@@ -422,32 +422,29 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     store.save()
 
 
-async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
-    from collections import defaultdict
+from collections import defaultdict
 
-    tally = defaultdict(list)
-    seen = defaultdict(set)
+async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
+    tally = defaultdict(set)  # ← اینجا به جای int از set استفاده می‌کنیم
 
     for msg in g.vote_messages:
-        uid = msg.from_user.id
-        text = (msg.text or '').strip()
+        uid = msg["uid"]
+        text = msg["text"]
+        reply_id = msg["reply_to"]
 
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
             continue
-
-        vote_target = g.current_vote_target
-        if vote_target is None:
+        if reply_id != g.last_vote_msg_id:
             continue
+        if uid in tally[g.current_vote_target]:
+            continue  # تکراریه
 
-        if uid in seen[vote_target]:
-            continue
+        tally[g.current_vote_target].add(uid)
 
-        tally[vote_target].append(uid)
-        seen[vote_target].add(uid)
-
-    g.tally = dict(tally)
+    g.tally = {k: list(v) for k, v in tally.items()}  # ← تبدیل به لیست برای ذخیره
     store.save()
     return g.tally
+
 
 import jdatetime
 
