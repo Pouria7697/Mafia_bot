@@ -1080,6 +1080,12 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     print("🔍 g.vote_type =", g.vote_type)
     print("🔍 g.god_id =", g.god_id, " | uid =", uid)
 
+    if g.god_id == uid:
+        await ctx.bot.send_message(
+            chat,
+            f"📥 پیام شما دریافت شد. (vote_type = {g.vote_type})"
+        )
+
 
     # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
     if g.vote_type == "counting":
@@ -1553,44 +1559,52 @@ async def main():
 
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame))
-    app.add_handler(
-        MessageHandler(
-            filters.Regex(r"^/\d+(@PouriaMafiaBot)?$")
-            & filters.ChatType.GROUPS,
-            handle_simple_seat_command
-        )
-    )
     app.add_handler(CommandHandler("resetgame", resetgame))
     app.add_handler(CommandHandler("addscenario", addscenario))
     app.add_handler(CommandHandler("listscenarios", list_scenarios))
     app.add_handler(CommandHandler("removescenario", remove_scenario))
     app.add_handler(CommandHandler("add", add_seat_cmd))
     app.add_handler(CommandHandler("god", transfer_god_cmd))
-    app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(
-        MessageHandler(
-            filters.COMMAND & filters.Regex(r"^/\d+s$"),
-            dynamic_timer
-        )
-    )
-    app.add_handler(
-        MessageHandler(
-            filters.REPLY
-            & filters.TEXT
-            & filters.Regex(r"^\d+$"),
-            auto_register_reply
-        )
-    )
+
+    # 👥 هندلر ریپلای‌های متنی (اول name_reply باشه)
     app.add_handler(
         MessageHandler(
             filters.REPLY & filters.TEXT,
             name_reply
         )
     )
+
+    app.add_handler(
+        MessageHandler(
+            filters.REPLY & filters.TEXT & filters.Regex(r"^\d+$"),
+            auto_register_reply
+        )
+    )
+
+    # 🧑‍💻 ریپلای‌های مستقیم بدون ریپلای
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.REPLY,
             handle_direct_name_input
+        )
+    )
+
+    # 🎮 دکمه‌ها و رای‌گیری
+    app.add_handler(CallbackQueryHandler(callback_router))
+
+    # 🪑 انتخاب صندلی با دستور مثل /3
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^/\d+(@PouriaMafiaBot)?$") & filters.ChatType.GROUPS,
+            handle_simple_seat_command
+        )
+    )
+
+    # ⏱ تایمر پویا مثل /3s
+    app.add_handler(
+        MessageHandler(
+            filters.COMMAND & filters.Regex(r"^/\d+s$"),
+            dynamic_timer
         )
     )
 
