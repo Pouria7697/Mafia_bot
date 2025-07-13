@@ -1339,6 +1339,9 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ صندلی {seat} با نام '{name}' به لیست اضافه شد.")
 
+    # 🖥 به‌روزرسانی لیست صندلی‌ها
+    await publish_seating(ctx, chat, g)
+
 async def addscenario(update: Update, ctx):
     """/addscenario <name> role1:n1 role2:n2 ..."""
     if len(ctx.args) < 2:
@@ -1360,47 +1363,6 @@ async def addscenario(update: Update, ctx):
     await update.message.reply_text(f"✅ Scenario '{name}' added with roles: {roles}")
 
 
-async def addseat(update: Update, ctx):
-    """
-    God replies to a user's message → /add <seatNo>
-    """
-    chat = update.effective_chat.id
-    g = gs(chat)
-    uid = update.effective_user.id
-
-    if uid != g.god_id:
-        await update.message.reply_text("❌ Only God can use this command.")
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text("❌ Reply to the player's message then /add <seat>")
-        return
-
-    if len(ctx.args) != 1 or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: /add <seatNo>")
-        return
-
-    seat = int(ctx.args[0])
-    if not (1 <= seat <= g.max_seats):
-        await update.message.reply_text("❌ Seat out of range")
-        return
-
-    if seat in g.seats:
-        await update.message.reply_text("❌ Seat already taken")
-        return
-
-    target = update.message.reply_to_message.from_user
-    if target.id in [u for u, _ in g.seats.values()]:
-        await update.message.reply_text("❌ Player already seated")
-        return
-
-    g.awaiting_name_input[target.id] = seat
-    sent_msg = await ctx.bot.send_message(
-        chat,
-        f"✏️ لطفاً نام خود را برای صندلی {seat} وارد کنید:"
-    )
-    g.last_name_prompt_msg_id[target.id] = sent_msg.message_id
-    store.save()
 
 async def list_scenarios(update: Update, ctx):
     store.scenarios = load_scenarios_from_gist()  # 👈 بارگذاری از Gist
@@ -1468,6 +1430,14 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     g = gs(chat)
 
+    # ✅ فقط ادمین‌ها یا گاد فعلی اجازه تغییر گاد دارند
+    admins = await ctx.bot.get_chat_administrators(chat)
+    admin_ids = {admin.user.id for admin in admins}
+    is_current_god = update.effective_user.id == g.god_id
+    if update.effective_user.id not in admin_ids and not is_current_god:
+        await update.message.reply_text("❌ فقط ادمین‌های گروه یا گاد فعلی می‌تونن گاد رو عوض کنن.")
+        return
+
     if not update.message.reply_to_message:
         await update.message.reply_text("❌ لطفاً روی پیام کسی ریپلای کنید و بعد /god را بزنید.")
         return
@@ -1478,6 +1448,9 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     store.save()
 
     await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_god.full_name}.")
+
+    # 📢 نمایش لیست صندلی‌های به‌روز شده
+    await publish_seating(ctx, chat, g)
 
     # 🔒 فقط وقتی بازی شروع شده پیام خصوصی بفرست
     if g.phase != "idle":
