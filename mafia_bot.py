@@ -1144,15 +1144,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g)
         return
 
-    # -------------- God replies with /add -----------------
-    if uid == g.god_id and msg.reply_to_message:
-        target_uid = msg.reply_to_message.from_user.id
-        if target_uid in g.waiting_name_proxy:
-            seat = g.waiting_name_proxy.pop(target_uid)
-            g.seats[seat] = (target_uid, text)
-            store.save()
-            await publish_seating(ctx, chat, g)
-            return
 
     # -------------- defense threshold by God ------------------
     if g.vote_type == "awaiting_defense_threshold" and uid == g.god_id:
@@ -1322,22 +1313,31 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
         await update.message.reply_text("Usage: /add <seat>")
         return
+
     seat = int(ctx.args[0])
     uid = update.effective_user.id
     chat = update.effective_chat.id
     g = gs(chat)
+
     if uid != g.god_id:
         return
+
     if seat in g.seats:
         await update.message.reply_text("❌ Seat already taken.")
         return
+
     if not update.message.reply_to_message:
         await update.message.reply_text("❌ Use this command by replying to a message from the user you want to add.")
         return
+
     target_uid = update.message.reply_to_message.from_user.id
-    g.waiting_name_proxy[target_uid] = seat
+
+    # 🧠 بررسی نام ذخیره‌شده در gist
+    name = g.user_names.get(target_uid, "ناشناس")
+    g.seats[seat] = (target_uid, name)
     store.save()
-    await update.message.reply_text(f"👤 لطفا اسم شخص مورد نظر را روی پیام خود شخص ریپلای کنید {seat}:", reply_markup=ForceReply(selective=True))
+
+    await update.message.reply_text(f"✅ صندلی {seat} با نام '{name}' به لیست اضافه شد.")
 
 async def addscenario(update: Update, ctx):
     """/addscenario <name> role1:n1 role2:n2 ..."""
