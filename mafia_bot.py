@@ -703,8 +703,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done" and uid == g.god_id:
         # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
-    if data == "vote_done" and uid == g.god_id:
-        # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
         if g.last_vote_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
