@@ -387,7 +387,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.last_vote_msg_id = msg.message_id
-    g.vote_start_msg_id = msg.message_id  # ذخیره پیام شروع رأی‌گیری برای شمارش آرا
+    g.vote_start_msg_id = msg.message_id
     g.vote_start_time = datetime.now(timezone.utc)
     g.vote_messages = []  # 🆕 برای ذخیره پیام‌های رأی‌گیری
     store.save()
@@ -406,7 +406,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
 
     g.vote_start_msg_id = start_msg.message_id
-    g.vote_start_time = datetime.now(timezone.utc)  # ✅ این خط اصلاح شده
+    g.vote_start_time = datetime.now(timezone.utc)
     store.save()
 
     await asyncio.sleep(5)
@@ -417,10 +417,24 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         parse_mode="HTML"
     )
 
+    # 📊 نمایش تعداد آرا برای این صندلی
+    count = len(set([
+        v["uid"] for v in g.vote_messages
+        if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
+    ]))
+    await ctx.bot.send_message(
+        chat_id,
+        f"📊 صندلی {target_seat} مجموعاً {count} رأی معتبر دریافت کرد."
+    )
+
+    g.tally[target_seat] = [
+        v["uid"] for v in g.vote_messages
+        if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
+    ]
+
     g.vote_end_msg_id = end_msg.message_id
     g.vote_type = None
     store.save()
-
 
 
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
@@ -434,11 +448,11 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
         target = msg.get("target")
 
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
-            continue  # رأی معتبر نیست
+            continue
         if target is None:
-            continue  # صندلی هدف مشخص نیست
+            continue
         if uid in tally[target]:
-            continue  # رأی تکراری برای این صندلی
+            continue
 
         tally[target].add(uid)
 
