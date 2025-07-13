@@ -927,39 +927,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_vote(ctx, chat, g, int(seat_str))
         return
 
-    if data.startswith("defense_") and uid == g.god_id:
-        seat_str = data.split("_")[1]
-        if seat_str.isdigit():
-            seat = int(seat_str)
-            if seat in g.defense_candidates and seat not in g.defense_seats:
-                g.defense_seats.append(seat)
-                store.save()
-        return
-
-    if data == "defense_done" and uid == g.god_id:
-        # 🧹 حذف پیام انتخاب صندلی دفاع
-        if g.defense_prompt_msg_id:
-            try:
-                await ctx.bot.delete_message(
-                    chat_id=chat,
-                    message_id=g.defense_prompt_msg_id
-                )
-            except:
-                pass
-            g.defense_prompt_msg_id = None
-
-        g.defense_seats = g.selected_defense or []
-        g.selected_defense = []
-        store.save()
-
-        await ctx.bot.send_message(
-            chat,
-            f"✅ صندلی‌های دفاع: {', '.join(map(str, g.defense_seats))}"
-        )
-        await start_vote(ctx, chat, g, "final")
-        return
-
-
 
 
 async def shuffle_and_assign(ctx, chat_id: int, g: GameState):
@@ -1193,25 +1160,16 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, f"❗ هیچکس دقیقاً {threshold} رأی نیاورده.")
             return
 
-        g.defense_candidates = qualified
-        g.vote_type = "awaiting_defense_selection"
+        g.defense_seats = qualified         # ✅ این‌ها میرن رأی‌گیری نهایی
+        g.selected_defense = []             # ✅ مطمئن شو چیزی از قبل نمونده
+        g.vote_type = None
 
-        # دکمه‌ها برای انتخاب صندلی دفاع
-        buttons = [
-            [InlineKeyboardButton(f"{s}. {g.seats[s][1]}", callback_data=f"defense_{s}")]
-            for s in qualified
-        ]
-        buttons.append([
-            InlineKeyboardButton("✅ پایان انتخاب", callback_data="defense_done"),
-            InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_final")
-        ])
-
-        msg = await ctx.bot.send_message(
+        await ctx.bot.send_message(
             chat,
-            f"🛡 صندلی‌هایی با {threshold} رأی:\nلطفاً انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            f"🛡 صندلی‌هایی با {threshold} رأی: {', '.join(map(str, qualified))}"
         )
-        g.defense_prompt_msg_id = msg.message_id  # ← برای حذف بعد از پایان انتخاب
+
+        await start_vote(ctx, chat, g, "final")
         store.save()
         return
 
