@@ -423,7 +423,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     # 📊 نمایش تعداد آرا برای این صندلی
     valid_votes = [
         v["uid"] for v in g.vote_messages_by_seat[target_seat]
-        if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
+        if v.get("target") == target_seat and v["text"] in {".","..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
     ]
 
     count = len(set(valid_votes))
@@ -450,7 +450,7 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
             text = msg["text"]
 
             if text not in {
-                "..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"
+                ".", "..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"
             }:
                 continue
 
