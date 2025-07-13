@@ -432,14 +432,8 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     for msg in g.vote_messages:
         uid      = msg["uid"]
         text     = msg["text"]
-        reply_id = msg["reply_to"]
-
-        # فقط رأی‌های معتبر را در نظر بگیر
+         # فقط رأی‌های معتبر را در نظر بگیر
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
-            continue
-
-        # فقط پیام‌هایی که به پیام رأی‌گیری ریپلای شدن
-        if reply_id != g.last_vote_msg_id:
             continue
 
         # از ثبت رأی تکراری جلوگیری کن
@@ -1108,7 +1102,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.vote_messages.append({
             "uid": msg.from_user.id,
             "text": (msg.text or "").strip(),
-            "reply_to": msg.reply_to_message.message_id if msg.reply_to_message else None
         })
         store.save()
         return  # 👈 چون رأی بوده، بقیهٔ شرط‌ها اجرا نشن
