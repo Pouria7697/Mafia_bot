@@ -425,25 +425,34 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 from collections import defaultdict
 
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
-    tally = defaultdict(set)  # ← اینجا به جای int از set استفاده می‌کنیم
+    from collections import defaultdict
+
+    tally = defaultdict(set)  # ← استفاده از set برای جلوگیری از رأی تکراری
 
     for msg in g.vote_messages:
-        uid = msg["uid"]
-        text = msg["text"]
+        uid      = msg["uid"]
+        text     = msg["text"]
         reply_id = msg["reply_to"]
 
+        # فقط رأی‌های معتبر را در نظر بگیر
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
             continue
+
+        # فقط پیام‌هایی که به پیام رأی‌گیری ریپلای شدن
         if reply_id != g.last_vote_msg_id:
             continue
+
+        # از ثبت رأی تکراری جلوگیری کن
         if uid in tally[g.current_vote_target]:
-            continue  # تکراریه
+            continue
 
         tally[g.current_vote_target].add(uid)
 
-    g.tally = {k: list(v) for k, v in tally.items()}  # ← تبدیل به لیست برای ذخیره
+    # تبدیل به لیست برای ذخیره‌سازی
+    g.tally = {k: list(v) for k, v in tally.items()}
     store.save()
     return g.tally
+
 
 
 import jdatetime
@@ -694,6 +703,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done" and uid == g.god_id:
         # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
+    if data == "vote_done" and uid == g.god_id:
+        # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
         if g.last_vote_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
@@ -705,10 +716,20 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if g.vote_stage == "initial_vote":
             g.tally = await count_votes(ctx, chat, g)
 
+            # 🔍 نمایش tally در تلگرام برای تست
+            if g.tally:
+                debug_msg = "📊 شمارش آرا:\n" + "\n".join([
+                    f"• صندلی {s}: {len(set(votes))} رأی"
+                    for s, votes in g.tally.items()
+                ])
+            else:
+                debug_msg = "⚠️ هیچ رأیی ثبت نشده!"
+
+            await ctx.bot.send_message(chat, debug_msg)
+
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         store.save()
         return
-
 
     if data == "cleanup_below":
         if uid != g.god_id:
@@ -1569,6 +1590,13 @@ async def main():
     app.add_handler(CommandHandler("removescenario", remove_scenario))
     app.add_handler(CommandHandler("add", add_seat_cmd))
     app.add_handler(CommandHandler("god", transfer_god_cmd))
+    # ⏱ تایمر پویا مثل /3s
+    app.add_handler(
+        MessageHandler(
+            filters.COMMAND & filters.Regex(r"^/\d+s$"),
+            dynamic_timer
+        )
+    )
 
     # 👥 هندلر ریپلای‌های متنی (اول name_reply باشه)
     app.add_handler(
@@ -1597,13 +1625,6 @@ async def main():
     app.add_handler(CallbackQueryHandler(callback_router))
 
 
-    # ⏱ تایمر پویا مثل /3s
-    app.add_handler(
-        MessageHandler(
-            filters.COMMAND & filters.Regex(r"^/\d+s$"),
-            dynamic_timer
-        )
-    )
 
        
     # ✅ initialize application
