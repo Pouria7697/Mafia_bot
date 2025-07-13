@@ -1165,7 +1165,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         # 🧹 حذف پیام سوال رأی لازم برای دفاع
-        if hasattr(g, "defense_prompt_msg_id"):
             try:
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.defense_prompt_msg_id)
             except:
