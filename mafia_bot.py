@@ -919,7 +919,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         msg = await ctx.bot.send_message(
             chat,
-            "🔢 چند رأی برای ورود به دفاعیه لازم است؟ فقط عدد را ارسال کنید.",
+            "🔢 چند رأی برای ورود به دفاعیه لازم است؟ فقط عدد را ریپلای کنید.",
             reply_markup=ForceReply(selective=True)  # نیازی به ریپلای نیست
         )
         g.defense_prompt_msg_id = msg.message_id
@@ -932,7 +932,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         msg = await ctx.bot.send_message(
             chat,
-            "↩️ لطفاً مجدداً تعداد رأی لازم برای دفاع را وارد کنید:",
+            "↩️ لطفاً مجدداً تعداد رأی لازم برای دفاع را ریپلای کنید:",
             reply_markup=ForceReply(selective=True)
         )
         g.defense_prompt_msg_id = msg.message_id
