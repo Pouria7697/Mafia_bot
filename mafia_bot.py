@@ -14,6 +14,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
+from collections import defaultdict
 # --- CALLBACK DATA CONSTANTS ---
 BTN_GOD     = "register_god"     # ← دکمه «✏️ ثبت نام راوی»
 BTN_PLAYER  = "player_name"      # ← دکمه «🙋‍♂️ ثبت نام بازیکن»
@@ -390,13 +391,15 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_start_msg_id = msg.message_id
     g.vote_start_time = datetime.now(timezone.utc)
     g.vote_messages = []
+    g.vote_messages_by_seat = defaultdict(list)  # 🆕 ذخیرهٔ جدا برای هر صندلی
+
     store.save()
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
     g.vote_type = "counting"
-    g.vote_messages = []
+    g.vote_messages_by_seat[target_seat] = []
     store.save()
 
     start_msg = await ctx.bot.send_message(
@@ -419,7 +422,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     # 📊 نمایش تعداد آرا برای این صندلی
     valid_votes = [
-        v["uid"] for v in g.vote_messages
+        v["uid"] for v in g.vote_messages_by_seat[target_seat]
         if v.get("target") == target_seat and v["text"] in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
     ]
 
@@ -441,19 +444,21 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
 
     tally = defaultdict(set)
 
-    for msg in g.vote_messages:
-        uid = msg["uid"]
-        text = msg["text"]
-        target = msg.get("target")
+    for seat, msgs in g.vote_messages_by_seat.items():
+        for msg in msgs:
+            uid  = msg["uid"]
+            text = msg["text"]
 
-        if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
-            continue
-        if target is None:
-            continue
-        if uid in tally[target]:
-            continue
+            if text not in {
+                "..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"
+            }:
+                continue
 
-        tally[target].add(uid)
+            if uid in tally[seat]:
+                continue
+
+            tally[seat].add(uid)
+
 
     for seat in tally:
         g.tally[seat] = list(tally[seat])
@@ -915,7 +920,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = await ctx.bot.send_message(
             chat,
             "🔢 چند رأی برای ورود به دفاعیه لازم است؟ فقط عدد را ارسال کنید.",
-            reply_markup=ForceReply(selective=False)  # نیازی به ریپلای نیست
+            reply_markup=ForceReply(selective=True)  # نیازی به ریپلای نیست
         )
         g.defense_prompt_msg_id = msg.message_id
         store.save()
@@ -1156,11 +1161,19 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         qualified = [s for s, votes in g.tally.items() if len(set(votes)) >= threshold]
 
         if not qualified:
-            await ctx.bot.send_message(chat, f"❗ هیچکس حداقل {threshold} رأی نیاورده.")
+            await ctx.bot.send_message(chat, f"❗ هیچکس {threshold} رأی یا بیشتر نیاورده.")
             return
 
-        g.defense_seats = qualified         # ✅ این‌ها میرن رأی‌گیری نهایی
-        g.selected_defense = []             # ✅ مطمئن شو چیزی از قبل نمونده
+        # 🧹 حذف پیام سوال رأی لازم برای دفاع
+        if hasattr(g, "defense_prompt_msg_id"):
+            try:
+                await ctx.bot.delete_message(chat_id=chat, message_id=g.defense_prompt_msg_id)
+            except:
+                pass
+            g.defense_prompt_msg_id = None
+
+        g.defense_seats = qualified
+        g.selected_defense = []
         g.vote_type = None
 
         await ctx.bot.send_message(
@@ -1449,8 +1462,9 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_god.full_name}.")
 
-    # 📢 نمایش لیست صندلی‌های به‌روز شده
-    await publish_seating(ctx, chat, g)
+    # 📢 نمایش لیست صندلی‌های به‌روز شده (با حالت مناسب)
+    mode = CTRL if g.phase != "idle" else REG
+    await publish_seating(ctx, chat, g, mode=mode)
 
     # 🔒 فقط وقتی بازی شروع شده پیام خصوصی بفرست
     if g.phase != "idle":
@@ -1466,6 +1480,7 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except telegram.error.Forbidden:
             await update.message.reply_text("⚠️ نتونستم نقش‌ها رو به پیوی گاد جدید بفرستم.")
+
 
 async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -1506,7 +1521,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     # ثبت رأی در حالت counting
     if g.vote_type == "counting":
-        g.vote_messages.append({
+        g.vote_messages_by_seat[g.current_vote_target].append({
             "uid": uid,
             "text": text,
             "target": g.current_vote_target  # 👈 مشخص کردن هدف رأی
