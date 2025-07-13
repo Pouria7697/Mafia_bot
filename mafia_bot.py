@@ -1559,6 +1559,13 @@ async def main():
 
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame))
+    # 🪑 انتخاب صندلی با دستور مثل /3
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^/\d+(@PouriaMafiaBot)?$") & filters.ChatType.GROUPS,
+            handle_simple_seat_command
+        )
+    )
     app.add_handler(CommandHandler("resetgame", resetgame))
     app.add_handler(CommandHandler("addscenario", addscenario))
     app.add_handler(CommandHandler("listscenarios", list_scenarios))
@@ -1592,13 +1599,6 @@ async def main():
     # 🎮 دکمه‌ها و رای‌گیری
     app.add_handler(CallbackQueryHandler(callback_router))
 
-    # 🪑 انتخاب صندلی با دستور مثل /3
-    app.add_handler(
-        MessageHandler(
-            filters.Regex(r"^/\d+(@PouriaMafiaBot)?$") & filters.ChatType.GROUPS,
-            handle_simple_seat_command
-        )
-    )
 
     # ⏱ تایمر پویا مثل /3s
     app.add_handler(
