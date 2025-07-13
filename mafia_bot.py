@@ -426,26 +426,25 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     from collections import defaultdict
 
-    tally = defaultdict(set)
+    tally = defaultdict(set)  # {seat_no: set(user_ids)}
 
     for msg in g.vote_messages:
-        uid = msg["uid"]
-        text = msg["text"]
+        uid    = msg["uid"]
+        text   = msg["text"]
         target = msg.get("target")
 
         if text not in {"..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}:
-            continue
-        if not target:
-            continue
+            continue  # رأی معتبر نیست
+        if target is None:
+            continue  # صندلی هدف مشخص نیست
         if uid in tally[target]:
-            continue
+            continue  # رأی تکراری برای این صندلی
 
         tally[target].add(uid)
 
-    g.tally = {k: list(v) for k, v in tally.items()}
+    g.tally = {seat: list(voters) for seat, voters in tally.items()}
     store.save()
     return g.tally
-
 
 
 import jdatetime
