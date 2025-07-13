@@ -1085,10 +1085,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = msg.chat.id
     g = gs(chat)
 
-    print("✉️ name_reply received:", text)
-    print("🔍 g.vote_type =", g.vote_type)
-    print("🔍 g.god_id =", g.god_id, " | uid =", uid)
-
+ 
     if g.god_id == uid:
         await ctx.bot.send_message(
             chat,
@@ -1097,18 +1094,18 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
     # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
-    if g.vote_type == "counting":
-        g.vote_messages.append({
-            "uid": msg.from_user.id,
-            "text": (msg.text or "").strip()
-        })
-        store.save()
+    #if g.vote_type == "counting":
+       # g.vote_messages.append({
+        #    "uid": msg.from_user.id,
+         #   "text": (msg.text or "").strip()
+        #})
+        #store.save()
 
-        await ctx.bot.send_message(
-            chat,
-            f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {(msg.text or '').strip()}"
-        )
-        return
+        #await ctx.bot.send_message(
+         #   chat,
+          #  f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {(msg.text or '').strip()}"
+        #)
+        #return
 
 
     # ─────────────────────────────────────────────────────────────
@@ -1541,21 +1538,20 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     g = gs(chat_id)
     text = msg.text.strip()
 
+    # ثبت نام برای صندلی
     if uid in g.awaiting_name_input:
         seat_no = g.awaiting_name_input.pop(uid)
-        
-        # بررسی نام فارسی
+
         import re
         if not re.match(r'^[\u0600-\u06FF\s]+$', text):
             await ctx.bot.send_message(chat_id, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید.")
             return
 
         g.seats[seat_no] = (uid, text)
-        g.user_names[uid] = text  # ✅ ذخیره نام برای استفاده در آینده
-        save_usernames_to_gist(g.user_names)  # 👈 حتماً اضافه کن
+        g.user_names[uid] = text
+        save_usernames_to_gist(g.user_names)
         store.save()
 
-        # حذف پیام "✏️ نام خود را برای صندلی X وارد کنید:"
         if uid in g.last_name_prompt_msg_id:
             try:
                 await ctx.bot.delete_message(
@@ -1563,10 +1559,25 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     message_id=g.last_name_prompt_msg_id[uid]
                 )
             except:
-                pass  # اگر پیام قبلاً حذف شده، خطا نده
+                pass
             del g.last_name_prompt_msg_id[uid]
 
         await publish_seating(ctx, chat_id, g)
+        return  # 👈 چون کار ثبت‌نام انجام شده، بقیه اجرا نشه
+
+    # ثبت رأی در حالت counting
+    if g.vote_type == "counting":
+        g.vote_messages.append({
+            "uid": uid,
+            "text": text
+        })
+        store.save()
+
+        await ctx.bot.send_message(
+            chat_id,
+            f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {text}"
+        )
+        return
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
