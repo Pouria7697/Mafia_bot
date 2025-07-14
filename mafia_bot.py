@@ -289,15 +289,13 @@ CTRL  = "controls"   # فقط دکمه‌های کنترلی
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
-    """متن لیست صندلی‌ها را با اطلاعات سناریو به‌روز می‌کند"""
+    """متن لیست صندلی‌ها را با استایل جدید و ایموجی‌ها به‌روز می‌کند"""
+
     today = jdatetime.date.today().strftime("%Y/%m/%d")
     header = f"📅 {today} \n⏰ {g.event_time or '---'}\n"
-    
-    # اطلاعات سناریو اگر وجود دارد
-    scenario_info = ""
-    if g.scenario:
-        scenario_info = f"🎭 سناریو: {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر\n"
-    
+
+    emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓"]
+
     # گرفتن آیدی یا لینک گروه
     group_id_or_link = f"🆔 {chat_id}"
     if ctx.bot.username and chat_id < 0:
@@ -305,37 +303,43 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
             chat_obj = await ctx.bot.get_chat(chat_id)
             if chat_obj.username:
                 group_id_or_link = f"🔗 <a href='https://t.me/{chat_obj.username}'>{chat_obj.title}</a>"
+            else:
+                group_id_or_link = f"🔒 {chat_obj.title}"
         except:
             pass
 
     lines = [
-        group_id_or_link,
-        header,
-        scenario_info,  # اضافه کردن خط سناریو
-        f"⚪️ راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
-        ""
+        f"{group_id_or_link}",
+        "░♚🎭 <b>رویداد مافیا</b>",
+        f"░♚📆 <b>تاریخ:</b> {today}",
+        f"░♚🕰 <b>زمان:</b> {g.event_time or '---'}",
+        f"░♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
     ]
 
+    if g.scenario:
+        lines.append(f"░♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
+
+    lines.append("░♚📂 <b>بازیکنان:</b>")
+
     for i in range(1, g.max_seats + 1):
+        emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
         if i in g.seats:
             uid, name = g.seats[i]
+            icon = "📨"
             txt = f"<a href='tg://user?id={uid}'>{name}</a>"
             if i in g.striked:
                 txt += " ☠️"
-            line = f"{i}. {txt}"
+            line = f"░♚▪️{emoji_num} {icon} {txt}"
         else:
-            line = f"{i}. /{i}"
+            line = f"░♚▪️{emoji_num} ⬜ /{i}"
         lines.append(line)
 
     lines.append("\n📝 برای ثبت‌نام، لیست را ریپلای بزنید یا روی شماره صندلی کلیک کنید.")
     text = "\n".join(lines)
 
-    # انتخاب کیبورد مناسب
-    if mode == REG:
-        kb = text_seating_keyboard(g)
-    else:
-        kb = control_keyboard()
-    # 🧹 حذف پیام قبلی اگر وجود دارد
+    kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
+
+    # حذف پیام قبلی
     if g.last_seating_msg_id:
         try:
             await ctx.bot.delete_message(chat_id, g.last_seating_msg_id)
@@ -343,7 +347,6 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
             pass
         g.last_seating_msg_id = None
 
-    # ارسال پیام جدید
     msg = await ctx.bot.send_message(
         chat_id,
         text,
