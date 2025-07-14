@@ -7,6 +7,7 @@ import jdatetime
 import requests
 import json, httpx
 import sys
+import re
 import subprocess  # ✅ برای push به GitHub
 from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
@@ -399,6 +400,10 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+    from datetime import datetime, timezone
+    import asyncio
+    import re
+
     g.current_vote_target = target_seat
     g.vote_type = "counting"
     g.vote_messages_by_seat[target_seat] = []
@@ -422,26 +427,37 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         parse_mode="HTML"
     )
 
-    # 📊 نمایش تعداد آرا برای این صندلی
-    valid_votes = [
-        v["uid"] for v in g.vote_messages_by_seat[target_seat]
-        if v.get("target") == target_seat and v["text"] in {".","..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"}
-    ]
+    # 📊 شمارش آرا با منطق جدید
+    valid_votes = []
+    seen_uids = set()
 
-    count = len(set(valid_votes))
-    #await ctx.bot.send_message(
-        #chat_id,
-        #f"📊 صندلی {target_seat} مجموعاً {count} رأی معتبر دریافت کرد."
-   # )
+    for v in g.vote_messages_by_seat[target_seat]:
+        uid = v["uid"]
+        text = v["text"]
 
-    g.tally[target_seat] = list(set(valid_votes))
+        if uid in seen_uids:
+            continue
 
+        if text in {"..", "من"} or re.fullmatch(r"(.)\1", text):
+            valid_votes.append(uid)
+            seen_uids.add(uid)
+
+    count = len(valid_votes)
+
+    await ctx.bot.send_message(
+        chat_id,
+        f"📊 صندلی {target_seat} مجموعاً <b>{count}</b> رأی معتبر دریافت کرد.",
+        parse_mode="HTML"
+    )
+
+    g.tally[target_seat] = valid_votes
     g.vote_end_msg_id = end_msg.message_id
     g.vote_type = None
     store.save()
 
 
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
+    import re
     from collections import defaultdict
 
     tally = defaultdict(set)
@@ -449,24 +465,20 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
     for seat, msgs in g.vote_messages_by_seat.items():
         for msg in msgs:
             uid  = msg["uid"]
-            text = msg["text"]
+            text = msg["text"].strip()
 
-            if text not in {
-                ".", "..", "من", "👍👍", "👍🏼👍🏼", "👍🏽👍🏽", "👍🏿👍🏿", "👍🏻👍🏻"
-            }:
-                continue
+            # بررسی معتبر بودن رأی
+            if text in {".","..", "من"} or re.fullmatch(r"(.)\1", text):
+                if uid not in tally[seat]:
+                    tally[seat].add(uid)
 
-            if uid in tally[seat]:
-                continue
-
-            tally[seat].add(uid)
-
-
+    # تبدیل به لیست برای ذخیره نهایی
     for seat in tally:
         g.tally[seat] = list(tally[seat])
 
     store.save()
     return g.tally
+
 
 
 
