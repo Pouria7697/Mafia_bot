@@ -742,7 +742,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
 
         await announce_winner(ctx, update, g)
-        await reset_game(update, g)
+        await reset_game(update=update)
         return
 
 
