@@ -294,7 +294,7 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     today = jdatetime.date.today().strftime("%Y/%m/%d")
     header = f"📅 {today} \n⏰ {g.event_time or '---'}\n"
 
-    emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓"]
+    emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓","⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"]
 
     # گرفتن آیدی یا لینک گروه
     group_id_or_link = f"🆔 {chat_id}"
@@ -325,10 +325,10 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
         if i in g.seats:
             uid, name = g.seats[i]
-            icon = "📨"
+            icon = " "
             txt = f"<a href='tg://user?id={uid}'>{name}</a>"
             if i in g.striked:
-                txt += " ☠️"
+                txt += " ❌☠️"
             line = f"░♚▪️{emoji_num} {icon} {txt}"
         else:
             line = f"░♚▪️{emoji_num} ⬜ /{i}"
