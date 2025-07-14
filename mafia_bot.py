@@ -687,7 +687,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-
     if data == "back_endgame" and uid == g.god_id:
         g.awaiting_winner = False
         g.phase = "playing"
@@ -699,19 +698,53 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, "↩️ انتخاب برنده لغو شد.")
         return
 
-    if data in {"winner_city", "winner_mafia"} and g.awaiting_winner:
-        g.awaiting_winner = False
-        g.winner_side = "شهر" if data == "winner_city" else "مافیا"
-        store.save()
-        await announce_winner(ctx, update, g)
+    if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia"} and g.awaiting_winner:
+        g.temp_winner = data  # 🆕 مرحله اول: ذخیره انتخاب موقت
+        winner_txt = {
+            "winner_city": "🏙 شهر",
+            "winner_mafia": "😈 مافیا",
+            "clean_city": "🏙 کلین‌شیت شهر",
+            "clean_mafia": "😈 کلین‌شیت مافیا"
+        }[data]
+
+        await ctx.bot.send_message(
+            chat,
+            f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+        )
         return
-    if data in {"clean_city", "clean_mafia"} and g.awaiting_winner:
-        g.awaiting_winner = False
-        g.winner_side = "شهر" if data == "clean_city" else "مافیا"
-        g.clean_win = True  # 🟢 نشونه کلین‌شیت
+
+    if data == "back_to_winner_select" and uid == g.god_id:
+        g.temp_winner = None
         store.save()
-        await announce_winner(ctx, update, g)
+        await ctx.bot.send_message(
+            chat,
+            "🔁 لطفاً دوباره تیم برنده را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏙 شهر",          callback_data="winner_city")],
+                [InlineKeyboardButton("😈 مافیا",         callback_data="winner_mafia")],
+                [InlineKeyboardButton("🏙 کلین‌شیت شهر",   callback_data="clean_city")],
+                [InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")],
+                [InlineKeyboardButton("⬅️ بازگشت",        callback_data="back_endgame")],
+            ])
+        )
         return
+
+    if data == "confirm_winner" and uid == g.god_id and hasattr(g, "temp_winner") and g.temp_winner:
+        g.awaiting_winner = False
+        g.winner_side = "شهر" if "city" in g.temp_winner else "مافیا"
+        g.clean_win = "clean" in g.temp_winner
+        g.temp_winner = None  # 🧹 پاک‌سازی
+        store.save()
+
+        await announce_winner(ctx, update, g)
+        await reset_game(chat, g)
+        return
+
 
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
@@ -1308,21 +1341,28 @@ async def newgame(update: Update, ctx):
     await show_scenario_selection(ctx, chat, g)
 
 
-async def resetgame(update: Update, ctx):
-    chat_id = update.effective_chat.id
-    old = gs(chat_id)
+async def reset_game(ctx=None, update: Update = None, chat_id: int = None):
+    """ریست بازی با حفظ نام‌ها – هم قابل استفاده برای /resetgame و هم داخلی"""
+    if update:
+        chat_id = update.effective_chat.id
+    elif not chat_id:
+        raise ValueError("chat_id باید مشخص شود اگر update وجود ندارد")
 
-    # 🔄 این خط رو اضافه کنید
+    # 🔄 بارگذاری نام‌ها
     usernames = load_usernames_from_gist()
 
     store.games[chat_id] = GameState()
     g = store.games[chat_id]
-    g.user_names = usernames  # استفاده از نام‌های ذخیره شده
-    save_usernames_to_gist(g.user_names)  # ذخیره مجدد
-
+    g.user_names = usernames
+    save_usernames_to_gist(g.user_names)
     store.save()
-    await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
 
+    # اگر از طریق دستور اومده، پیام بفرست
+    if update:
+        await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
+
+async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await reset_game(ctx=ctx, update=update)
 
 async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
@@ -1544,7 +1584,7 @@ async def main():
             handle_simple_seat_command
         )
     )
-    app.add_handler(CommandHandler("resetgame", resetgame))
+    app.add_handler(CommandHandler("resetgame", resetgame_cmd))
     app.add_handler(CommandHandler("addscenario", addscenario))
     app.add_handler(CommandHandler("listscenarios", list_scenarios))
     app.add_handler(CommandHandler("removescenario", remove_scenario))
