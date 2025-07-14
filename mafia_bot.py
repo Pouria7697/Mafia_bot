@@ -742,7 +742,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
 
         await announce_winner(ctx, update, g)
-        await reset_game(chat, g)
+        await reset_game(update, g)
         return
 
 
@@ -1341,8 +1341,8 @@ async def newgame(update: Update, ctx):
     await show_scenario_selection(ctx, chat, g)
 
 
-async def reset_game(ctx=None, update: Update = None, chat_id: int = None):
-    """ریست بازی با حفظ نام‌ها – هم قابل استفاده برای /resetgame و هم داخلی"""
+async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = None, chat_id: int = None):
+    """ریست بازی با حفظ نام‌ها – هم قابل استفاده برای /resetgame و هم از داخل بات"""
     if update:
         chat_id = update.effective_chat.id
     elif not chat_id:
@@ -1358,11 +1358,13 @@ async def reset_game(ctx=None, update: Update = None, chat_id: int = None):
     store.save()
 
     # اگر از طریق دستور اومده، پیام بفرست
-    if update:
+    if update and update.message:
         await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
 
+# برای هندلر دستور /resetgame
 async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await reset_game(ctx=ctx, update=update)
+
 
 async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
