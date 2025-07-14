@@ -294,7 +294,8 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     today = jdatetime.date.today().strftime("%Y/%m/%d")
     header = f"📅 {today} \n⏰ {g.event_time or '---'}\n"
 
-    emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓","⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"]
+    emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓",
+                     "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"]
 
     # گرفتن آیدی یا لینک گروه
     group_id_or_link = f"🆔 {chat_id}"
@@ -310,16 +311,16 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
 
     lines = [
         f"{group_id_or_link}",
-        "░♚🎭 <b>رویداد مافیا</b>",
-        f"░♚📆 <b>تاریخ:</b> {today}",
-        f"░♚🕰 <b>زمان:</b> {g.event_time or '---'}",
-        f"░♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+        "♚🎭 <b>رویداد مافیا</b>",
+        f"♚📆 <b>تاریخ:</b> {today}",
+        f"♚🕰 <b>زمان:</b> {g.event_time or '---'}",
+        f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
     ]
 
     if g.scenario:
-        lines.append(f"░♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
+        lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
 
-    lines.append("░♚📂 <b>بازیکنان:</b>")
+    lines.append("\n\n♚📂 <b>بازیکنان:</b>\n")
 
     for i in range(1, g.max_seats + 1):
         emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
@@ -329,12 +330,11 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
             txt = f"<a href='tg://user?id={uid}'>{name}</a>"
             if i in g.striked:
                 txt += " ❌☠️"
-            line = f"░♚▪️{emoji_num} {icon} {txt}"
+            line = f"♚{emoji_num} {icon} {txt}"
         else:
-            line = f"░♚▪️{emoji_num} ⬜ /{i}"
+            line = f"♚{emoji_num} ⬜ /{i}"
         lines.append(line)
 
-    lines.append("\n📝 برای ثبت‌نام، لیست را ریپلای بزنید یا روی شماره صندلی کلیک کنید.")
     text = "\n".join(lines)
 
     kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
@@ -361,7 +361,6 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
             await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
     except:
         pass
-
 
 # ─────────────────────────────────────────────────────────────
 #  رأی‌گیری (همان نسخهٔ قبلی؛ فقط دست نزدیم)
