@@ -8,6 +8,7 @@ import requests
 import json, httpx
 import sys
 import re
+import asyncio
 import subprocess  # ✅ برای push به GitHub
 from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
@@ -400,12 +401,14 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
-    from datetime import datetime, timezone
-    import asyncio
-    import re
 
-    g.current_vote_target = target_seat
+    def is_double_emoji(text):
+        emojis = regex.findall(r'\X', text)
+        return len(emojis) == 2 and emojis[0] == emojis[1]
+
     g.vote_type = "counting"
+    g.current_vote_target = target_seat
+    store.save()
     g.vote_messages_by_seat[target_seat] = []
     store.save()
 
@@ -423,7 +426,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     end_msg = await ctx.bot.send_message(
         chat_id,
-        f"🛑 تمام",
+        "🛑 تمام",
         parse_mode="HTML"
     )
 
@@ -433,12 +436,12 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     for v in g.vote_messages_by_seat[target_seat]:
         uid = v["uid"]
-        text = v["text"]
+        text = v["text"].strip()
 
         if uid in seen_uids:
             continue
 
-        if text in {".","..", "من"} or re.fullmatch(r"(.)\1", text):
+        if text in {".", "..", "من"} or is_double_emoji(text):
             valid_votes.append(uid)
             seen_uids.add(uid)
 
@@ -456,9 +459,14 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     store.save()
 
 
+
 async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
-    import re
+
     from collections import defaultdict
+
+    def is_double_emoji(text):
+        emojis = regex.findall(r'\X', text)
+        return len(emojis) == 2 and emojis[0] == emojis[1]
 
     tally = defaultdict(set)
 
@@ -467,17 +475,15 @@ async def count_votes(ctx, chat_id: int, g: GameState) -> dict:
             uid  = msg["uid"]
             text = msg["text"].strip()
 
-            # بررسی معتبر بودن رأی
-            if text in {".","..", "من"} or re.fullmatch(r"(.)\1", text):
-                if uid not in tally[seat]:
-                    tally[seat].add(uid)
+            if text in {".", "..", "من"} or is_double_emoji(text):
+                tally[seat].add(uid)
 
-    # تبدیل به لیست برای ذخیره نهایی
     for seat in tally:
         g.tally[seat] = list(tally[seat])
 
     store.save()
     return g.tally
+
 
 
 
@@ -1575,8 +1581,8 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return  # 👈 چون کار ثبت‌نام انجام شده، بقیه اجرا نشه
 
     # ثبت رأی در حالت counting
-    if g.vote_type == "counting":
-        g.vote_messages_by_seat[g.current_vote_target].append({
+    if g.vote_type == "counting"and g.current_vote_target:
+        g.vote_messages_by_seat.setdefault(g.current_vote_target, []).append({
             "uid": uid,
             "text": text,
             "target": g.current_vote_target  # 👈 مشخص کردن هدف رأی
