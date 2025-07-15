@@ -5,3 +5,4 @@ aiohttp
 GitPython
 requests
 httpx
+regex
