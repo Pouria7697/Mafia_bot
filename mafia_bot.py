@@ -9,6 +9,7 @@ import json, httpx
 import sys
 import re
 import asyncio
+import regex
 import subprocess  # ✅ برای push به GitHub
 from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
