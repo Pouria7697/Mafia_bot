@@ -438,7 +438,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         if uid in seen_uids:
             continue
 
-        if text in {"..", "من"} or re.fullmatch(r"(.)\1", text):
+        if text in {".","..", "من"} or re.fullmatch(r"(.)\1", text):
             valid_votes.append(uid)
             seen_uids.add(uid)
 
