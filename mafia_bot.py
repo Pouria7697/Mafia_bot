@@ -1,4 +1,3 @@
-# mafia_bot.py 
 from __future__ import annotations
 from dataclasses import dataclass
 import pickle, os, random, asyncio
@@ -10,8 +9,8 @@ import sys
 import re
 import asyncio
 import regex
-import subprocess  # ✅ برای push به GitHub
-from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
+import subprocess  
+from datetime import datetime, timezone, timedelta  
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -19,11 +18,11 @@ from telegram.ext import (
 )
 from collections import defaultdict
 # --- CALLBACK DATA CONSTANTS ---
-BTN_GOD     = "register_god"     # ← دکمه «✏️ ثبت نام راوی»
-BTN_PLAYER  = "player_name"      # ← دکمه «🙋‍♂️ ثبت نام بازیکن»
-BTN_DELETE  = "delete_seat"      # ← دکمه «❌ حذف بازیکن»
-BTN_START   = "start_game"       # ← دکمه «🚀 شروع بازی» (جدید)
-BTN_CALL = "call_players"     # 🔊 صدا زدن همه قبلِ شروع
+BTN_GOD     = "register_god"    
+BTN_PLAYER  = "player_name"    
+BTN_DELETE  = "delete_seat"      
+BTN_START   = "start_game"      
+BTN_CALL = "call_players"     
 
 GH_TOKEN = os.environ.get("GH_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
@@ -396,7 +395,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_start_msg_id = msg.message_id
     g.vote_start_time = datetime.now(timezone.utc)
     g.vote_messages = []
-    g.vote_messages_by_seat = defaultdict(list)  # 🆕 ذخیرهٔ جدا برای هر صندلی
+    g.vote_messages_by_seat = defaultdict(list) 
 
     store.save()
 
@@ -410,6 +409,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.vote_type = "counting"
     g.current_vote_target = target_seat
     store.save()
+    await asyncio.sleep(0.3)
     g.vote_messages_by_seat[target_seat] = []
     store.save()
 
@@ -1058,7 +1058,7 @@ async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, f"⚠️ شمارهٔ صندلی معتبر نیست (بین 1 تا {g.max_seats}).")
         return
 
-    # ✅ اگر اسم کاربر ذخیره شده بود، مستقیم ثبت‌نام کن
+
     if uid in g.user_names:
         g.seats[seat] = (uid, g.user_names[uid])
         store.save()
@@ -1080,7 +1080,7 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     uid = msg.from_user.id
     g = gs(chat_id)
 
-    # 🔄 این خط رو اضافه کنید
+
     if not hasattr(g, 'user_names') or g.user_names is None:
         g.user_names = load_usernames_from_gist()
 
@@ -1098,7 +1098,7 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
-    # ✅ اگر اسم کاربر از قبل ذخیره شده، مستقیماً ثبتش کن
+ 
     if uid in g.user_names:
         print(f"🟢 Found stored name: {g.user_names[uid]}", file=sys.stdout)
         g.seats[seat_no] = (uid, g.user_names[uid])
