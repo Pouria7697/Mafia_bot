@@ -1080,6 +1080,9 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     uid = msg.from_user.id
     g = gs(chat_id)
 
+    # ⛔ فقط در حالت "idle" اجازه ثبت‌نام با /عدد هست
+    if g.phase != "idle":
+        return
 
     if not hasattr(g, 'user_names') or g.user_names is None:
         g.user_names = load_usernames_from_gist()
@@ -1098,7 +1101,6 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
- 
     if uid in g.user_names:
         print(f"🟢 Found stored name: {g.user_names[uid]}", file=sys.stdout)
         g.seats[seat_no] = (uid, g.user_names[uid])
