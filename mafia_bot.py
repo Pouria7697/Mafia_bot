@@ -409,7 +409,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.vote_type = "counting"
     g.current_vote_target = target_seat
     store.save()
-    await asyncio.sleep(0.3)
     g.vote_messages_by_seat[target_seat] = []
     store.save()
 
