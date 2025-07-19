@@ -408,8 +408,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     g.vote_type = "counting"
     g.current_vote_target = target_seat
-    store.save()
     g.vote_messages_by_seat[target_seat] = []
+    g.vote_start_time = datetime.now(timezone.utc)
     store.save()
 
     start_msg = await ctx.bot.send_message(
@@ -419,7 +419,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
 
     g.vote_start_msg_id = start_msg.message_id
-    g.vote_start_time = datetime.now(timezone.utc)
     store.save()
 
     await asyncio.sleep(5)
@@ -1032,47 +1031,6 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState):
     await publish_seating(ctx, chat_id, g, mode=CTRL)
 
 
-async def auto_register_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    chat = msg.chat_id
-    uid = msg.from_user.id
-    g = gs(chat)
-
-    if not msg.reply_to_message:
-        return
-
-    if msg.reply_to_message.message_id != g.last_seating_msg_id:
-        return
-
-    if not msg.text.strip().isdigit():
-        return
-
-    seat = int(msg.text.strip())
-
-    if seat in g.seats:
-        await ctx.bot.send_message(chat, f"❌ صندلی {seat} قبلاً پُر شده.")
-        return
-
-    if not (1 <= seat <= g.max_seats):
-        await ctx.bot.send_message(chat, f"⚠️ شمارهٔ صندلی معتبر نیست (بین 1 تا {g.max_seats}).")
-        return
-
-
-    if uid in g.user_names:
-        g.seats[seat] = (uid, g.user_names[uid])
-        store.save()
-        await publish_seating(ctx, chat, g)
-        return
-
-    # در غیر این صورت، منتظر اسم باش
-    g.awaiting_players.add(uid)
-    g.awaiting_seat[uid] = seat
-    store.save()
-
-    await ctx.bot.send_message(chat, f"👤 لطفاً نام خود را برای صندلی {seat} وارد کنید:")
-
-
-
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat.id
@@ -1159,21 +1117,23 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if msg.reply_to_message and msg.reply_to_message.message_id == g.last_seating_msg_id:
         if text.isdigit():
             seat_no = int(text)
+
             if not (1 <= seat_no <= g.max_seats):
-                await ctx.bot.send_message(chat, "❌ شمارهٔ صندلی معتبر نیست.")
+                await ctx.bot.send_message(chat, f"❌ شمارهٔ صندلی معتبر نیست.")
                 return
 
-            # اگر کاربر قبلاً ثبت‌نام کرده، جابه‌جایی با حفظ اسم
+            # اگر صندلی پر باشه
+            if seat_no in g.seats:
+                await ctx.bot.send_message(chat, f"❌ صندلی {seat_no} قبلاً پُر شده.")
+                return
+
+            # اگر بازیکن قبلاً ثبت‌نام کرده، جابه‌جایی کن
             existing_seat = None
             for s, (u, n) in g.seats.items():
                 if u == uid:
                     existing_seat = s
                     existing_name = n
                     break
-
-            if seat_no in g.seats:
-                await ctx.bot.send_message(chat, "❌ این صندلی قبلاً پُر شده.")
-                return
 
             if existing_seat is not None:
                 del g.seats[existing_seat]
@@ -1182,12 +1142,20 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await publish_seating(ctx, chat, g)
                 return
 
-            # اگر کاربر تازه‌وارد است
+            # اگر اسمش تو Gist ذخیره شده بود → ثبت فوری
+            if uid in g.user_names:
+                g.seats[seat_no] = (uid, g.user_names[uid])
+                store.save()
+                await publish_seating(ctx, chat, g)
+                return
+
+            # اگر اسم نداشت → درخواست نام
             g.waiting_name[uid] = seat_no
             msg = await ctx.bot.send_message(chat, f"👤 لطفاً نام خود را برای صندلی {seat_no} وارد کنید:")
             g.pending_name_msgs[uid] = msg.message_id
             store.save()
             return
+
 
     # ─────────────────────────────────────────────────────────────
     # 3) راوی صندلی‌ای را خالی می‌کند
@@ -1583,14 +1551,16 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return  # 👈 چون کار ثبت‌نام انجام شده، بقیه اجرا نشه
 
     # ثبت رأی در حالت counting
-    if g.vote_type == "counting"and g.current_vote_target:
-        g.vote_messages_by_seat.setdefault(g.current_vote_target, []).append({
-            "uid": uid,
-            "text": text,
-            "target": g.current_vote_target  # 👈 مشخص کردن هدف رأی
-        })
-        store.save()
-        return  # بدون ارسال پیام
+    if g.vote_type == "counting" and g.current_vote_target and hasattr(g, "vote_start_time"):
+        delta = (datetime.now(timezone.utc) - g.vote_start_time).total_seconds()
+        if 0 <= delta <= 5:  # فقط رأی‌هایی که بین 0 تا 5 ثانیه بعد از شروع رأی‌گیری هستن
+            g.vote_messages_by_seat.setdefault(g.current_vote_target, []).append({
+                "uid": uid,
+                "text": text,
+                "target": g.current_vote_target
+            })
+            store.save()
+        return  # چه ثبت بشه چه نه، کاری نکن دیگه
 
 
 async def main():
@@ -1624,13 +1594,6 @@ async def main():
         MessageHandler(
             filters.REPLY & filters.TEXT,
             name_reply
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.REPLY & filters.TEXT & filters.Regex(r"^\d+$"),
-            auto_register_reply
         )
     )
 
