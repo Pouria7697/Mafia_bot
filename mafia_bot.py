@@ -96,6 +96,7 @@ class GameState:
         self.user_names = {}
         self.selected_defense = []
         self.vote_messages: list = []
+        self.last_roles_msg_id = None
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -311,6 +312,7 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         except:
             pass
 
+    # ساخت متن لیست بازیکنان
     lines = [
         f"{group_id_or_link}",
         "♚🎭 <b>رویداد مافیا</b>",
@@ -339,15 +341,17 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
 
     text = "\n".join(lines)
 
+
     kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
 
-    # حذف پیام قبلی
+ 
     if g.last_seating_msg_id:
         try:
             await ctx.bot.delete_message(chat_id, g.last_seating_msg_id)
         except:
             pass
         g.last_seating_msg_id = None
+
 
     msg = await ctx.bot.send_message(
         chat_id,
@@ -357,21 +361,34 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     )
     g.last_seating_msg_id = msg.message_id
 
+    # حذف پیام قبلی نقش‌ها (در صورت وجود)
+    if hasattr(g, "last_roles_msg_id") and g.last_roles_msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id, g.last_roles_msg_id)
+        except:
+            pass
+        g.last_roles_msg_id = None
+
+ 
     if g.scenario:
         role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
         for role, count in g.scenario.roles.items():
             for _ in range(count):
                 role_lines.append(f"🔸 {role}")
         role_text = "\n".join(role_lines)
-        await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+
+        role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+        g.last_roles_msg_id = role_msg.message_id
 
     store.save()
+
 
     try:
         if chat_id < 0:
             await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
     except:
         pass
+
 
 # ─────────────────────────────────────────────────────────────
 #  رأی‌گیری (همان نسخهٔ قبلی؛ فقط دست نزدیم)
