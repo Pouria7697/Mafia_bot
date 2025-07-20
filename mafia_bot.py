@@ -257,12 +257,12 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ]
     ]
 
-    # اگر لیست کامل شد، دکمه‌های شروع و صدا زدن را اضافه کن
-    if g.god_id and len(g.seats) == g.max_seats:
-        rows.append([
-            InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"),
-            InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL)
-        ])
+    if g.god_id:
+        row = [InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")]
+        if len(g.seats) == g.max_seats:
+            row.insert(0, InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"))
+            row.insert(1, InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL))
+        rows.append(row)
 
     return InlineKeyboardMarkup(rows)
 
@@ -595,24 +595,41 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
     if data == "startgame":
-        # اگر گاد تعیین نشده یا کاربر فعلی گاد نیست
         if g.god_id is None:
             await q.answer("⚠️ ابتدا باید راوی ثبت نام کند!", show_alert=True)
             return
+
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
             return
+
         if len(g.seats) != g.max_seats:
             await ctx.bot.send_message(chat, "⚠️ هنوز همهٔ صندلی‌ها پُر نشده!")
             return
 
-        # مرحله دوم انتخاب سناریو برای نقش‌دهی
+        # ✅ اگر سناریو قبلاً انتخاب شده بود → مستقیم نقش‌ها را پخش کن
+        if g.scenario:
+            await shuffle_and_assign(ctx, chat, g)
+            return
+
+        # ⛔ در غیر این صورت، سناریو را بخواه
         g.awaiting_scenario = True
-        g.from_startgame = False  # → چون این بار برای نقش دادن استفاده میشه
+        g.from_startgame = False  # این بار برای نقش دادن است
         store.save()
         await show_scenario_selection(ctx, chat, g)
         return
 
+
+    if data == "change_scenario":
+        if g.god_id is None or uid != g.god_id:
+            await q.answer("⚠️ فقط راوی می‌تواند سناریو را تغییر دهد!", show_alert=True)
+            return
+
+        g.awaiting_scenario = True
+        g.from_startgame = True  # 🔁 این بار برای نمایش ساده است نه نقش دادن
+        store.save()
+        await show_scenario_selection(ctx, chat, g)
+        return
 
     if data.startswith("sc_"):
         idx = int(data.split("_")[1])
