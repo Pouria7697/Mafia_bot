@@ -1471,14 +1471,12 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if g.vote_type == "awaiting_defense" and uid == g.god_id:
         nums = [int(n) for n in text.split() if n.isdigit() and int(n) in g.seats]
         g.defense_seats = nums
+        g.vote_type = None  # ✅ غیرفعال کردن حالت وارد کردن صندلی دفاع
 
         # 🧹 حذف پیام درخواست صندلی‌های دفاع
         if g.defense_prompt_msg_id:
             try:
-                await ctx.bot.delete_message(
-                    chat_id=chat,
-                    message_id=g.defense_prompt_msg_id
-                )
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=g.defense_prompt_msg_id)
             except:
                 pass
             g.defense_prompt_msg_id = None
@@ -1487,6 +1485,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
         await start_vote(ctx, chat_id, g, "final")
         return
+
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
