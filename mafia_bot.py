@@ -694,22 +694,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
             except:
                 pass
+           # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
             g.last_vote_msg_id = None
-
-        # 🧮 اگر مرحلهٔ رأی‌گیری اولیه بود، رأی‌ها را بشمار و ذخیره کن
-        if g.vote_stage == "initial_vote":
-            g.tally = await count_votes(ctx, chat, g)
-
-            # 🔍 نمایش tally در تلگرام برای تست
-            debug_lines = ["📊 شمارش آرا:"]
-            for seat in g.seats:
-                if seat in g.tally:
-                    count = len(set(g.tally[seat]))
-                else:
-                    count = 0
-                debug_lines.append(f"• صندلی {seat}: {count} رأی")
-
-            await ctx.bot.send_message(chat, "\n".join(debug_lines))
 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         store.save()
@@ -1498,8 +1484,8 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             g.defense_prompt_msg_id = None
 
         store.save()
-        await ctx.bot.send_message(chat, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
-        await start_vote(ctx, chat, g, "final")
+        await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
+        await start_vote(ctx, chat_id, g, "final")
         return
 
 async def main():
