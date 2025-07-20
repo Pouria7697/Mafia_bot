@@ -356,6 +356,15 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         reply_markup=kb
     )
     g.last_seating_msg_id = msg.message_id
+
+    if g.scenario:
+        role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+        for role, count in g.scenario.roles.items():
+            for _ in range(count):
+                role_lines.append(f"🔸 {role}")
+        role_text = "\n".join(role_lines)
+        await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+
     store.save()
 
     try:
