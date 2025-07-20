@@ -370,7 +370,7 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         g.last_roles_msg_id = None
 
  
-    if g.scenario and mode == REG::
+    if g.scenario and mode == REG:
         role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
         for role, count in g.scenario.roles.items():
             for _ in range(count):
