@@ -447,7 +447,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> شروع شد! فقط ۵ ثانیه وقت دارید.",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
         parse_mode="HTML"
     )
 
@@ -455,7 +455,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     await ctx.bot.send_message(
         chat_id,
-        f"🛑 رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> به پایان رسید.",
+        f"🛑 تمام",
         parse_mode="HTML"
     )
 
