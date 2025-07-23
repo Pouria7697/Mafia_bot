@@ -292,10 +292,7 @@ CTRL  = "controls"   # فقط دکمه‌های کنترلی
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
-    """متن لیست صندلی‌ها را با استایل جدید و ایموجی‌ها به‌روز می‌کند"""
-
     today = jdatetime.date.today().strftime("%Y/%m/%d")
-    header = f"📅 {today} \n⏰ {g.event_time or '---'}\n"
 
     emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓",
                      "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"]
@@ -312,7 +309,7 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         except:
             pass
 
-    # ساخت متن لیست بازیکنان
+    # ساخت متن لیست صندلی‌ها
     lines = [
         f"{group_id_or_link}",
         "♚🎭 <b>رویداد مافیا</b>",
@@ -330,46 +327,37 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
         if i in g.seats:
             uid, name = g.seats[i]
-            icon = " "
             txt = f"<a href='tg://user?id={uid}'>{name}</a>"
             if i in g.striked:
                 txt += " ❌☠️"
-            line = f"♚{emoji_num} {icon} {txt}"
+            line = f"♚{emoji_num}  {txt}"
         else:
             line = f"♚{emoji_num} ⬜ /{i}"
         lines.append(line)
 
     text = "\n".join(lines)
-
-
     kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
 
- 
-    if g.last_seating_msg_id:
-        try:
-            await ctx.bot.delete_message(chat_id, g.last_seating_msg_id)
-        except:
-            pass
-        g.last_seating_msg_id = None
+    # 🟡 ویرایش یا ارسال پیام لیست صندلی‌ها
+    try:
+        if g.last_seating_msg_id:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=g.last_seating_msg_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+        else:
+            msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            g.last_seating_msg_id = msg.message_id
+            if chat_id < 0:
+                await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+    except:
+        msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+        g.last_seating_msg_id = msg.message_id
 
-
-    msg = await ctx.bot.send_message(
-        chat_id,
-        text,
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-    g.last_seating_msg_id = msg.message_id
-
-    # حذف پیام قبلی نقش‌ها (در صورت وجود)
-    if hasattr(g, "last_roles_msg_id") and g.last_roles_msg_id:
-        try:
-            await ctx.bot.delete_message(chat_id, g.last_roles_msg_id)
-        except:
-            pass
-        g.last_roles_msg_id = None
-
- 
+    # 🟡 نمایش لیست نقش‌ها فقط قبل شروع بازی
     if g.scenario and mode == REG:
         role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
         for role, count in g.scenario.roles.items():
@@ -377,17 +365,23 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
                 role_lines.append(f"🔸 {role}")
         role_text = "\n".join(role_lines)
 
-        role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
-        g.last_roles_msg_id = role_msg.message_id
+        try:
+            if hasattr(g, "last_roles_msg_id") and g.last_roles_msg_id:
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=g.last_roles_msg_id,
+                    text=role_text,
+                    parse_mode="HTML"
+                )
+            else:
+                role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+                g.last_roles_msg_id = role_msg.message_id
+        except:
+            role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+            g.last_roles_msg_id = role_msg.message_id
 
     store.save()
 
-
-    try:
-        if chat_id < 0:
-            await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
-    except:
-        pass
 
 
 # ─────────────────────────────────────────────────────────────
