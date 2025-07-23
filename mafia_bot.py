@@ -1604,7 +1604,7 @@ async def main():
     # 👥 هندلر ریپلای‌های متنی (اول name_reply باشه)
     app.add_handler(
         MessageHandler(
-            filters.TEXT,
+            filters.REPLY & filters.TEXT,
             name_reply
         )
     )
