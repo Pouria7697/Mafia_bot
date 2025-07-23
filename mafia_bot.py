@@ -592,16 +592,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تواند این دکمه را بزند!", show_alert=True)
             return
-        if len(g.seats) != g.max_seats:
-            await ctx.bot.send_message(chat, "❗ هنوز لیست کامل نشده!")
-            return
 
         mentions = [
             f"<a href='tg://user?id={u_id}'>{name}</a>"
             for _, (u_id, name) in sorted(g.seats.items())
         ]
         text = (
-            "🎙 بازی در حال شروع است؛ گل‌های تو خونه بیاید رو مایک، "
+            "🎙 سلاطین تشریف بیارید، "
             "بقیه رو علاف نکنید!\n" + " | ".join(mentions)
         )
         await ctx.bot.send_message(chat, text, parse_mode="HTML")
@@ -1607,7 +1604,7 @@ async def main():
     # 👥 هندلر ریپلای‌های متنی (اول name_reply باشه)
     app.add_handler(
         MessageHandler(
-            filters.REPLY & filters.TEXT,
+            filters.TEXT,
             name_reply
         )
     )
@@ -1615,7 +1612,7 @@ async def main():
     # 🧑‍💻 ریپلای‌های مستقیم بدون ریپلای
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.REPLY,
+            filters.TEXT,
             handle_direct_name_input
         )
     )
