@@ -64,6 +64,8 @@ class GameState:
     vote_candidates: list[int] | None = None
     defense_seats: list[int] | None = None
     last_seating_msg_id: int | None = None
+    last_roles_msg_id: int | None = None
+    last_roles_scenario_name: str | None = None
     winner_side: str | None = None
     awaiting_winner: bool = False
     last_vote_msg_id: int | None = None
@@ -259,10 +261,12 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     ]
 
     if g.god_id:
-        row = [InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")]
+        row = [
+            InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL),
+            InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")
+        ]
         if len(g.seats) == g.max_seats:
             row.insert(0, InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"))
-            row.insert(1, InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL))
         rows.append(row)
 
     return InlineKeyboardMarkup(rows)
@@ -338,7 +342,6 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
     text = "\n".join(lines)
     kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
 
-    # 🟡 ویرایش یا ارسال پیام لیست صندلی‌ها
     try:
         if g.last_seating_msg_id:
             await ctx.bot.edit_message_text(
@@ -357,30 +360,35 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
         g.last_seating_msg_id = msg.message_id
 
-    # 🟡 نمایش لیست نقش‌ها فقط قبل شروع بازی
+    # 🟡 نمایش لیست نقش‌ها فقط یکبار یا در صورت تغییر سناریو
     if g.scenario and mode == REG:
-        role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
-        for role, count in g.scenario.roles.items():
-            for _ in range(count):
-                role_lines.append(f"🔸 {role}")
-        role_text = "\n".join(role_lines)
+        if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
+            role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+            for role, count in g.scenario.roles.items():
+                for _ in range(count):
+                    role_lines.append(f"🔸 {role}")
+            role_text = "\n".join(role_lines)
 
-        try:
-            if hasattr(g, "last_roles_msg_id") and g.last_roles_msg_id:
-                await ctx.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=g.last_roles_msg_id,
-                    text=role_text,
-                    parse_mode="HTML"
-                )
-            else:
+            try:
+                if hasattr(g, "last_roles_msg_id") and g.last_roles_msg_id:
+                    await ctx.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=g.last_roles_msg_id,
+                        text=role_text,
+                        parse_mode="HTML"
+                    )
+                else:
+                    role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+                    g.last_roles_msg_id = role_msg.message_id
+            except:
                 role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
                 g.last_roles_msg_id = role_msg.message_id
-        except:
-            role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
-            g.last_roles_msg_id = role_msg.message_id
+
+            # به‌روزرسانی نام آخرین سناریوی ارسال‌شده
+            g.last_roles_scenario_name = g.scenario.name
 
     store.save()
+
 
 
 
