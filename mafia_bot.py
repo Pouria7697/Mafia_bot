@@ -1612,7 +1612,7 @@ async def main():
     # 🧑‍💻 ریپلای‌های مستقیم بدون ریپلای
     app.add_handler(
         MessageHandler(
-            filters.TEXT,
+            filters.TEXT & ~filters.REPLY,
             handle_direct_name_input
         )
     )
