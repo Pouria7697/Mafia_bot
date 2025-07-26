@@ -9,7 +9,8 @@ import sys
 import re
 import asyncio
 import regex
-import subprocess  
+import subprocess 
+group_filter = filters.ChatType.GROUPS | filters.ChatType.SUPERGROUPS 
 from datetime import datetime, timezone, timedelta  
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
 from telegram.ext import (
@@ -76,6 +77,10 @@ class GameState:
     awaiting_name_input: dict[int, int] = None
     last_name_prompt_msg_id: dict[int, int] = None
     from_startgame: bool = False
+    awaiting_shuffle_decision: bool = False
+    shuffle_prompt_msg_id: int | None = None
+
+
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -99,6 +104,9 @@ class GameState:
         self.selected_defense = []
         self.vote_messages: list = []
         self.last_roles_msg_id = None
+        self.awaiting_shuffle_decision = False
+        self.shuffle_prompt_msg_id = None
+
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -529,6 +537,8 @@ async def announce_winner(ctx, update, g: GameState):
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
 # ─────────────────────────────────────────────────────────────
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return
     q = update.callback_query
     await q.answer()
     data = q.data
@@ -632,17 +642,68 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "⚠️ هنوز همهٔ صندلی‌ها پُر نشده!")
             return
 
-        # ✅ اگر سناریو قبلاً انتخاب شده بود → مستقیم نقش‌ها را پخش کن
+        # ✅ اگر سناریو از قبل انتخاب شده → بپرس که آیا می‌خواهی صندلی‌ها رندوم بشن؟
         if g.scenario:
-            await shuffle_and_assign(ctx, chat, g)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ بله", callback_data="shuffle_yes"),
+                    InlineKeyboardButton("❌ خیر", callback_data="shuffle_no"),
+                ]
+            ])
+            msg = await ctx.bot.send_message(
+                chat,
+                "❓ آیا مایل هستید صندلی‌ها رندوم بشن؟",
+                reply_markup=keyboard
+            )
+            g.shuffle_prompt_msg_id = msg.message_id
+            g.awaiting_shuffle_decision = True
+            store.save()
             return
 
-        # ⛔ در غیر این صورت، سناریو را بخواه
+        # ⛔ اگر سناریو انتخاب نشده → برو سراغ انتخاب سناریو
         g.awaiting_scenario = True
-        g.from_startgame = False  # این بار برای نقش دادن است
+        g.from_startgame = False
         store.save()
         await show_scenario_selection(ctx, chat, g)
         return
+
+    if data == "shuffle_yes":
+        if not g.awaiting_shuffle_decision:
+            return
+
+        g.awaiting_shuffle_decision = False
+        g.from_startgame = False
+        store.save()
+
+        # حذف پیام دکمه
+        if hasattr(g, "shuffle_prompt_msg_id") and g.shuffle_prompt_msg_id:
+            try:
+                await ctx.bot.delete_message(chat, g.shuffle_prompt_msg_id)
+            except:
+                pass
+            g.shuffle_prompt_msg_id = None
+
+        await show_scenario_selection(ctx, chat, g)
+        return
+
+    if data == "shuffle_no":
+        if not g.awaiting_shuffle_decision:
+            return
+
+        g.awaiting_shuffle_decision = False
+        g.from_startgame = False
+        store.save()
+
+        if hasattr(g, "shuffle_prompt_msg_id") and g.shuffle_prompt_msg_id:
+            try:
+                await ctx.bot.delete_message(chat, g.shuffle_prompt_msg_id)
+            except:
+                pass
+            g.shuffle_prompt_msg_id = None
+
+        await shuffle_and_assign(ctx, chat, g, shuffle_seats=False)
+        return
+
 
 
     if data == "change_scenario":
@@ -995,11 +1056,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-async def shuffle_and_assign(ctx, chat_id: int, g: GameState):
-    shuffled = list(g.seats.items())
-    random.shuffle(shuffled)
-    g.seats = {i + 1: p[1] for i, p in enumerate(shuffled)}
+async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: bool = True):
+    if shuffle_seats:
+        shuffled = list(g.seats.items())
+        random.shuffle(shuffled)
+        g.seats = {i + 1: p[1] for i, p in enumerate(shuffled)}
 
+    # رندوم‌سازی نقش‌ها
     pool = [r for r, n in g.scenario.roles.items() for _ in range(n)]
     random.shuffle(pool)
     g.assigned_roles = {seat: pool[i] for i, seat in enumerate(g.seats)}
@@ -1013,6 +1076,7 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState):
             unreachable.append(name)
         log.append(f"{name} → {role}{i}.")
 
+    # ارسال خلاصه برای گاد
     if g.god_id:
         text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
         if unreachable:
@@ -1022,6 +1086,7 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState):
     g.phase = "playing"
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
+
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1381,6 +1446,17 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def addscenario(update: Update, ctx):
     """/addscenario <name> role1:n1 role2:n2 ..."""
+
+    # فقط توی گروه‌ها بررسی می‌کنیم
+    if update.message.chat.type in ["group", "supergroup"]:
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        member = await ctx.bot.get_chat_member(chat_id, user_id)
+
+        if member.status not in ["administrator", "creator"]:
+            await update.message.reply_text("⚠️ فقط ادمین‌های گروه می‌تونن سناریو اضافه کنن.")
+            return
+
     if len(ctx.args) < 2:
         await update.message.reply_text("Usage: /addscenario <name> role1:n1 role2:n2 ...")
         return
@@ -1397,7 +1473,7 @@ async def addscenario(update: Update, ctx):
     store.save()
     save_scenarios_to_gist(store.scenarios)
 
-    await update.message.reply_text(f"✅ Scenario '{name}' added with roles: {roles}")
+    await update.message.reply_text(f"✅ سناریو '{name}' اضافه شد با نقش‌ها: {roles}")
 
 
 
@@ -1417,8 +1493,18 @@ async def list_scenarios(update: Update, ctx):
 
 
 async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    # 🔐 فقط ادمین‌ها اجازه دارند سناریو حذف کنند
+    if chat.type != "private":
+        member = await ctx.bot.get_chat_member(chat.id, user.id)
+        if member.status not in ("administrator", "creator"):
+            await update.message.reply_text("⚠️ فقط ادمین‌های گروه می‌تونن سناریو حذف کنن.")
+            return
+
     if not ctx.args:
-        await update.message.reply_text("❌ Usage: /removescenario <scenario_name>")
+        await update.message.reply_text("❌ نحوه استفاده: /removescenario <نام سناریو>")
         return
 
     name = " ".join(ctx.args).strip()
@@ -1427,11 +1513,12 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     after = len(store.scenarios)
 
     if before == after:
-        await update.message.reply_text(f"⚠️ Scenario '{name}' not found.")
+        await update.message.reply_text(f"⚠️ سناریویی با نام «{name}» پیدا نشد.")
     else:
         store.save()
         save_scenarios_to_gist(store.scenarios)
-        await update.message.reply_text(f"🗑️ Scenario '{name}' removed.")
+        await update.message.reply_text(f"🗑️ سناریوی «{name}» با موفقیت حذف شد.")
+
 
 
 
@@ -1579,7 +1666,7 @@ async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # 👉 اضافه کردن هندلرها
-    app.add_handler(CommandHandler("newgame", newgame))
+    app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     # 🪑 انتخاب صندلی با دستور مثل /3
     app.add_handler(
         MessageHandler(
@@ -1587,12 +1674,12 @@ async def main():
             handle_simple_seat_command
         )
     )
-    app.add_handler(CommandHandler("resetgame", resetgame_cmd))
-    app.add_handler(CommandHandler("addscenario", addscenario))
-    app.add_handler(CommandHandler("listscenarios", list_scenarios))
-    app.add_handler(CommandHandler("removescenario", remove_scenario))
-    app.add_handler(CommandHandler("add", add_seat_cmd))
-    app.add_handler(CommandHandler("god", transfer_god_cmd))
+    app.add_handler(CommandHandler("resetgame", resetgame_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("addscenario", addscenario, filters=group_filter))
+    app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=group_filter))
+    app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
+    app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
     # ⏱ تایمر پویا مثل /3s
     app.add_handler(
         MessageHandler(
@@ -1604,7 +1691,7 @@ async def main():
     # 👥 هندلر ریپلای‌های متنی (اول name_reply باشه)
     app.add_handler(
         MessageHandler(
-            filters.REPLY & filters.TEXT,
+            group_filter & filters.REPLY & filters.TEXT,
             name_reply
         )
     )
@@ -1612,7 +1699,7 @@ async def main():
     # 🧑‍💻 ریپلای‌های مستقیم بدون ریپلای
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.REPLY,
+            group_filter & filters.TEXT & ~filters.REPLY,
             handle_direct_name_input
         )
     )
