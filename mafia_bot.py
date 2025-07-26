@@ -684,7 +684,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             g.shuffle_prompt_msg_id = None
 
-        await show_scenario_selection(ctx, chat, g)
+        await shuffle_and_assign(ctx, chat, g, shuffle_seats=True)
         return
 
     if data == "shuffle_no":
