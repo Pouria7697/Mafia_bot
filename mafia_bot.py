@@ -1075,7 +1075,7 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: boo
             await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
         except telegram.error.Forbidden:
             unreachable.append(name)
-        log.append(f"{name} → {role}{i}.")
+        log.append(f"{seat}. {name} → {role}")
 
     # ارسال خلاصه برای گاد
     if g.god_id:
