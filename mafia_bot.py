@@ -1069,13 +1069,14 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: boo
     g.assigned_roles = {seat: pool[i] for i, seat in enumerate(g.seats)}
 
     log, unreachable = [], []
-    for i, (seat, (uid, name)) in enumerate(g.seats.items(), start=1):
+    for seat in sorted(g.seats):  # ← صندلی‌ها به ترتیب عددی
+        uid, name = g.seats[seat]
         role = g.assigned_roles[seat]
         try:
             await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
         except telegram.error.Forbidden:
             unreachable.append(name)
-        log.append(f"{seat}. {name} → {role}")
+        log.append(f"{seat:>2}. {name} → {role}")  # ← فاصله‌گذاری مرتب دو رقمی
 
     # ارسال خلاصه برای گاد
     if g.god_id:
@@ -1083,6 +1084,7 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: boo
         if unreachable:
             text += "\n⚠️ نشد برای این افراد پیام خصوصی بفرستم: " + ", ".join(unreachable)
         await ctx.bot.send_message(g.god_id, text)
+
 
     g.phase = "playing"
     store.save()
