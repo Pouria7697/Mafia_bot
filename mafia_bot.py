@@ -411,13 +411,18 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.collecting = False
 
     candidates = g.defense_seats if stage == "final" else list(g.seats.keys())
-    g.vote_candidates = [s for s in candidates if s not in g.striked]
 
-    # ✅ آماده‌سازی لیست رأی‌گیری با چک‌مارک
+    if stage == "final":
+        g.vote_candidates = [s for s in candidates if s not in g.striked]
+    else:
+        g.vote_candidates = sorted([s for s in candidates if s not in g.striked])
     btns = []
     for s in g.vote_candidates:
         name = g.seats[s][1]
-        label = f"✅ {s}. {name}" if hasattr(g, "voted_targets") and s in g.voted_targets else f"{s}. {name}"
+        if hasattr(g, "voted_targets") and s in g.voted_targets:
+            label = f"✅ {s}. {name}"
+        else:
+            label = f"{s}. {name}"
         btns.append([InlineKeyboardButton(label, callback_data=f"vote_{s}")])
 
     btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done")])
