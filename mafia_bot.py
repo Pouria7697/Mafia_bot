@@ -855,7 +855,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             deleted = 0
             # 🔄 پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم (حداکثر 100 عدد)
-            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 100):
+            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 1000):
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
                     deleted += 1
@@ -918,7 +918,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # ارسال لیست بازیکنان برای خط زدن
         btns = [
             [InlineKeyboardButton(f"{s}. {g.seats[s][1]}", callback_data=f"do_strike_{s}")]
-            for s in g.seats if s not in g.striked
+            for s in sorted(g.seats) if s not in g.striked
         ]
         
         list_msg = await ctx.bot.send_message(
