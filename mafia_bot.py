@@ -116,6 +116,7 @@ class Store:
         self.path = path
         self.scenarios: list[Scenario] = []
         self.games: dict[int, GameState] = {}
+        self.group_stats: dict[int, dict] = {} 
         self.load()
 
     def load(self):
@@ -124,6 +125,7 @@ class Store:
                 obj = pickle.load(f)
                 self.scenarios = obj.get("scenarios", [])
                 self.games = obj.get("games", {})
+                self.group_stats = obj.get("group_stats", {})
                 for g in self.games.values():
                     if isinstance(g, GameState):
                         g.__post_init__()
@@ -132,7 +134,11 @@ class Store:
 
     def save(self):
         with open(self.path, "wb") as f:
-            pickle.dump({"scenarios": self.scenarios, "games": self.games}, f)
+            pickle.dump({
+                "scenarios": self.scenarios,
+                "games": self.games,
+                "group_stats": self.group_stats
+            }, f)
 
 def save_scenarios_to_gist(scenarios):
     if not GH_TOKEN or not GIST_ID:
@@ -658,7 +664,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         # ✅ اگر سناریو از قبل انتخاب شده → بپرس که آیا می‌خواهی صندلی‌ها رندوم بشن؟
-        now = datetime.utcnow().timestamp()
+        now = datetime.now(timezone.utc).timestamp()
         store.group_stats.setdefault(chat, {
             "waiting_list": [],
             "started": [],
@@ -771,7 +777,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
     if data == "end_game" and uid == g.god_id:
 
-        now = datetime.utcnow().timestamp()
+        now = datetime.now(timezone.utc).timestamp()
         store.group_stats.setdefault(chat, {
             "waiting_list": [],
             "started": [],
@@ -1464,7 +1470,7 @@ async def newgame(update: Update, ctx):
     g.from_startgame = True
     g.awaiting_scenario = True
 
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     store.group_stats.setdefault(chat.id, {
         "waiting_list": [],
         "started": [],
@@ -1786,7 +1792,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     day_ago = now - 86400  # 24 ساعت گذشته
 
     msg_lines = []
