@@ -82,6 +82,8 @@ class GameState:
     shuffle_prompt_msg_id: int | None = None
     purchased_seat: int | None = None
     awaiting_purchase_number: bool = False
+    store.group_stats: dict[int, dict] = {}  # {chat_id: {started: [...], ended: [...]}}
+
 
 
     def __post_init__(self):
@@ -659,6 +661,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         # ✅ اگر سناریو از قبل انتخاب شده → بپرس که آیا می‌خواهی صندلی‌ها رندوم بشن؟
+        now = datetime.utcnow().timestamp()
+        store.group_stats.setdefault(chat, {
+            "waiting_list": [],
+            "started": [],
+            "ended": []
+        })
+        store.group_stats[chat]["started"].append(now)
+        store.save()
         if g.scenario:
             keyboard = InlineKeyboardMarkup([
                 [
@@ -763,6 +773,16 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
     if data == "end_game" and uid == g.god_id:
+
+        now = datetime.utcnow().timestamp()
+        store.group_stats.setdefault(chat, {
+            "waiting_list": [],
+            "started": [],
+            "ended": []
+        })
+        store.group_stats[chat]["ended"].append(now)
+        store.save()
+
         g.phase = "awaiting_winner"
         g.awaiting_winner = True
         store.save()
@@ -1446,6 +1466,15 @@ async def newgame(update: Update, ctx):
 
     g.from_startgame = True
     g.awaiting_scenario = True
+
+    now = datetime.utcnow().timestamp()
+    store.group_stats.setdefault(chat.id, {
+        "waiting_list": [],
+        "started": [],
+        "ended": []
+    })
+    store.group_stats[chat.id]["waiting_list"].append(now)
+
     store.save()
 
     await show_scenario_selection(ctx, chat, g)
@@ -1759,6 +1788,50 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
 
+async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    now = datetime.utcnow().timestamp()
+    day_ago = now - 86400  # 24 ساعت گذشته
+
+    msg_lines = []
+    running_groups = []
+    recruiting_groups = []
+
+    for gid, g in store.games.items():
+        g: GameState
+        stats = store.group_stats.get(gid, {})
+        started = sum(1 for t in stats.get("started", []) if t > day_ago)
+        ended = sum(1 for t in stats.get("ended", []) if t > day_ago)
+
+        # لینک یا آیدی یا "خصوصی"
+        try:
+            chat = await ctx.bot.get_chat(gid)
+            if chat.username:
+                name = f"<a href='https://t.me/{chat.username}'>{chat.title or chat.username}</a>"
+            else:
+                name = f"{chat.title or 'گروه خصوصی'} (<code>{gid}</code>)"
+        except:
+            name = f"<code>{gid}</code>"
+
+        # وضعیت فعلی
+        if g.phase == "playing":
+            running_groups.append(name)
+        elif g.phase == "seating":
+            recruiting_groups.append(name)
+
+        msg_lines.append(f"👥 {name}:\n⏺ {started} شروع\n⏹ {ended} پایان\n")
+
+    final_msg = "\n".join(msg_lines)
+    final_msg += "\n\n🎮 <b>گروه‌هایی که بازی فعال دارن:</b>\n" + ", ".join(running_groups or ["—"])
+    final_msg += "\n\n🪑 <b>گروه‌هایی که در حال عضوگیری هستن:</b>\n" + ", ".join(recruiting_groups or ["—"])
+
+    await ctx.bot.send_message(
+        update.effective_chat.id,
+        final_msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -1804,6 +1877,15 @@ async def main():
     # 🎮 دکمه‌ها و رای‌گیری
     app.add_handler(CallbackQueryHandler(callback_router))
 
+    app.add_handler(
+        MessageHandler(
+            filters.PRIVATE
+            & filters.User(99347107)
+            & filters.TEXT
+            & filters.Regex(r"^/stats$"),
+            handle_stats_request
+        )
+    )
 
 
        
