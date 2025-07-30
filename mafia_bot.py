@@ -1479,7 +1479,6 @@ async def newgame(update: Update, ctx):
 
     g.from_startgame = True
     g.awaiting_scenario = True
-    g.phase = "seating"
 
     now = datetime.now(timezone.utc).timestamp()
     store.group_stats.setdefault(chat, {
@@ -1630,10 +1629,7 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-
-from datetime import datetime, timezone, timedelta  # بالای فایل مطمئن شو اینا ایمپورت شدن
-
+from datetime import datetime, timezone, timedelta 
 async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     uid = update.effective_user.id
@@ -1829,7 +1825,12 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # وضعیت فعلی
         if g.phase == "playing":
             running_groups.append(name)
-        elif g.phase == "seating":
+        elif (
+            g.scenario and
+            g.god_id and
+            len(g.seats) < g.max_seats and
+            g.phase != "playing"
+        ):
             recruiting_groups.append(name)
 
         msg_lines.append(f"👥 {name}:\n⏺ {started} شروع\n⏹ {ended} پایان\n")
