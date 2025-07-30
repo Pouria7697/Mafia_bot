@@ -82,9 +82,6 @@ class GameState:
     shuffle_prompt_msg_id: int | None = None
     purchased_seat: int | None = None
     awaiting_purchase_number: bool = False
-    store.group_stats: dict[int, dict] = {}  # {chat_id: {started: [...], ended: [...]}}
-
-
 
     def __post_init__(self):
         self.seats = self.seats or {}
