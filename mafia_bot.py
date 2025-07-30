@@ -80,6 +80,7 @@ class GameState:
     from_startgame: bool = False
     awaiting_shuffle_decision: bool = False
     shuffle_prompt_msg_id: int | None = None
+    purchased_seat: int | None = None
 
 
 
@@ -107,6 +108,7 @@ class GameState:
         self.last_roles_msg_id = None
         self.awaiting_shuffle_decision = False
         self.shuffle_prompt_msg_id = None
+        self.purchased_seat = None
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -514,7 +516,13 @@ async def announce_winner(ctx, update, g: GameState):
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
-        lines.append(f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role}")
+        if getattr(g, "purchased_seat", None) == seat:
+            role_display = f"{role} / مافیاساده"
+        else:
+            role_display = role
+
+        lines.append(f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}")
+
 
 
     lines.append("")
@@ -780,15 +788,44 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, "↩️ انتخاب برنده لغو شد.")
         return
 
-    if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia"} and g.awaiting_winner:
-        g.temp_winner = data  # 🆕 مرحله اول: ذخیره انتخاب موقت
+      if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia"} and g.awaiting_winner:
+        g.temp_winner = data
         winner_txt = {
-            "winner_city": "🏙 شهر",
-            "winner_mafia": "😈 مافیا",
-            "clean_city": "🏙 کلین‌شیت شهر",
-            "clean_mafia": "😈 کلین‌شیت مافیا"
+            "winner_city"  : "🏙 شهر",
+            "winner_mafia" : "😈 مافیا",
+            "clean_city"   : "🏙 کلین‌شیت شهر",
+            "clean_mafia"  : "😈 کلین‌شیت مافیا"
         }[data]
 
+        if "clean" in data:
+            await ctx.bot.send_message(
+                chat,
+                f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+                ])
+            )
+        else:
+            await ctx.bot.send_message(
+                chat,
+                "❓ آیا کسی در طول بازی خریداری شده است؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ بله", callback_data="purchased_yes")],
+                    [InlineKeyboardButton("❌ خیر", callback_data="purchased_no")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+                ])
+            )
+        return
+
+    if data == "purchased_yes" and g.awaiting_winner:
+        g.awaiting_purchase_number = True
+        await ctx.bot.send_message(chat, "✏️ لطفاً شماره صندلی بازیکن خریداری‌شده را وارد کنید:")
+        return
+
+    if data == "purchased_no" and g.awaiting_winner:
+        g.purchased_seat = None
         await ctx.bot.send_message(
             chat,
             f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
@@ -1637,6 +1674,29 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         await publish_seating(ctx, chat_id, g)
         return  # 👈 چون کار ثبت‌نام انجام شده، بقیه اجرا نشه
+
+    if g.awaiting_purchase_number:
+        try:
+            seat_no = int(text.strip())
+            if seat_no not in g.seats:
+                await ctx.bot.send_message(chat, "❌ شماره صندلی معتبر نیست.")
+                return
+
+            g.purchased_seat = seat_no
+            g.awaiting_purchase_number = False
+
+            await ctx.bot.send_message(
+                chat,
+                f"🎯 صندلی {seat_no} به عنوان خریداری‌شده ثبت شد.\nآیا تأیید می‌کنید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")]
+                ])
+            )
+            store.save()
+        except:
+            await ctx.bot.send_message(chat, "❌ لطفاً فقط عدد شماره صندلی را وارد کنید.")
+        return
 
     # ثبت رأی در حالت counting
    # if g.vote_type == "counting" and g.current_vote_target and hasattr(g, "vote_start_time"):
