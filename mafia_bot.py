@@ -1513,9 +1513,29 @@ async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = Non
     if update and update.message:
         await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
 
-# برای هندلر دستور /resetgame
 async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    # بررسی اینکه فقط در گروه‌ها قابل اجرا باشه
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
+        return
+
+    # بررسی اینکه کاربر ادمین هست یا نه
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat.id)
+        admin_ids = [admin.user.id for admin in admins]
+        if user.id not in admin_ids:
+            await update.message.reply_text("فقط ادمین‌ها می‌تونن این دستور رو اجرا کنن.")
+            return
+    except:
+        await update.message.reply_text("خطا در بررسی ادمین‌ها.")
+        return
+
+    # اجرای ریست بازی
     await reset_game(ctx=ctx, update=update)
+
 
 
 async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1812,39 +1832,29 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         started = sum(1 for t in stats.get("started", []) if t > day_ago)
         ended = sum(1 for t in stats.get("ended", []) if t > day_ago)
 
-        # تعیین نام گروه
         try:
             chat = await ctx.bot.get_chat(gid)
             if chat.username:
                 name = f"<a href='https://t.me/{chat.username}'>{chat.title or chat.username}</a>"
                 is_private = False
             else:
-                name = f"{chat.title or 'گروه خصوصی'} (private)"
+                name = f"{chat.title or 'گروه خصوصی'} (گروه خصوصی)"
                 is_private = True
         except:
-            name = f"گروه ناشناس (private)"
+            name = f"گروه ناشناس (گروه خصوصی)"
             is_private = True
+
 
         # وضعیت فعلی
         if g.phase == "playing":
             running_groups.append(name)
-
         elif (
             g.scenario and
             g.god_id and
             len(g.seats) < g.max_seats and
             g.phase != "playing"
         ):
-            # بررسی اینکه لیست هنوز پین یا موجود هست یا نه
-            still_valid = False
-            if g.last_seating_msg_id:
-                try:
-                    msg = await ctx.bot.get_message(gid, g.last_seating_msg_id)
-                    still_valid = True
-                except:
-                    still_valid = False
-            if still_valid:
-                recruiting_groups.append(name)
+            recruiting_groups.append(name)
 
         msg_lines.append(f"👥 {name}:\n⏺ {started} شروع\n⏹ {ended} پایان\n")
 
