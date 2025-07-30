@@ -855,7 +855,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             deleted = 0
             # 🔄 پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم (حداکثر 100 عدد)
-            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 1000):
+            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 100):
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
                     deleted += 1
