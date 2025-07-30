@@ -1967,11 +1967,13 @@ async def main():
     )
 
     app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.User(99347107) & filters.Regex(r"^/leave"),
-            leave_group
+        CommandHandler(
+            "leave",
+            leave_group,
+            filters=filters.ChatType.PRIVATE & filters.User(99347107)
         )
     )
+
 
        
     # ✅ initialize application
