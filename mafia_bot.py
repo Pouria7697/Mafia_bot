@@ -1916,6 +1916,7 @@ async def main():
     app.add_handler(CommandHandler("active", activate_group))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
+    app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
     # 🪑 انتخاب صندلی با دستور مثل /3
     app.add_handler(
         MessageHandler(
@@ -1966,16 +1967,7 @@ async def main():
         )
     )
 
-    app.add_handler(
-        CommandHandler(
-            "leave",
-            leave_group,
-            filters=filters.ChatType.PRIVATE & filters.User(99347107)
-        )
-    )
-
-
-       
+      
     # ✅ initialize application
     await app.initialize()
 
