@@ -1876,7 +1876,7 @@ async def main():
 
     app.add_handler(
         MessageHandler(
-            filters.PRIVATE
+            filters.ChatType.PRIVATE
             & filters.User(99347107)
             & filters.TEXT
             & filters.Regex(r"^/stats$"),
