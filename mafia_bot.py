@@ -117,6 +117,7 @@ class Store:
         self.scenarios: list[Scenario] = []
         self.games: dict[int, GameState] = {}
         self.group_stats: dict[int, dict] = {} 
+        self.active_groups: set[int] = set() 
         self.load()
 
     def load(self):
@@ -126,6 +127,7 @@ class Store:
                 self.scenarios = obj.get("scenarios", [])
                 self.games = obj.get("games", {})
                 self.group_stats = obj.get("group_stats", {})
+                self.active_groups = set(obj.get("active_groups", [])) 
                 for g in self.games.values():
                     if isinstance(g, GameState):
                         g.__post_init__()
@@ -137,7 +139,8 @@ class Store:
             pickle.dump({
                 "scenarios": self.scenarios,
                 "games": self.games,
-                "group_stats": self.group_stats
+                "group_stats": self.group_stats,
+                "active_groups": list(self.active_groups)
             }, f)
 
 def save_scenarios_to_gist(scenarios):
@@ -1456,6 +1459,9 @@ async def show_scenario_selection(ctx, chat_id: int, g: GameState):
 async def newgame(update: Update, ctx):
     chat = update.effective_chat.id
 
+    if chat not in store.active_groups:
+        return  # گروه غیرمجاز
+
     if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
@@ -1574,6 +1580,9 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def addscenario(update: Update, ctx):
     """/addscenario <name> role1:n1 role2:n2 ..."""
 
+    if update.effective_chat.id not in store.active_groups:
+        return  # گروه غیرمجاز
+
     # فقط توی گروه‌ها بررسی می‌کنیم
     if update.message.chat.type in ["group", "supergroup"]:
         chat_id = update.effective_chat.id
@@ -1623,6 +1632,9 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
+    if chat.id not in store.active_groups:
+        return  # گروه غیرمجاز
+
     # 🔐 فقط ادمین‌ها اجازه دارند سناریو حذف کنند
     if chat.type != "private":
         member = await ctx.bot.get_chat_member(chat.id, user.id)
@@ -1646,10 +1658,7 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_scenarios_to_gist(store.scenarios)
         await update.message.reply_text(f"🗑️ سناریوی «{name}» با موفقیت حذف شد.")
 
-
-
-
-from datetime import datetime, timezone, timedelta 
+ 
 async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     uid = update.effective_user.id
@@ -1835,13 +1844,13 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             chat = await ctx.bot.get_chat(gid)
             if chat.username:
-                name = f"<a href='https://t.me/{chat.username}'>{chat.title or chat.username}</a>"
+                name = f"<a href='https://t.me/{chat.username}'>{chat.title or chat.username}</a> (<code>{gid}</code>)"
                 is_private = False
             else:
-                name = f"{chat.title or 'گروه خصوصی'} (گروه خصوصی)"
+                name = f"{chat.title or 'گروه خصوصی'}  <code>{gid}</code>"
                 is_private = True
         except:
-            name = f"گروه ناشناس (گروه خصوصی)"
+            name = f"(گروه ناشناس) <code>{gid}</code>"
             is_private = True
 
 
@@ -1869,10 +1878,42 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
 
+async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != 99347107:
+        await update.message.reply_text("⛔ فقط مدیر اصلی بات اجازه دارد این دستور را اجرا کند.")
+        return
+
+    if not ctx.args:
+        await update.message.reply_text("لطفاً Chat ID گروه را وارد کنید.")
+        return
+
+    try:
+        chat_id = int(ctx.args[0])
+        await ctx.bot.leave_chat(chat_id)
+        await update.message.reply_text(f"✅ بات از گروه {chat_id} خارج شد.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در خروج از گروه: {e}")
+
+async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
+        return
+
+    user_id = update.effective_user.id
+    if user_id != 99347107:
+        await update.message.reply_text("⛔ فقط سازندهٔ اصلی می‌تونه گروه رو فعال کنه.")
+        return
+
+    store.active_groups.add(chat.id)
+    store.save()
+    await update.message.reply_text("✅ این گروه با موفقیت فعال شد.")
+
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
+    app.add_handler(CommandHandler("active", activate_group))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     # 🪑 انتخاب صندلی با دستور مثل /3
@@ -1925,6 +1966,12 @@ async def main():
         )
     )
 
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(99347107) & filters.Regex(r"^/leave"),
+            leave_group
+        )
+    )
 
        
     # ✅ initialize application
