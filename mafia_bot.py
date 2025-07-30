@@ -788,36 +788,41 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, "↩️ انتخاب برنده لغو شد.")
         return
 
-      if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia"} and g.awaiting_winner:
-        g.temp_winner = data
+    if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia"} and g.awaiting_winner:
+        g.temp_winner = data  # 🆕 مرحله اول: ذخیره انتخاب موقت
         winner_txt = {
-            "winner_city"  : "🏙 شهر",
-            "winner_mafia" : "😈 مافیا",
-            "clean_city"   : "🏙 کلین‌شیت شهر",
-            "clean_mafia"  : "😈 کلین‌شیت مافیا"
+            "winner_city": "🏙 شهر",
+            "winner_mafia": "😈 مافیا",
+            "clean_city": "🏙 کلین‌شیت شهر",
+            "clean_mafia": "😈 کلین‌شیت مافیا"
         }[data]
 
-        if "clean" in data:
+        if data in {"winner_city", "winner_mafia"}:
+            g.ask_purchased = True  # 🆕 باید بپرسیم کسی خریداری شده یا نه
+            store.save()
             await ctx.bot.send_message(
                 chat,
-                f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
-                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
-                ])
-            )
-        else:
-            await ctx.bot.send_message(
-                chat,
-                "❓ آیا کسی در طول بازی خریداری شده است؟",
+                f"🛒 آیا کسی خریداری شده است؟",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ بله", callback_data="purchased_yes")],
                     [InlineKeyboardButton("❌ خیر", callback_data="purchased_no")],
-                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")]
                 ])
             )
+            return
+
+        # برای کلین‌شیت نیازی به پرسش نیست
+        await ctx.bot.send_message(
+            chat,
+            f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+        )
         return
+
 
     if data == "purchased_yes" and g.awaiting_winner:
         g.awaiting_purchase_number = True
