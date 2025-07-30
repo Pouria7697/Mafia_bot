@@ -831,16 +831,29 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "purchased_no" and g.awaiting_winner:
         g.purchased_seat = None
+
+        # بازسازی متن برنده بر اساس temp_winner
+        winner_txt = {
+            "winner_city": "🏙 شهر",
+            "winner_mafia": "😈 مافیا"
+        }.get(g.temp_winner, "❓")
+
         await ctx.bot.send_message(
             chat,
             f"🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
-                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+                [
+                    InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")
+                ],
+                [
+                    InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")
+                ],
             ])
         )
+        store.save()
         return
+
 
     if data == "back_to_winner_select" and uid == g.god_id:
         g.temp_winner = None
@@ -1684,15 +1697,22 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         try:
             seat_no = int(text.strip())
             if seat_no not in g.seats:
-                await ctx.bot.send_message(chat, "❌ شماره صندلی معتبر نیست.")
+                await ctx.bot.send_message(chat_id, "❌ شماره صندلی معتبر نیست.")
                 return
 
             g.purchased_seat = seat_no
             g.awaiting_purchase_number = False
 
+            # بر اساس temp_winner، متن برنده رو بساز
+            winner_txt = {
+                "winner_city": "🏙 شهر",
+                "winner_mafia": "😈 مافیا"
+            }.get(g.temp_winner, "❓")
+
             await ctx.bot.send_message(
-                chat,
-                f"🎯 صندلی {seat_no} به عنوان خریداری‌شده ثبت شد.\nآیا تأیید می‌کنید؟",
+                chat_id,
+                f"🎯 صندلی {seat_no} به عنوان خریداری‌شده ثبت شد.\n🔒 برنده انتخاب شد: <b>{winner_txt}</b>\nآیا تأیید می‌کنید؟",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
                     [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")]
@@ -1700,8 +1720,10 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             )
             store.save()
         except:
-            await ctx.bot.send_message(chat, "❌ لطفاً فقط عدد شماره صندلی را وارد کنید.")
+            await ctx.bot.send_message(chat_id, "❌ لطفاً فقط عدد شماره صندلی را وارد کنید.")
         return
+
+
 
     # ثبت رأی در حالت counting
    # if g.vote_type == "counting" and g.current_vote_target and hasattr(g, "vote_start_time"):
