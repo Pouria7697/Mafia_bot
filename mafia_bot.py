@@ -1471,7 +1471,7 @@ async def newgame(update: Update, ctx):
     g.awaiting_scenario = True
 
     now = datetime.now(timezone.utc).timestamp()
-    store.group_stats.setdefault(chat.id, {
+    store.group_stats.setdefault(chat, {
         "waiting_list": [],
         "started": [],
         "ended": []
