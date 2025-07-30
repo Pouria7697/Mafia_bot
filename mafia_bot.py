@@ -1454,46 +1454,44 @@ async def show_scenario_selection(ctx, chat_id: int, g: GameState):
 
 
 async def newgame(update: Update, ctx):
-    chat = update.effective_chat
+    chat = update.effective_chat.id
 
-    # فقط در گروه‌ها مجاز باشد
-    if chat.type not in {"group", "supergroup"}:
+    if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
 
-    # فقط ادمین‌ها اجازه داشته باشند
-    member = await ctx.bot.get_chat_member(chat.id, update.effective_user.id)
+
+    member = await ctx.bot.get_chat_member(chat, update.effective_user.id)
     if member.status not in {"administrator", "creator"}:
         await update.message.reply_text("فقط ادمین‌های گروه می‌تونن بازی جدید شروع کنن.")
         return
 
-    # بررسی آرگومان
     if not ctx.args:
         await update.message.reply_text("Usage: /newgame <seats>")
         return
 
-    # مقداردهی اولیه بازی
-    store.games[chat.id] = GameState(max_seats=int(ctx.args[0]))
-    g = gs(chat.id)
+    store.games[chat] = GameState(max_seats=int(ctx.args[0]))
+    g = gs(chat)
 
-    g.user_names = load_usernames_from_gist()
-    save_usernames_to_gist(g.user_names)
+    # 🔄 این خط رو اضافه کنید تا نام‌ها همیشه تازه باشند
+    g.user_names = load_usernames_from_gist()  # بارگذاری نام‌ها از Gist
+    save_usernames_to_gist(g.user_names)  # ذخیره مجدد برای اطمینان
 
     g.from_startgame = True
     g.awaiting_scenario = True
     g.phase = "seating"
 
     now = datetime.now(timezone.utc).timestamp()
-    store.group_stats.setdefault(chat.id, {
+    store.group_stats.setdefault(chat, {
         "waiting_list": [],
         "started": [],
         "ended": []
     })
-    store.group_stats[chat.id]["waiting_list"].append(now)
+    store.group_stats[chat]["waiting_list"].append(now)
 
     store.save()
 
-    await show_scenario_selection(ctx, chat.id, g)
+    await show_scenario_selection(ctx, chat, g)
 
 
 async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = None, chat_id: int = None):
