@@ -1812,26 +1812,39 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         started = sum(1 for t in stats.get("started", []) if t > day_ago)
         ended = sum(1 for t in stats.get("ended", []) if t > day_ago)
 
-        # لینک یا آیدی یا "خصوصی"
+        # تعیین نام گروه
         try:
             chat = await ctx.bot.get_chat(gid)
             if chat.username:
                 name = f"<a href='https://t.me/{chat.username}'>{chat.title or chat.username}</a>"
+                is_private = False
             else:
-                name = f"{chat.title or 'گروه خصوصی'} (<code>{gid}</code>)"
+                name = f"{chat.title or 'گروه خصوصی'} (private)"
+                is_private = True
         except:
-            name = f"<code>{gid}</code>"
+            name = f"گروه ناشناس (private)"
+            is_private = True
 
         # وضعیت فعلی
         if g.phase == "playing":
             running_groups.append(name)
+
         elif (
             g.scenario and
             g.god_id and
             len(g.seats) < g.max_seats and
             g.phase != "playing"
         ):
-            recruiting_groups.append(name)
+            # بررسی اینکه لیست هنوز پین یا موجود هست یا نه
+            still_valid = False
+            if g.last_seating_msg_id:
+                try:
+                    msg = await ctx.bot.get_message(gid, g.last_seating_msg_id)
+                    still_valid = True
+                except:
+                    still_valid = False
+            if still_valid:
+                recruiting_groups.append(name)
 
         msg_lines.append(f"👥 {name}:\n⏺ {started} شروع\n⏹ {ended} پایان\n")
 
