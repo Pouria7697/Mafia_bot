@@ -81,7 +81,7 @@ class GameState:
     awaiting_shuffle_decision: bool = False
     shuffle_prompt_msg_id: int | None = None
     purchased_seat: int | None = None
-
+    awaiting_purchase_number: bool = False
 
 
     def __post_init__(self):
@@ -109,6 +109,8 @@ class GameState:
         self.awaiting_shuffle_decision = False
         self.shuffle_prompt_msg_id = None
         self.purchased_seat = None
+        self.awaiting_purchase_number = False
+
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
