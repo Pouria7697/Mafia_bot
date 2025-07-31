@@ -1146,37 +1146,49 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: bool = True):
-    if shuffle_seats:
-        shuffled = list(g.seats.items())
-        random.shuffle(shuffled)
-        g.seats = {i + 1: p[1] for i, p in enumerate(shuffled)}
+    players = list(g.seats.values())  # [(uid1, name1), (uid2, name2), ...]
+    uids = [uid for uid, _ in players]
 
-    # رندوم‌سازی نقش‌ها
+    # 1. رندوم‌سازی نقش‌ها (۵ بار برای اطمینان)
     pool = [r for r, n in g.scenario.roles.items() for _ in range(n)]
-    random.shuffle(pool)
-    g.assigned_roles = {seat: pool[i] for i, seat in enumerate(g.seats)}
+    for _ in range(5):
+        random.shuffle(pool)
 
+    # 2. نقش به ترتیب به بازیکن‌ها بده
+    uid_to_role = {uid: pool[i] for i, uid in enumerate(uids)}
+
+    # 3. صندلی‌ها رو اگه لازم بود جابجا کن
+    if shuffle_seats:
+        random.shuffle(players)
+    g.seats = {i + 1: (uid, name) for i, (uid, name) in enumerate(players)}
+
+    # 4. نقش‌ها رو به صندلی اختصاص بده (بر اساس uid توی صندلی)
+    g.assigned_roles = {
+        seat: uid_to_role[g.seats[seat][0]]  # get uid from seat and map role
+        for seat in g.seats
+    }
+
+    # 5. ارسال نقش‌ها به بازیکن‌ها و گاد
     log, unreachable = [], []
-    for seat in sorted(g.seats):  # ← صندلی‌ها به ترتیب عددی
+    for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles[seat]
         try:
             await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
         except telegram.error.Forbidden:
             unreachable.append(name)
-        log.append(f"{seat:>2}. {name} → {role}")  # ← فاصله‌گذاری مرتب دو رقمی
+        log.append(f"{seat:>2}. {name} → {role}")
 
-    # ارسال خلاصه برای گاد
     if g.god_id:
         text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
         if unreachable:
-            text += "\n⚠️ نشد برای این افراد پیام خصوصی بفرستم: " + ", ".join(unreachable)
+            text += "\n⚠️ نشد برای این افراد پیام بفرستم: " + ", ".join(unreachable)
         await ctx.bot.send_message(g.god_id, text)
-
 
     g.phase = "playing"
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
+
 
 
 
