@@ -82,6 +82,7 @@ class GameState:
     shuffle_prompt_msg_id: int | None = None
     purchased_seat: int | None = None
     awaiting_purchase_number: bool = False
+    pending_strikes: set[int] | None = None 
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -109,7 +110,7 @@ class GameState:
         self.shuffle_prompt_msg_id = None
         self.purchased_seat = None
         self.awaiting_purchase_number = False
-
+        self.pending_strikes = self.pending_strikes or set()
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -304,13 +305,6 @@ def control_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏁 اتمام بازی",        callback_data="end_game")]
     ])
 
-def striked_control_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔙 بازگشت", callback_data="strike_undo"),
-            InlineKeyboardButton("✅ انجام شد", callback_data="strike_done")
-        ]
-    ])
 # ─────── بالای فایل (یا کنار بقیهٔ ثوابت) ──────────────────
 REG   = "register"   # نمایش دکمه‌های ثبت‌نامی
 CTRL  = "controls"   # فقط دکمه‌های کنترلی
@@ -361,7 +355,14 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         lines.append(line)
 
     text = "\n".join(lines)
-    kb = text_seating_keyboard(g) if mode == REG else control_keyboard()
+
+    # انتخاب دکمه‌های مناسب بر اساس حالت
+    if mode == REG:
+        kb = text_seating_keyboard(g)
+    elif mode == "strike":
+        kb = strike_button_markup(g)  # ← دکمه‌های جدید برای خط زدن
+    else:
+        kb = control_keyboard()
 
     try:
         if g.last_seating_msg_id:
@@ -405,7 +406,6 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
                 role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
                 g.last_roles_msg_id = role_msg.message_id
 
-            # به‌روزرسانی نام آخرین سناریوی ارسال‌شده
             g.last_roles_scenario_name = g.scenario.name
 
     store.save()
@@ -985,102 +985,30 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "strike_out" and uid == g.god_id:
-        # حذف پیام‌های قبلی اگر وجود دارند
-        if g.strike_list_msg_id:
-            try:
-                await ctx.bot.delete_message(chat, g.strike_list_msg_id)
-            except:
-                pass
-        
-        if g.strike_control_msg_id:
-            try:
-                await ctx.bot.delete_message(chat, g.strike_control_msg_id)
-            except:
-                pass
-        
-        # ارسال لیست بازیکنان برای خط زدن
-        btns = [
-            [InlineKeyboardButton(f"{s}. {g.seats[s][1]}", callback_data=f"do_strike_{s}")]
-            for s in sorted(g.seats) if s not in g.striked
-        ]
-        
-        list_msg = await ctx.bot.send_message(
-            chat,
-            "چه کسی خط بخورد؟",
-            reply_markup=InlineKeyboardMarkup(btns)
-        )
-        
-        g.strike_list_msg_id = list_msg.message_id
-        g.strike_backup_seats = set(g.striked)  # ذخیره وضعیت فعلی
+        g.pending_strikes = set(g.striked)
         store.save()
+        await publish_seating(ctx, chat, g, mode="strike")
         return
 
-    if data.startswith("do_strike_") and uid == g.god_id:
-        seat = int(data.split("_")[2])
-        
-        if seat in g.seats and seat not in g.striked:
-            g.striked.add(seat)
-            store.save()
-            
-            # حذف پیام لیست بازیکنان
-            if g.strike_list_msg_id:
-                try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=g.strike_list_msg_id)
-                except:
-                    pass
-                g.strike_list_msg_id = None
-            
-            # ارسال دکمه‌های مدیریت
-            btns = [
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="undo_strike")],
-                [InlineKeyboardButton("✅ انجام شد", callback_data="strike_done")]
-            ]
-            
-            ctrl_msg = await ctx.bot.send_message(
-                chat,
-                f"🔧 مدیریت خط زدن برای {seat}. {g.seats[seat][1]}:",
-                reply_markup=InlineKeyboardMarkup(btns)
-            )
-            
-            g.strike_control_msg_id = ctrl_msg.message_id
-            await publish_seating(ctx, chat, g, mode=CTRL)
-        return
-
-    if data == "undo_strike" and uid == g.god_id:
-        g.striked = set(g.strike_backup_seats)
-        g.strike_backup_seats = {}
+    if data == "strike_toggle_done" and uid == g.god_id:
+        g.striked = set(g.pending_strikes)
+        g.pending_strikes = set()
         store.save()
-        
-        # حذف پیام مدیریت
-        if g.strike_control_msg_id:
-            try:
-                await ctx.bot.delete_message(chat, g.strike_control_msg_id)
-            except:
-                pass
-            g.strike_control_msg_id = None
-        
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
-    if data == "strike_done" and uid == g.god_id:
-        # فقط پیام‌های مدیریت را حذف کن
-        if g.strike_control_msg_id:
-            try:
-                await ctx.bot.delete_message(chat, g.strike_control_msg_id)
-            except:
-                pass
-            g.strike_control_msg_id = None
-        
-        if g.strike_list_msg_id:
-            try:
-                await ctx.bot.delete_message(chat, g.strike_list_msg_id)
-            except:
-                pass
-            g.strike_list_msg_id = None
-        
-        g.strike_backup_seats = {}  # پاک کردن نسخه پشتیبان
+    if data.startswith("strike_toggle_") and uid == g.god_id:
+        seat = int(data.split("_")[2])
+        if seat in g.pending_strikes:
+            g.pending_strikes.remove(seat)
+        else:
+            g.pending_strikes.add(seat)
         store.save()
+        await publish_seating(ctx, chat, g, mode="strike")
         return
+
+
+
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
         if uid != g.god_id:
@@ -1142,6 +1070,22 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if seat_str.isdigit():
             await handle_vote(ctx, chat, g, int(seat_str))
         return
+
+
+def strike_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    rows = []
+
+    for i in range(1, g.max_seats + 1):
+        if i in g.pending_strikes:
+            label = f"{i} ❌"
+        else:
+            label = f"{i} ✅"
+        rows.append([InlineKeyboardButton(label, callback_data=f"strike_toggle_{i}")])
+
+    # دکمه تایید نهایی
+    rows.append([InlineKeyboardButton("✅ تایید خط‌زدن", callback_data="strike_toggle_done")])
+
+    return InlineKeyboardMarkup(rows)
 
 
 
