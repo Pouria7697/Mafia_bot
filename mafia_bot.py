@@ -1086,7 +1086,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             await ctx.bot.send_message(
                 chat,
-                f"📢 استعلام وضعیت :\n🧑‍🤝‍🧑 {c} شهروند\n🕵️‍♂️ {m} مافیا"
+                f"📢 استعلام وضعیت :\n {c} شهروند\n {m} مافیا"
             )
             await publish_seating(ctx, chat, g, mode=CTRL)
             return
@@ -1157,7 +1157,7 @@ def strike_button_markup(g: GameState) -> InlineKeyboardMarkup:
 
 
 async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: bool = True):
-    players = list(g.seats.values())  # [(uid1, name1), (uid2, name2), ...]
+    players = [g.seats[i] for i in sorted(g.seats)]
     uids = [uid for uid, _ in players]
 
     # 1. رندوم‌سازی نقش‌ها (۵ بار برای اطمینان)
