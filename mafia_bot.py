@@ -363,7 +363,7 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
 
 
     # اضافه‌کردن گزارش وضعیت در پایین لیست اگر در مد status باشیم
-    if mode == "status":
+    if g.status_counts.get("citizen", 0) > 0 or g.status_counts.get("mafia", 0) > 0:
         c = g.status_counts.get("citizen", 0)
         m = g.status_counts.get("mafia", 0)
         lines.append(f"\n🧾 <i>استعلام وضعیت: {c} شهروند و {m} مافیا</i>")
