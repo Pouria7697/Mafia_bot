@@ -83,6 +83,8 @@ class GameState:
     purchased_seat: int | None = None
     awaiting_purchase_number: bool = False
     pending_strikes: set[int] | None = None 
+    status_counts: dict[str, int] = None
+    status_mode: bool = False 
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -111,7 +113,10 @@ class GameState:
         self.purchased_seat = None
         self.awaiting_purchase_number = False
         self.pending_strikes = self.pending_strikes or set()
-
+        self.status_counts = self.status_counts or {"citizen": 0, "mafia": 0}
+        self.status_mode = False
+    
+    
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -300,6 +305,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
 def control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✂️ خط‌زدن",           callback_data="strike_out")],
+        [InlineKeyboardButton("📊 استعلام وضعیت",     callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه",     callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی",     callback_data="final_vote")],
         [InlineKeyboardButton("🏁 اتمام بازی",        callback_data="end_game")]
@@ -354,15 +360,25 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
             line = f"♚{emoji_num} ⬜ /{i}"
         lines.append(line)
 
+
+
+    # اضافه‌کردن گزارش وضعیت در پایین لیست اگر در مد status باشیم
+    if mode == "status":
+        c = g.status_counts.get("citizen", 0)
+        m = g.status_counts.get("mafia", 0)
+        lines.append(f"\n🧾 <i>استعلام وضعیت: {c} شهروند و {m} مافیا</i>")
+
     text = "\n".join(lines)
 
-    # انتخاب دکمه‌های مناسب بر اساس حالت
     if mode == REG:
         kb = text_seating_keyboard(g)
     elif mode == "strike":
-        kb = strike_button_markup(g)  # ← دکمه‌های جدید برای خط زدن
+        kb = strike_button_markup(g)
+    elif mode == "status":
+        kb = status_button_markup(g)
     else:
         kb = control_keyboard()
+
 
     try:
         if g.last_seating_msg_id:
@@ -1047,6 +1063,39 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         return
 
+    if data == "status_query" and uid == g.god_id:
+        g.status_mode = True
+        await publish_seating(ctx, chat, g, mode="status")
+        return
+
+    if g.status_mode:
+        if data == "inc_citizen":
+            g.status_counts["citizen"] += 1
+        elif data == "dec_citizen" and g.status_counts["citizen"] > 0:
+            g.status_counts["citizen"] -= 1
+        elif data == "inc_mafia":
+            g.status_counts["mafia"] += 1
+        elif data == "dec_mafia" and g.status_counts["mafia"] > 0:
+            g.status_counts["mafia"] -= 1
+        elif data == "confirm_status":
+            g.status_mode = False
+            store.save()
+
+            c = g.status_counts.get("citizen", 0)
+            m = g.status_counts.get("mafia", 0)
+
+            await ctx.bot.send_message(
+                chat,
+                f"📢 استعلام وضعیت :\n🧑‍🤝‍🧑 {c} شهروند\n🕵️‍♂️ {m} مافیا"
+            )
+            await publish_seating(ctx, chat, g, mode=CTRL)
+            return
+
+        store.save()
+        await publish_seating(ctx, chat, g, mode="status")
+        return
+
+
     if data == "back_vote_final" and uid == g.god_id:
         g.phase = "defense_selection"
         g.vote_type = "awaiting_defense"
@@ -1071,6 +1120,24 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_vote(ctx, chat, g, int(seat_str))
         return
 
+def status_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    c = g.status_counts.get("citizen", 0)
+    m = g.status_counts.get("mafia", 0)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"⚪ {c}", callback_data="noop"),
+            InlineKeyboardButton("⬆️", callback_data="inc_citizen"),
+            InlineKeyboardButton("⬇️", callback_data="dec_citizen")
+        ],
+        [
+            InlineKeyboardButton(f"⚫ {m}", callback_data="noop"),
+            InlineKeyboardButton("⬆️", callback_data="inc_mafia"),
+            InlineKeyboardButton("⬇️", callback_data="dec_mafia")
+        ],
+        [
+            InlineKeyboardButton("✅ تأیید", callback_data="confirm_status")
+        ]
+    ])
 
 def strike_button_markup(g: GameState) -> InlineKeyboardMarkup:
     rows = []
