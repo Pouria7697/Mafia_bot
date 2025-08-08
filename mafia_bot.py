@@ -544,8 +544,9 @@ async def announce_winner(ctx, update, g: GameState):
     date_str = jdatetime.date.today().strftime("%Y/%m/%d")
     god_name = g.god_name or "—"
     scenario_name = getattr(g.scenario, "name", "—")
+    chat_id_str = str(chat.id)
     event_numbers = load_event_numbers()
-    event_num = event_numbers.get(str(chat_id), 1)
+    event_num = event_numbers.get(str(chat_id_str), 1)
     # لینک‌دار کردن گروه
     if chat.username:
         group_link = f"<a href='https://t.me/{chat.username}'>{group_title}</a>"
