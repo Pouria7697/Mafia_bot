@@ -250,6 +250,24 @@ def gs(chat_id):
         g.user_names = load_usernames_from_gist()  # ← بارگذاری اسامی از Gist
     return g
 
+def load_event_numbers():
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    res = requests.get(url, headers={"Authorization": f"token {GH_TOKEN}"})
+    data = res.json()
+    content = data["files"]["event_numbers.json"]["content"]
+    try:
+        return json.loads(content)
+    except:
+        return {}
+
+def save_event_numbers(event_numbers):
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    files = {
+        "event_numbers.json": {
+            "content": json.dumps(event_numbers, ensure_ascii=False, indent=2)
+        }
+    }
+    requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
 
 def seat_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = []
@@ -342,6 +360,10 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
         f"♚🕰 <b>زمان:</b> {g.event_time or '---'}",
         f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
     ]
+
+    event_numbers = load_event_numbers()
+    event_num = event_numbers.get(str(chat_id), 1)
+    lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
 
     if g.scenario:
         lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
@@ -557,6 +579,16 @@ async def announce_winner(ctx, update, g: GameState):
     if getattr(g, "clean_win", False):
         result_line += " (کلین‌شیت)"
     lines.append(result_line)
+
+
+    # 📌 افزایش شماره ایونت بعد از اتمام بازی
+    chat_id_str = str(chat.id)
+    event_numbers = load_event_numbers()
+    current_num = event_numbers.get(chat_id_str, 0)
+    event_numbers[chat_id_str] = current_num + 1
+    save_event_numbers(event_numbers)
+
+
 
     g.phase = "ended"
     store.save()
@@ -1934,6 +1966,26 @@ async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ این گروه با موفقیت فعال شد.")
 
 
+async def set_event_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    g = gs(update.effective_chat.id)
+
+    if update.effective_user.id != g.god_id:
+        await update.message.reply_text("❌ فقط راوی می‌تواند شماره ایونت را تغییر دهد.")
+        return
+
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text("⚠️ استفاده صحیح: /setevent <شماره>")
+        return
+
+    num = int(ctx.args[0])
+    event_numbers = load_event_numbers()
+    event_numbers[chat_id] = num
+    save_event_numbers(event_numbers)
+
+    await update.message.reply_text(f"✅ شماره ایونت برای این گروه روی {num} تنظیم شد.")
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("active", activate_group))
@@ -1953,6 +2005,7 @@ async def main():
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
     # ⏱ تایمر پویا مثل /3s
     app.add_handler(
         MessageHandler(
