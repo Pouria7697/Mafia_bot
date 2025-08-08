@@ -544,7 +544,8 @@ async def announce_winner(ctx, update, g: GameState):
     date_str = jdatetime.date.today().strftime("%Y/%m/%d")
     god_name = g.god_name or "—"
     scenario_name = getattr(g.scenario, "name", "—")
-
+    event_numbers = load_event_numbers()
+    event_num = event_numbers.get(str(chat_id), 1)
     # لینک‌دار کردن گروه
     if chat.username:
         group_link = f"<a href='https://t.me/{chat.username}'>{group_title}</a>"
@@ -554,6 +555,7 @@ async def announce_winner(ctx, update, g: GameState):
     lines = [
         f"░⚜️🎮 گروه: {group_link}",
         f"░⚜️📅 تاریخ: {date_str}",
+        f"░⚜️🎯 شماره رویداد:{event_num}",
         f"░💡🔱 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
         f"░⚜️📃 سناریو: {scenario_name}",
         "",
@@ -561,6 +563,7 @@ async def announce_winner(ctx, update, g: GameState):
         "",
     ]
 
+ 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
