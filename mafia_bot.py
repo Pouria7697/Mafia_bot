@@ -269,6 +269,28 @@ def save_event_numbers(event_numbers):
     }
     requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
 
+
+def load_stickers():
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    res = requests.get(url, headers={"Authorization": f"token {GH_TOKEN}"})
+    data = res.json()
+    content = data["files"]["stickers.json"]["content"]
+    try:
+        return json.loads(content)
+    except:
+        return {}
+
+def save_stickers(stickers):
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    files = {
+        "stickers.json": {
+            "content": json.dumps(stickers, ensure_ascii=False, indent=2)
+        }
+    }
+    requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
+
+
+
 def seat_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = []
 
@@ -752,6 +774,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "shuffle_yes":
+        if uid != g.god_id:
+            await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
+            return
         if not g.awaiting_shuffle_decision:
             return
 
@@ -771,6 +796,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "shuffle_no":
+        if uid != g.god_id:
+            await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
+            return
         if not g.awaiting_shuffle_decision:
             return
 
@@ -1220,11 +1248,23 @@ async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: boo
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles[seat]
+
+        # 📌 ارسال استیکر در صورت وجود
+        stickers = load_stickers()
+        if role in stickers:
+            try:
+                await ctx.bot.send_sticker(uid, stickers[role])
+            except:
+                pass
+
+        # 📌 ارسال متن نقش
         try:
             await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
         except telegram.error.Forbidden:
             unreachable.append(name)
+
         log.append(f"{seat:>2}. {name} → {role}")
+
 
     if g.god_id:
         text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
@@ -1989,6 +2029,31 @@ async def set_event_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ شماره ایونت برای این گروه روی {num} تنظیم شد.")
 
+MY_ID = 99347107 
+
+async def add_sticker_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # فقط آیدی تو
+    if update.effective_user.id != MY_ID:
+        await update.message.reply_text("⛔ فقط ادمین اصلی می‌تواند استیکر اضافه کند.")
+        return
+
+    # چک کن روی استیکر ریپلای شده یا نه
+    if not update.message.reply_to_message or not update.message.reply_to_message.sticker:
+        await update.message.reply_text("⚠️ باید روی پیام استیکر ریپلای کنید.")
+        return
+
+    if not ctx.args:
+        await update.message.reply_text("⚠️ استفاده صحیح: /addsticker <نام نقش>")
+        return
+
+    role_name = " ".join(ctx.args).strip()
+    file_id = update.message.reply_to_message.sticker.file_id
+
+    stickers = load_stickers()
+    stickers[role_name] = file_id
+    save_stickers(stickers)
+
+    await update.message.reply_text(f"✅ استیکر برای نقش «{role_name}» ذخیره شد.")
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -2010,6 +2075,7 @@ async def main():
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("addsticker", add_sticker_cmd, filters=filters.ChatType.PRIVATE))
     # ⏱ تایمر پویا مثل /3s
     app.add_handler(
         MessageHandler(
