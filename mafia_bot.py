@@ -52,7 +52,7 @@ class GameState:
     max_seats: int = 0
     scenario: Scenario | None = None
     phase: str = "idle"
-    g.vote_results = {}
+
     waiting_name: dict[int, int] | None = None
     waiting_name_proxy: dict[int, int] | None = None
     waiting_god: set[int] | None = None
@@ -115,6 +115,7 @@ class GameState:
         self.pending_strikes = self.pending_strikes or set()
         self.status_counts = self.status_counts or {"citizen": 0, "mafia": 0}
         self.status_mode = False
+        self.vote_results = {}
     
     
 class Store:
