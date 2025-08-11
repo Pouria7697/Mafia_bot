@@ -52,7 +52,7 @@ class GameState:
     max_seats: int = 0
     scenario: Scenario | None = None
     phase: str = "idle"
-
+    g.vote_results = {}
     waiting_name: dict[int, int] | None = None
     waiting_name_proxy: dict[int, int] | None = None
     waiting_god: set[int] | None = None
@@ -541,6 +541,9 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     await asyncio.sleep(5)
 
+    await ctx.bot.edit_message_reply_markup(chat_id, g.current_vote_msg_id, reply_markup=None)
+
+
     await ctx.bot.send_message(
         chat_id,
         f"🛑 تمام",
@@ -996,18 +999,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
-        # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
-        if g.last_vote_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
-            except:
-                pass
-           # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
-            g.last_vote_msg_id = None
-
-        await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
+        if g.vote_results:
+            results_text = "📊 نتیجه رأی‌گیری:\n"
+            for seat, voters in g.vote_results.items():
+                results_text += f"{seat}. {g.seats[seat][1]} → {len(voters)} رأی\n"
+            await ctx.bot.send_message(chat, results_text)
+        g.last_vote_msg_id = None
         store.save()
         return
+
 
 
     if data == "cleanup_below":
@@ -1110,20 +1110,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
     if data == "final_vote" and uid == g.god_id:
-        if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!", show_alert=True)
-            return
-
-        g.vote_type = "awaiting_defense"
-        g.voted_targets = set()  # 🧹 پاک‌سازی لیست تیک‌ها برای رأی‌گیری نهایی
-        store.save()
-
-        msg = await ctx.bot.send_message(
-            chat,
-            "📢 صندلی‌های دفاع را وارد کنید (مثال: 1 3 5):",
-            reply_markup=ForceReply(selective=True)
-        )
-        g.defense_prompt_msg_id = msg.message_id
+        await ctx.bot.send_message(chat, "📢 چند رأی لازم است تا دفاع برود؟")
+        g.awaiting_defense_count = True
         store.save()
         return
 
@@ -1175,14 +1163,42 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         return
 
-    if data.startswith("vote_"):
-        if uid != g.god_id:
-            await q.answer("⛔ فقط راوی می‌تواند رأی بدهد!", show_alert=True)
-            return
-        seat_str = data.split("_")[1]
-        if seat_str.isdigit():
-            await handle_vote(ctx, chat, g, int(seat_str))
+    if data.startswith("finalvote_") and uid == g.god_id:
+        seat = int(data.split("_")[1])
+        g.defense_seats = [seat]
+        await start_vote(ctx, chat, g, "final")
         return
+
+    if data.startswith("vote_") and uid != g.god_id:
+        target_seat = int(data.split("_")[1])
+        voter_seat = None
+        # پیدا کردن شماره صندلی این رای‌دهنده
+        for s, (u, _) in g.seats.items():
+            if u == uid:
+                voter_seat = s
+                break
+        if voter_seat is None:
+            return  # کسی که صندلی نداره نمی‌تونه رای بده
+
+        # ذخیره رای
+        if target_seat not in g.vote_results:
+            g.vote_results[target_seat] = []
+        # جلوگیری از رای تکراری همون نفر برای همون هدف
+        if voter_seat not in g.vote_results[target_seat]:
+            g.vote_results[target_seat].append(voter_seat)
+
+        # آپدیت متن پیام هدف
+        voters_list = "\n".join([f"صندلی {vs}" for vs in g.vote_results[target_seat]])
+        await ctx.bot.edit_message_text(
+            chat_id=chat,
+            message_id=g.current_vote_msg_id,
+            text=f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>\n"
+                 f"📥 رای‌ها:\n{voters_list or 'هنوز کسی رای نداده'}",
+            parse_mode="HTML",
+            reply_markup=g.current_vote_keyboard
+        )
+        return
+
 
 def status_button_markup(g: GameState) -> InlineKeyboardMarkup:
     c = g.status_counts.get("citizen", 0)
@@ -1907,23 +1923,26 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
   #      return  # چه ثبت بشه چه نه، کاری نکن دیگه
 
     # -------------- defense seats by God ------------------
-    if g.vote_type == "awaiting_defense" and uid == g.god_id:
-        nums = [int(n) for n in text.split() if n.isdigit() and int(n) in g.seats]
-        g.defense_seats = nums
-        g.vote_type = None  # ✅ غیرفعال کردن حالت وارد کردن صندلی دفاع
 
-        # 🧹 حذف پیام درخواست صندلی‌های دفاع
-        if g.defense_prompt_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id=chat_id, message_id=g.defense_prompt_msg_id)
-            except:
-                pass
-            g.defense_prompt_msg_id = None
+    if getattr(g, "awaiting_defense_count", False) and uid == g.god_id:
+        g.awaiting_defense_count = False
+        try:
+            needed_votes = int(text.strip())
+        except:
+            await update.message.reply_text("⚠️ باید عدد وارد کنید")
+            return
 
-        store.save()
-        await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
-        await start_vote(ctx, chat_id, g, "final")
+        defense_candidates = [s for s, voters in g.vote_results.items() if len(voters) == needed_votes]
+        if not defense_candidates:
+            await ctx.bot.send_message(chat_id, "❌ کسی با این تعداد رأی پیدا نشد.")
+            return
+
+        btns = [[InlineKeyboardButton(f"{s}. {g.seats[s][1]}", callback_data=f"finalvote_{s}")]
+                for s in defense_candidates]
+        await ctx.bot.send_message(chat_id, "🎯 انتخاب کنید چه کسی دفاع برود:",
+                                   reply_markup=InlineKeyboardMarkup(btns))
         return
+
 
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
