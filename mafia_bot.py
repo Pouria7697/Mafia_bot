@@ -115,10 +115,8 @@ class GameState:
         self.pending_strikes = self.pending_strikes or set()
         self.status_counts = self.status_counts or {"citizen": 0, "mafia": 0}
         self.status_mode = False
-        self.vote_sessions = getattr(self, "vote_sessions", {}) 
-        self.vote_stage = getattr(self, "vote_stage", None)
-        self.tally = getattr(self, "tally", {}) 
-        
+    
+    
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -478,29 +476,6 @@ async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
 # ─────────────────────────────────────────────────────────────
 #  رأی‌گیری (همان نسخهٔ قبلی؛ فقط دست نزدیم)
 # ─────────────────────────────────────────────────────────────
-
-def _get_user_seat(g: GameState, uid: int) -> int | None:
-    for s, (u, _) in g.seats.items():
-        if u == uid:
-            return s
-    return None
-
-def _render_vote_text(g: GameState, seat: int, voters: list[tuple[int,int,str]]) -> str:
-    # voters: [(uid, seat_no, name), ...] به ترتیب زمان فشردن دکمه
-    target_name = g.seats.get(seat, (None, "—"))[1]
-    lines = [f"🗳 رأی برای <b>{seat}. {target_name}</b>", ""]
-    lines.append("👥 آرای دریافت‌شده:")
-    if not voters:
-        lines.append("—")
-    else:
-        # نمایش به ترتیب اولین کلیک‌ها
-        for _, s_no, name in voters:
-            # اگه دوست داری اعداد رو دو رقمی نشون بده: f"{s_no:02d}"
-            lines.append(f"{s_no} — {name}")
-    return "\n".join(lines)
-
-
-
 async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_stage = stage
     g.tally = {}
@@ -558,43 +533,32 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
 
-    # پیام اولیه با متن خالی + دکمه
-    text = _render_vote_text(g, target_seat, [])
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗳 رأی می‌دهم", callback_data=f"vote_press_{chat_id}")],
-    ])
-    msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+    await ctx.bot.send_message(
+        chat_id,
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        parse_mode="HTML"
+    )
 
-    # نشست رأی برای این پیام
-    g.vote_sessions[msg.message_id] = {
-        "seat": target_seat,
-        "voters": [],     # [(uid, seat_no, name)]
-        "open": True
-    }
+    await asyncio.sleep(5)
+
+    await ctx.bot.send_message(
+        chat_id,
+        f"🛑 تمام",
+        parse_mode="HTML"
+    )
+
+    # ✅ علامت‌گذاری اینکه این صندلی رأی‌گیری شده
+    if not hasattr(g, "voted_targets"):
+        g.voted_targets = set()
+    g.voted_targets.add(target_seat)
+
+    # 🔁 آپدیت دکمه‌ها
+    await update_vote_buttons(ctx, chat_id, g)
+
     store.save()
 
-    # ۵ ثانیه مهلت رأی و بعد بستن دکمه
-    try:
-        await asyncio.sleep(5)
-        session = g.vote_sessions.get(msg.message_id)
-        if session and session["open"]:
-            # بستن پنجره‌ی رأی برای این پیام
-            session["open"] = False
-            # (اختیاری) می‌تونی یه پانوشت «⏰ زمان تمام شد» ته متن اضافه کنی:
-            final_text = _render_vote_text(g, session["seat"], session["voters"]) + "\n\n⏰ اتمام."
-            try:
-                await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id,
-                                                text=final_text, parse_mode="HTML")
-            except:
-                pass
-            # حذف دکمه
-            try:
-                await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=msg.message_id, reply_markup=None)
-            except:
-                pass
-            store.save()
-    except:
-        pass
+import jdatetime
+
 
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
@@ -1032,42 +996,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
+        # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
         if g.last_vote_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
             except:
                 pass
+           # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
             g.last_vote_msg_id = None
 
-        if g.vote_stage == "initial_vote":
-            tally = {}
-            for msg_id, session in list(g.vote_sessions.items()):
-                seat_target = session["seat"]
-                unique_voters = []
-                seen = set()
-                for uid_, s_no, name_ in session["voters"]:
-                    if uid_ not in seen:
-                        seen.add(uid_)
-                        unique_voters.append((uid_, s_no, name_))
-                tally.setdefault(seat_target, []).extend(uid_ for uid_, _, _ in unique_voters)
-
-            if tally:
-                ranking = sorted(tally.items(), key=lambda kv: (-len(kv[1]), kv[0]))
-                lines = ["📊 نتیجه رأی‌گیری اولیه:"]
-                for seat_no, voters in ranking:
-                    name = g.seats.get(seat_no, (None, "—"))[1]
-                    lines.append(f"• {seat_no}. {name} → {len(voters)} رأی")
-                await ctx.bot.send_message(chat, "\n".join(lines))
-            else:
-                await ctx.bot.send_message(chat, "📊 نتیجه رأی‌گیری اولیه: هیچ رأیی ثبت نشد.")
-
-            g.vote_sessions.clear()
-            store.save()
-        else:
-            await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
-
+        await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
+        store.save()
         return
-
 
 
     if data == "cleanup_below":
@@ -1168,45 +1108,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_vote(ctx, chat, g, "initial_vote")
         return
 
-    if data.startswith("vote_press_"):
-        if update.effective_chat.type == "private":
-            await q.answer("⛔ رأی فقط داخل گروه.", show_alert=True)
-            return
-
-        msg_id = q.message.message_id
-        session = g.vote_sessions.get(msg_id)
-        if not session or not session.get("open"):
-            await q.answer("⏰ زمان این رأی تمام شده.", show_alert=False)
-            return
-
-        voter_uid = uid
-        voter_seat = _get_user_seat(g, voter_uid)
-        if voter_seat is None or voter_seat in g.striked:
-            await q.answer("⛔ فقط بازیکنان حاضر می‌توانند رأی دهند.", show_alert=True)
-            return
-
-        already = any(v[0] == voter_uid for v in session["voters"])
-        if already:
-            await q.answer("قبلاً رأی داده‌اید.", show_alert=False)
-            return
-
-        voter_name = g.seats[voter_seat][1]
-        session["voters"].append((voter_uid, voter_seat, voter_name))
-
-        try:
-            new_text = _render_vote_text(g, session["seat"], session["voters"])
-            await ctx.bot.edit_message_text(
-                chat_id=chat,
-                message_id=msg_id,
-                text=new_text,
-                parse_mode="HTML",
-                reply_markup=q.message.reply_markup
-            )
-        except:
-            pass
-
-        store.save()
-        return
 
     if data == "final_vote" and uid == g.god_id:
         if uid != g.god_id:
