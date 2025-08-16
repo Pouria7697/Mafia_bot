@@ -1799,11 +1799,17 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     new_god = update.message.reply_to_message.from_user
+
+    # 👇 نام راوی: اول از Gist (g.user_names)، اگر نبود full_name تلگرام
+    if not hasattr(g, "user_names") or g.user_names is None:
+        g.user_names = load_usernames_from_gist()
+    god_display_name = g.user_names.get(new_god.id, new_god.full_name)
+
     g.god_id = new_god.id
-    g.god_name = new_god.full_name
+    g.god_name = god_display_name
     store.save()
 
-    await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_god.full_name}.")
+    await update.message.reply_text(f"✅ حالا گاد جدید بازیه {god_display_name}.")
 
     # 📢 نمایش لیست صندلی‌های به‌روز شده (با حالت مناسب)
     mode = CTRL if g.phase != "idle" else REG
@@ -1823,6 +1829,7 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except telegram.error.Forbidden:
             await update.message.reply_text("⚠️ نتونستم نقش‌ها رو به پیوی گاد جدید بفرستم.")
+
 
 
 async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2011,8 +2018,9 @@ async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_event_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    g = gs(update.effective_chat.id)
+    chat_id_int = update.effective_chat.id
+    chat_id = str(chat_id_int)
+    g = gs(chat_id_int)
 
     if update.effective_user.id != g.god_id:
         await update.message.reply_text("❌ فقط راوی می‌تواند شماره ایونت را تغییر دهد.")
@@ -2027,7 +2035,16 @@ async def set_event_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     event_numbers[chat_id] = num
     save_event_numbers(event_numbers)
 
+    # ✅ همین‌جا لیست فعلی را هم آپدیت کن
+    try:
+        mode = CTRL if g.phase != "idle" else REG
+        await publish_seating(ctx, chat_id_int, g, mode=mode)
+    except Exception as e:
+        # اگر ویرایش پیام به هر دلیل نشد، فقط پیام تأییدی بده
+        pass
+
     await update.message.reply_text(f"✅ شماره ایونت برای این گروه روی {num} تنظیم شد.")
+
 
 MY_ID = 99347107 
 
