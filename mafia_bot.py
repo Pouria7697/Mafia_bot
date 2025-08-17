@@ -25,7 +25,7 @@ BTN_PLAYER  = "player_name"
 BTN_DELETE  = "delete_seat"      
 BTN_START   = "start_game"      
 BTN_CALL = "call_players"   
-BTN_CALL = "reroll_roles"  
+BTN_REROLL = "reroll_roles"  
 
 GH_TOKEN = os.environ.get("GH_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
