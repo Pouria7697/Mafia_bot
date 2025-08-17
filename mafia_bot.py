@@ -11,6 +11,7 @@ import asyncio
 import regex
 import subprocess 
 from telegram.ext import filters
+from telegram.error import BadRequest
 group_filter = filters.ChatType.GROUPS
 from datetime import datetime, timezone, timedelta  
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
@@ -336,8 +337,11 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")
         ]
         if len(g.seats) == g.max_seats:
-            row.insert(0, InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL))
-            row.insert(0, InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"))
+    
+            row.extend([
+                InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"),
+                InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL),
+            ])
         rows.append(row)
 
     return InlineKeyboardMarkup(rows)
@@ -358,6 +362,14 @@ def control_keyboard() -> InlineKeyboardMarkup:
 # ─────── بالای فایل (یا کنار بقیهٔ ثوابت) ──────────────────
 REG   = "register"   # نمایش دکمه‌های ثبت‌نامی
 CTRL  = "controls"   # فقط دکمه‌های کنترلی
+
+async def safe_q_answer(q, text=None, show_alert=False):
+    try:
+        await q.answer(text, show_alert=show_alert)
+    except telegram.error.BadRequest:
+        pass
+    except Exception:
+        pass
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
@@ -642,7 +654,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return
     q = update.callback_query
-    await q.answer()
+    await safe_q_answer(q)
     data = q.data
     chat = q.message.chat.id
     uid = q.from_user.id
@@ -664,7 +676,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند حذف کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند حذف کند!")
             return
         g.vote_type = "awaiting_delete"
         store.save()
@@ -681,12 +693,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await publish_seating(ctx, chat, g)
                 break
         else:
-            await q.answer("❗ شما در لیست نیستید.", show_alert=True)
+            await ctx.bot.send_message(chat,"❗ شما در لیست نیستید.")
         return
 
     if data == "change_name":
         if uid not in [u for u, _ in g.seats.values()]:
-            await q.answer("❗ شما هنوز ثبت‌نام نکرده‌اید.", show_alert=True)
+            await ctx.bot.send_message(chat,"❗ شما هنوز ثبت‌نام نکرده‌اید.")
             return
 
         g.waiting_name[uid] = [s for s in g.seats if g.seats[s][0] == uid][0]
@@ -702,7 +714,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── صدا زدن همه قبلِ شروع ──────────────────────────────────
     if data == BTN_CALL:
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند این دکمه را بزند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند این دکمه را بزند!")
             return
 
         mentions = [
@@ -719,7 +731,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── تغییر ساعت شروع ───────────────────────────────────────
     if data == "change_time":
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند زمان را عوض کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند زمان را عوض کند!")
             return
         g.vote_type = "awaiting_time"
         store.save()
@@ -733,11 +745,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
     if data == "startgame":
         if g.god_id is None:
-            await q.answer("⚠️ ابتدا باید راوی ثبت نام کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ ابتدا باید راوی ثبت نام کند!")
             return
 
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if len(g.seats) != g.max_seats:
@@ -776,10 +788,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         await show_scenario_selection(ctx, chat, g)
         return
-    # data == "shuffle_yes"
+
     if data == "shuffle_yes":
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -818,7 +830,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # data == "shuffle_no"
     if data == "shuffle_no":
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -858,7 +870,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "change_scenario":
         if g.god_id is None or uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند سناریو را تغییر دهد!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند سناریو را تغییر دهد!")
             return
 
         g.awaiting_scenario = True
@@ -890,7 +902,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await publish_seating(ctx, chat, g)
             else:
                 if uid != g.god_id:
-                    await q.answer("⚠️ فقط راوی می‌تواند سناریو را انتخاب کند!", show_alert=True)
+                    await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند سناریو را انتخاب کند!")
                     return
                 await shuffle_and_assign(ctx, chat, g)
         return
@@ -1050,7 +1062,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "cleanup_below":
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تونه این کار رو انجام بده!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تونه این کار رو انجام بده!")
             return
 
         try:
@@ -1127,15 +1139,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == BTN_REROLL:
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند نقش‌ها را رندوم کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند نقش‌ها را رندوم کند!")
             return
 
         if not g.scenario or len(g.seats) != g.max_seats:
-            await q.answer("⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.")
             return
 
         repeats = random.randint(1, 30)
-        g.shuffle_repeats = repeats  # 👈 ذخیره کن برای مرحله شروع بازی
+        g.shuffle_repeats = repeats 
 
         try:
             await shuffle_and_assign(
@@ -1146,12 +1158,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 uid_to_role=None,
                 notify_players=False,
                 preview_mode=True,
-                role_shuffle_repeats=repeats,  # 👈 همین تعداد بار نقش‌ها شافل می‌شن
+                role_shuffle_repeats=repeats,  
             )
             await ctx.bot.send_message(chat, f"🎲 نقش‌ها {repeats} بار رندوم شد.")
-            await q.answer("✅ انجام شد.", show_alert=False)
+           
         except Exception:
-            await q.answer("⚠️ خطا در رندوم نقش.", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ خطا در رندوم نقش.")
 
         store.save()
         return
@@ -1161,7 +1173,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند رأی‌گیری را شروع کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند رأی‌گیری را شروع کند!")
             return
 
         g.voted_targets = set()  # 🧹 ریست تیک‌های قبلی هنگام شروع رأی‌گیری جدید
@@ -1180,7 +1192,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "final_vote" and uid == g.god_id:
         if uid != g.god_id:
-            await q.answer("⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!", show_alert=True)
+            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!")
             return
 
         g.vote_type = "awaiting_defense"
@@ -1246,7 +1258,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("vote_"):
         if uid != g.god_id:
-            await q.answer("⛔ فقط راوی می‌تواند رأی بدهد!", show_alert=True)
+            await ctx.bot.send_message(chat,"⛔ فقط راوی می‌تواند رأی بدهد!")
             return
         seat_str = data.split("_")[1]
         if seat_str.isdigit():
@@ -1655,28 +1667,35 @@ async def newgame(update: Update, ctx):
     chat = update.effective_chat.id
 
     if chat not in store.active_groups:
-        return  # گروه غیرمجاز
+        return
 
     if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
-
 
     member = await ctx.bot.get_chat_member(chat, update.effective_user.id)
     if member.status not in {"administrator", "creator"}:
         await update.message.reply_text("فقط ادمین‌های گروه می‌تونن بازی جدید شروع کنن.")
         return
 
+    # ✅ اعتبارسنجی آرگومان‌ها
     if not ctx.args:
-        await update.message.reply_text("Usage: /newgame <seats>")
+        await update.message.reply_text("Usage: /newgame <seats> (مثال: /newgame 12)")
+        return
+    try:
+        seats = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("❗ تعداد صندلی باید عدد باشد. مثال: /newgame 12")
+        return
+    if seats < 3 or seats > 20:
+        await update.message.reply_text("❗ تعداد صندلی باید بین 3 تا 20 باشد.")
         return
 
-    store.games[chat] = GameState(max_seats=int(ctx.args[0]))
+    store.games[chat] = GameState(max_seats=seats)
     g = gs(chat)
 
-    # 🔄 این خط رو اضافه کنید تا نام‌ها همیشه تازه باشند
-    g.user_names = load_usernames_from_gist()  # بارگذاری نام‌ها از Gist
-    save_usernames_to_gist(g.user_names)  # ذخیره مجدد برای اطمینان
+    g.user_names = load_usernames_from_gist()
+    save_usernames_to_gist(g.user_names)
 
     g.from_startgame = True
     g.awaiting_scenario = True
@@ -1688,7 +1707,6 @@ async def newgame(update: Update, ctx):
         "ended": []
     })
     store.group_stats[chat]["waiting_list"].append(now)
-
     store.save()
 
     await show_scenario_selection(ctx, chat, g)
@@ -2168,8 +2186,19 @@ async def add_sticker_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ استیکر برای نقش «{role_name}» ذخیره شد.")
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    # BadRequest های بی‌اهمیت رو نادیده بگیر
+    if isinstance(err, BadRequest) and ("Query is too old" in str(err) or "query id is invalid" in str(err)):
+        return
+    try:
+        chat_id = update.effective_chat.id if update and hasattr(update, "effective_chat") else None
+        print(f"[ERROR] chat={chat_id} err={err}")
+    except Exception:
+        pass
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("active", activate_group))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
