@@ -1301,7 +1301,7 @@ async def shuffle_and_assign(
         random.shuffle(pool)
         uids_for_roles = uids[:]
         random.shuffle(uids_for_roles)
-        uid_to_role = {uid_: pool[i] for i, uid_: enumerate(uids_for_roles)}
+        uid_to_role = {uid_: pool[i] for i, uid_ in enumerate(uids_for_roles)}
 
     # حالت پیش‌نمایش: هیچ تغییری در g.seats و g.assigned_roles نده؛ فقط برای گاد بفرست و ذخیره کن
     if preview_mode:
