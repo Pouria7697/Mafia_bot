@@ -332,19 +332,21 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     ]
 
     if g.god_id:
-        row = [
+        # ردیف اول: صدا زدن + تغییر سناریو
+        rows.append([
             InlineKeyboardButton("🔊 صدا زدن", callback_data=BTN_CALL),
             InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")
-        ]
+        ])
+
+        # ردیف دوم: شروع بازی + رندوم نقش (فقط وقتی همه صندلیا پره)
         if len(g.seats) == g.max_seats:
-    
-            row.extend([
+            rows.append([
                 InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"),
-                InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL),
+                InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL)
             ])
-        rows.append(row)
 
     return InlineKeyboardMarkup(rows)
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -373,6 +375,11 @@ async def safe_q_answer(q, text=None, show_alert=False):
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(ctx, chat_id: int, g: GameState, mode: str = REG):
+
+    if not g.max_seats or g.max_seats <= 0:
+        await ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند.")
+        return
+
     today = jdatetime.date.today().strftime("%Y/%m/%d")
 
     emoji_numbers = ["⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓",
@@ -1687,8 +1694,8 @@ async def newgame(update: Update, ctx):
     except ValueError:
         await update.message.reply_text("❗ تعداد صندلی باید عدد باشد. مثال: /newgame 12")
         return
-    if seats < 3 or seats > 20:
-        await update.message.reply_text("❗ تعداد صندلی باید بین 3 تا 20 باشد.")
+    if seats < 1 or seats > 20:
+        await update.message.reply_text("❗ تعداد صندلی باید بین 1 تا 20 باشد.")
         return
 
     store.games[chat] = GameState(max_seats=seats)
@@ -1898,7 +1905,18 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
+
+    # 1) فقط در گروه‌های فعال
+    if chat not in store.active_groups:
+        await update.message.reply_text("⛔ این گروه هنوز فعال نشده. اول /active را بزن.")
+        return
+
     g = gs(chat)
+
+    # 2) فقط بعد از ساخت بازی
+    if not g.max_seats or g.max_seats <= 0:
+        await update.message.reply_text("⚠️ اول با /newgame <seats> بازی بساز، بعد /god بزن.")
+        return
 
     # ✅ فقط ادمین‌ها یا گاد فعلی اجازه تغییر گاد دارند
     admins = await ctx.bot.get_chat_administrators(chat)
@@ -1912,24 +1930,19 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لطفاً روی پیام کسی ریپلای کنید و بعد /god را بزنید.")
         return
 
-    new_god = update.message.reply_to_message.from_user
+    target = update.message.reply_to_message.from_user
+    # نام ترجیحی: از gist اگر موجود، وگرنه نام تلگرام
+    new_name = g.user_names.get(target.id, target.full_name)
 
-    # 👇 نام راوی: اول از Gist (g.user_names)، اگر نبود full_name تلگرام
-    if not hasattr(g, "user_names") or g.user_names is None:
-        g.user_names = load_usernames_from_gist()
-    god_display_name = g.user_names.get(new_god.id, new_god.full_name)
-
-    g.god_id = new_god.id
-    g.god_name = god_display_name
+    g.god_id = target.id
+    g.god_name = new_name
     store.save()
 
-    await update.message.reply_text(f"✅ حالا گاد جدید بازیه {god_display_name}.")
+    await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_name}.")
 
-    # 📢 نمایش لیست صندلی‌های به‌روز شده (با حالت مناسب)
     mode = CTRL if g.phase != "idle" else REG
     await publish_seating(ctx, chat, g, mode=mode)
 
-    # 🔒 فقط وقتی بازی شروع شده پیام خصوصی بفرست
     if g.phase != "idle":
         log = []
         for seat in sorted(g.assigned_roles):
@@ -1938,7 +1951,7 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             log.append(f"{name} ⇦ {role}")
         try:
             await ctx.bot.send_message(
-                new_god.id,
+                target.id,
                 "👑 شما به عنوان گاد جدید انتخاب شدید.\n\n🧾 لیست نقش‌ها:\n" + "\n".join(log)
             )
         except telegram.error.Forbidden:
