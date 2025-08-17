@@ -24,7 +24,8 @@ BTN_GOD     = "register_god"
 BTN_PLAYER  = "player_name"    
 BTN_DELETE  = "delete_seat"      
 BTN_START   = "start_game"      
-BTN_CALL = "call_players"     
+BTN_CALL = "call_players"   
+BTN_CALL = "reroll_roles"  
 
 GH_TOKEN = os.environ.get("GH_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
@@ -115,6 +116,7 @@ class GameState:
         self.pending_strikes = self.pending_strikes or set()
         self.status_counts = self.status_counts or {"citizen": 0, "mafia": 0}
         self.status_mode = False
+        self.preview_uid_to_role = getattr(self, "preview_uid_to_role", None)
     
     
 class Store:
@@ -333,6 +335,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")
         ]
         if len(g.seats) == g.max_seats:
+            row.insert(0, InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL))
             row.insert(0, InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"))
         rows.append(row)
 
@@ -773,10 +776,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_scenario_selection(ctx, chat, g)
         return
 
+    # data == "shuffle_yes"
     if data == "shuffle_yes":
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
             return
+
         if not g.awaiting_shuffle_decision:
             return
 
@@ -784,7 +789,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.from_startgame = False
         store.save()
 
-        # حذف پیام دکمه
         if hasattr(g, "shuffle_prompt_msg_id") and g.shuffle_prompt_msg_id:
             try:
                 await ctx.bot.delete_message(chat, g.shuffle_prompt_msg_id)
@@ -792,13 +796,27 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             g.shuffle_prompt_msg_id = None
 
-        await shuffle_and_assign(ctx, chat, g, shuffle_seats=True)
+        await shuffle_and_assign(
+            ctx,
+            chat,
+            g,
+            shuffle_seats=True,                        # صندلی‌ها جابجا بشن
+            uid_to_role=g.preview_uid_to_role or None, # اگر ریرول زده بود، همون نقش‌ها
+            notify_players=True,                       # این بار برای پلیرها هم بفرست
+            preview_mode=False,
+        )
+
+        g.preview_uid_to_role = None
+        store.save()
         return
 
+
+    # data == "shuffle_no"
     if data == "shuffle_no":
         if uid != g.god_id:
             await q.answer("⚠️ فقط راوی می‌تواند بازی را شروع کند!", show_alert=True)
             return
+
         if not g.awaiting_shuffle_decision:
             return
 
@@ -813,7 +831,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             g.shuffle_prompt_msg_id = None
 
-        await shuffle_and_assign(ctx, chat, g, shuffle_seats=False)
+        await shuffle_and_assign(
+            ctx,
+            chat,
+            g,
+            shuffle_seats=False,                        # صندلی‌ها ثابت بمانند
+            uid_to_role=g.preview_uid_to_role or None,  # اگر ریرول زده بود، همان نقش‌ها
+            notify_players=True,                        # این بار برای پلیرها هم بفرست
+            preview_mode=False,
+        )
+
+        g.preview_uid_to_role = None
+        store.save()
         return
 
 
@@ -1087,6 +1116,32 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g, mode="strike")
         return
 
+    # داخل callback_router
+    if data == BTN_REROLL:
+        if uid != g.god_id:
+            await q.answer("⚠️ فقط راوی می‌تواند نقش‌ها را رندوم کند!", show_alert=True)
+            return
+
+        if not g.scenario or len(g.seats) != g.max_seats:
+            await q.answer("⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.", show_alert=True)
+            return
+
+        try:
+            # پیش‌نمایش: نقش‌ها ساخته می‌شن، به پلیرها ارسال نمی‌شن، فاز بازی عوض نمی‌شه
+            await shuffle_and_assign(
+                ctx,
+                chat,
+                g,
+                shuffle_seats=False,   # در پیش‌نمایش صندلی‌ها رو جابجا نکن
+                uid_to_role=None,      # نقش‌های جدید بساز
+                notify_players=False,  # به پلیرها ارسال نشود
+                preview_mode=True,     # فقط پیش‌نمایش
+            )
+            await q.answer("✅ پیش‌نمایش نقش‌ها برای شما ارسال شد.", show_alert=False)
+        except Exception:
+            await q.answer("⚠️ خطا در پیش‌نمایش.", show_alert=True)
+
+        return
 
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
@@ -1220,61 +1275,101 @@ def strike_button_markup(g: GameState) -> InlineKeyboardMarkup:
 
 
 
-async def shuffle_and_assign(ctx, chat_id: int, g: GameState, shuffle_seats: bool = True):
+async def shuffle_and_assign(
+    ctx,
+    chat_id: int,
+    g: GameState,
+    shuffle_seats: bool = True,
+    uid_to_role: dict[int, str] | None = None,
+    notify_players: bool = True,
+    preview_mode: bool = False,
+):
+    """
+    حالت‌ها:
+      - preview_mode=True: فقط نقش‌ها را بساز و برای گاد بفرست (به پلیرها نفرست، state بازی را تغییر نده).
+      - preview_mode=False: نقش‌ها را نهایی کن؛ در صورت نیاز صندلی‌ها را جابه‌جا کن؛
+        نقش را برای پلیرها بفرست و فاز بازی را 'playing' کن.
+      - uid_to_role: اگر از قبل نقش‌ها را ساخته‌ای (مثلاً با BTN_REROLL)، همین را استفاده کن تا دوباره شافل نشود.
+    """
+    # لیست بازیکن‌ها بر اساس ترتیب فعلی صندلی‌ها
     players = [g.seats[i] for i in sorted(g.seats)]
     uids = [uid for uid, _ in players]
 
-    # 1. رندوم‌سازی نقش‌ها (۵ بار برای اطمینان)
-    pool = [r for r, n in g.scenario.roles.items() for _ in range(n)]
-    for _ in range(5):
+    # اگر نگاشت نقش→بازیکن داده نشده، اینجا بساز (مستقل از شماره صندلی)
+    if uid_to_role is None:
+        pool = [r for r, n in g.scenario.roles.items() for _ in range(n)]
         random.shuffle(pool)
+        uids_for_roles = uids[:]
+        random.shuffle(uids_for_roles)
+        uid_to_role = {uid_: pool[i] for i, uid_: enumerate(uids_for_roles)}
 
-    # 2. نقش به ترتیب به بازیکن‌ها بده
-    uid_to_role = {uid: pool[i] for i, uid in enumerate(uids)}
+    # حالت پیش‌نمایش: هیچ تغییری در g.seats و g.assigned_roles نده؛ فقط برای گاد بفرست و ذخیره کن
+    if preview_mode:
+        log = []
+        for seat in sorted(g.seats):
+            uid, name = g.seats[seat]
+            role = uid_to_role.get(uid, "—")
+            log.append(f"{seat:>2}. {name} → {role}")
+        if g.god_id:
+            try:
+                await ctx.bot.send_message(
+                    g.god_id,
+                    "🎲 پیش‌نمایش نقش‌ها (فقط برای راوی):\n" + "\n".join(log)
+                )
+            except:
+                pass
+        g.preview_uid_to_role = uid_to_role
+        store.save()
+        return uid_to_role
 
-    # 3. صندلی‌ها رو اگه لازم بود جابجا کن
+    # از اینجا به بعد «نهایی‌سازی»
+    # در صورت درخواست، صندلی‌ها را جابه‌جا کن (نقش‌ها به uid می‌چسبند، نه صندلی)
     if shuffle_seats:
         random.shuffle(players)
     g.seats = {i + 1: (uid, name) for i, (uid, name) in enumerate(players)}
 
-    # 4. نقش‌ها رو به صندلی اختصاص بده (بر اساس uid توی صندلی)
+    # نقش‌ها را به صندلی‌ها نسبت بده از روی uid
     g.assigned_roles = {
-        seat: uid_to_role[g.seats[seat][0]]  # get uid from seat and map role
+        seat: uid_to_role[g.seats[seat][0]]
         for seat in g.seats
     }
 
-    # 5. ارسال نقش‌ها به بازیکن‌ها و گاد
+    # ارسال نقش‌ها به پلیرها (در صورت نیاز) و ساخت لاگ برای گاد
     log, unreachable = [], []
+    stickers = load_stickers()
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles[seat]
 
-        # 📌 ارسال استیکر در صورت وجود
-        stickers = load_stickers()
-        if role in stickers:
+        if notify_players:
+            if role in stickers:
+                try:
+                    await ctx.bot.send_sticker(uid, stickers[role])
+                except:
+                    pass
             try:
-                await ctx.bot.send_sticker(uid, stickers[role])
-            except:
-                pass
-
-        # 📌 ارسال متن نقش
-        try:
-            await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
-        except telegram.error.Forbidden:
-            unreachable.append(name)
+                await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
+            except telegram.error.Forbidden:
+                unreachable.append(name)
 
         log.append(f"{seat:>2}. {name} → {role}")
 
-
+    # خلاصه برای گاد
     if g.god_id:
         text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
         if unreachable:
             text += "\n⚠️ نشد برای این افراد پیام بفرستم: " + ", ".join(unreachable)
-        await ctx.bot.send_message(g.god_id, text)
+        try:
+            await ctx.bot.send_message(g.god_id, text)
+        except:
+            pass
 
+    # به‌روزرسانی فاز و UI
     g.phase = "playing"
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
+
+    return uid_to_role
 
 
 
