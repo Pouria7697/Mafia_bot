@@ -1088,7 +1088,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await edit_main_keyboard(ctx, chat, g, kb)
         return
 
-     if data.startswith("toggle_multi_") and g.awaiting_winner and g.chaos_mode:
+    if data.startswith("toggle_multi_") and g.awaiting_winner and g.chaos_mode:
         try:
             s = int(data.split("_")[2])
         except:
