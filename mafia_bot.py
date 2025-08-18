@@ -406,10 +406,6 @@ def kb_pick_multi_seats(alive_seats: list[int], selected: set[int],
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
-async def set_hint_and_kb(ctx, chat_id: int, g: GameState, hint: str | None, kb: InlineKeyboardMarkup, mode: str = CTRL):
-    g.ui_hint = hint
-    store.save()
-    await publish_seating(ctx, chat_id, g, mode=mode, custom_kb=kb)
 
 
 # ─────── بالای فایل (یا کنار بقیهٔ ثوابت) ──────────────────
@@ -423,6 +419,10 @@ async def safe_q_answer(q, text=None, show_alert=False):
         pass
     except Exception:
         pass
+async def set_hint_and_kb(ctx, chat_id: int, g: GameState, hint: str | None, kb: InlineKeyboardMarkup, mode: str = CTRL):
+    g.ui_hint = hint
+    store.save()
+    await publish_seating(ctx, chat_id, g, mode=mode, custom_kb=kb)
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(
