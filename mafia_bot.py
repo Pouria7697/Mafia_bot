@@ -1006,7 +1006,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
-     if data in {"winner_city", "winner_mafia", "clean_city", "clean_mafia","winner_city_chaos", "winner_mafia_chaos"} and g.awaiting_winner:
+    if data in {
+        "winner_city", "winner_mafia", "clean_city", "clean_mafia",
+        "winner_city_chaos", "winner_mafia_chaos"
+    } and g.awaiting_winner:
         g.temp_winner = data
         g.chaos_mode = data.endswith("_chaos")
         store.save()
@@ -1023,6 +1026,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # شهر/مافیا (معمولی یا کی‌آس) → اول بپرس خریداری؟
         await edit_main_keyboard(ctx, chat, g, kb_purchase_yesno())
         return
+
 
 
 
