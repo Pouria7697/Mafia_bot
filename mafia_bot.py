@@ -1120,22 +1120,23 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-     if data == "back_to_winner_select" and uid == g.god_id and g.awaiting_winner:
+    if data == "back_to_winner_select" and uid == g.god_id and g.awaiting_winner:
         await edit_main_keyboard(ctx, chat, g, kb_endgame_root())
         return
-
 
     if data == "confirm_winner" and uid == g.god_id and getattr(g, "temp_winner", None):
         g.awaiting_winner = False
         g.winner_side = "شهر" if "city" in g.temp_winner else "مافیا"
         g.clean_win = "clean" in g.temp_winner
-        # chaos_mode و chaos_selected هم قبلاً ست شده‌اند (اگر حالت کی‌آس بوده)
+        # اگر حالت کی‌آس بوده، g.chaos_mode و g.chaos_selected قبلاً مقداردهی شده‌اند
         g.temp_winner = None
         store.save()
 
+        # اعلام نتیجه و ریست بازی
         await announce_winner(ctx, update, g)
         await reset_game(update=update)
         return
+
 
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
