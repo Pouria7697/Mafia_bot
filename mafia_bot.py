@@ -21,7 +21,6 @@ from telegram.ext import (
 )
 from collections import defaultdict
 # --- CALLBACK DATA CONSTANTS ---
-BTN_GOD     = "register_god"    
 BTN_PLAYER  = "player_name"    
 BTN_DELETE  = "delete_seat"      
 BTN_START   = "start_game"      
@@ -298,31 +297,9 @@ def save_stickers(stickers):
     requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
 
 
-
-def seat_keyboard(g: GameState) -> InlineKeyboardMarkup:
-    rows = []
-
-    rows.append([
-        InlineKeyboardButton("✏️ ثبت نام راوی", callback_data="register_god"),
-        InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
-    ])
-    rows.append([
-        
-        InlineKeyboardButton("❌ حذف بازیکن", callback_data="delete_player")
-    ])
-    # 👇 دکمه جدید برای شروع بازی
-    rows.append([
-        InlineKeyboardButton("🚀 شروع بازی", callback_data="startgame")
-    ])
-
-    return InlineKeyboardMarkup(rows)
-
-
-
 def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("✏️ ثبت نام راوی", callback_data=BTN_GOD),
             InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
         ],
         [
@@ -795,18 +772,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     g = gs(chat)
 
-    # ─── دکمه‌های پایین پیام صندلی‌ها ────────────────────────────
-    if data == BTN_GOD:  # ✏️ ثبت نام راوی
-        if g.god_id is None:  # هنوز راوی تعیین نشده
-            g.god_id = uid
-            g.waiting_god.add(uid)
-            store.save()
-            await ctx.bot.send_message(
-                chat,
-                "😎 نام راوی را بنویس:",
-                reply_markup=ForceReply(selective=True)
-            )
-            return
 
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
@@ -1336,35 +1301,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ────────────────────────────────────────────────────────────
     #  بخش‌های قدیمی (seat_ / cancel_ / strike_out / …)
     # ────────────────────────────────────────────────────────────
-    if data.startswith("seat_"):
-        seat = int(data.split("_")[1])
-
-        if uid in [u for u, _ in g.seats.values()] or uid == g.god_id or seat in g.seats:
-            return
-
-        if uid in g.user_names:
-            g.seats[seat] = (uid, g.user_names[uid])
-            store.save()
-            await publish_seating(ctx, chat, g)
-            return
-
-        g.awaiting_name_input[uid] = seat
-        sent_msg = await ctx.bot.send_message(
-            chat,
-            f"✏️ نام خود را برای صندلی {seat} وارد کنید:"
-        )
-        g.last_name_prompt_msg_id[uid] = sent_msg.message_id
-        store.save()
-        return
-
-
-    if data.startswith("cancel_"):
-        seat = int(data.split("_")[1])
-        if seat in g.seats and (g.seats[seat][0] == uid or uid == g.god_id):
-            del g.seats[seat]
-            store.save()
-            await q.edit_message_reply_markup(reply_markup=text_seating_keyboard(g))
-        return
 
     if data == "strike_out" and uid == g.god_id:
         g.pending_strikes = set(g.striked)
@@ -1666,27 +1602,16 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
-    if uid in g.user_names:
-        print(f"🟢 Found stored name: {g.user_names[uid]}", file=sys.stdout)
-        g.seats[seat_no] = (uid, g.user_names[uid])
-        store.save()
-        await publish_seating(ctx, chat_id, g)
-        return
-
-    # اگر اسم ذخیره نشده بود، ازش بخواه وارد کنه
-    g.awaiting_name_input[uid] = seat_no
-    sent_msg = await ctx.bot.send_message(
-        chat_id,
-        f"✏️ نام خود را برای صندلی {seat_no} (بدون ریپلای کردن این پیام!) وارد کنید:"
-    )
-    g.last_name_prompt_msg_id[uid] = sent_msg.message_id  # ذخیره آیدی پیام
+    name = g.user_names.get(uid, "ناشناس")
+    g.seats[seat_no] = (uid, name)
     store.save()
+    await publish_seating(ctx, chat_id, g)
 
 
 
 async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg:
+    if not msg or not msg.text:
         return
 
     text = msg.text.strip()
@@ -1694,79 +1619,59 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = msg.chat.id
     g = gs(chat)
 
-    # اگر در حال رأی‌گیری هستیم، پیام را ثبت کن
-    #if g.vote_type == "counting":
-       # g.vote_messages.append({
-        #    "uid": msg.from_user.id,
-         #   "text": (msg.text or "").strip()
-        #})
-        #store.save()
-
-        #await ctx.bot.send_message(
-         #   chat,
-          #  f"📝 رأی دریافت شد از {msg.from_user.first_name} | متنی: {(msg.text or '').strip()}"
-        #)
-        #return
-
-
     # ─────────────────────────────────────────────────────────────
-    # 1) راوی نام خود را وارد می‌کند
+    # 1) تغییر ساعت شروع (فقط توسط گاد)
     # ─────────────────────────────────────────────────────────────
-    if g.vote_type == "awaiting_god_name" and uid == g.god_id:
-        g.god_name  = text
+    if g.vote_type == "awaiting_time" and uid == g.god_id:
+        g.event_time = text
         g.vote_type = None
         store.save()
         await publish_seating(ctx, chat, g)
         return
 
     # ─────────────────────────────────────────────────────────────
-    # 2) ثبت‌نام بازیکن با ریپلای صندلی
+    # 2) ثبت‌نام/جابجایی با ریپلای به لیست: کاربر شماره صندلی می‌نویسد
+    #    - اگر قبلاً نشسته بود، جابه‌جا می‌شود
+    #    - اگر اسم در Gist نیست، با «ناشناس» وارد می‌شود
     # ─────────────────────────────────────────────────────────────
-    if msg.reply_to_message and msg.reply_to_message.message_id == g.last_seating_msg_id:
+    if msg.reply_to_message and g.last_seating_msg_id and msg.reply_to_message.message_id == g.last_seating_msg_id:
         if text.isdigit():
             seat_no = int(text)
 
             if not (1 <= seat_no <= g.max_seats):
-                await ctx.bot.send_message(chat, f"❌ شمارهٔ صندلی معتبر نیست.")
+                await ctx.bot.send_message(chat, "❌ شمارهٔ صندلی معتبر نیست.")
                 return
 
-            # اگر صندلی پر باشه
             if seat_no in g.seats:
                 await ctx.bot.send_message(chat, f"❌ صندلی {seat_no} قبلاً پُر شده.")
                 return
 
-            # اگر بازیکن قبلاً ثبت‌نام کرده، جابه‌جایی کن
+            # اگر قبلاً صندلی داشت، منتقلش کن
             existing_seat = None
+            existing_name = g.user_names.get(uid, None)
             for s, (u, n) in g.seats.items():
                 if u == uid:
                     existing_seat = s
-                    existing_name = n
+                    if existing_name is None:
+                        existing_name = n
                     break
 
             if existing_seat is not None:
                 del g.seats[existing_seat]
-                g.seats[seat_no] = (uid, existing_name)
+                g.seats[seat_no] = (uid, existing_name or "ناشناس")
                 store.save()
                 await publish_seating(ctx, chat, g)
                 return
 
-            # اگر اسمش تو Gist ذخیره شده بود → ثبت فوری
-            if uid in g.user_names:
-                g.seats[seat_no] = (uid, g.user_names[uid])
-                store.save()
-                await publish_seating(ctx, chat, g)
-                return
-
-            # اگر اسم نداشت → درخواست نام
-            g.waiting_name[uid] = seat_no
-            msg = await ctx.bot.send_message(chat, f"👤 لطفاً نام خود را برای صندلی {seat_no} وارد کنید:")
-            g.pending_name_msgs[uid] = msg.message_id
+            # ثبت‌نام جدید با نام ذخیره‌شده یا «ناشناس»
+            name = g.user_names.get(uid, "ناشناس")
+            g.seats[seat_no] = (uid, name)
             store.save()
+            await publish_seating(ctx, chat, g)
             return
 
-
     # ─────────────────────────────────────────────────────────────
-    # 3) راوی صندلی‌ای را خالی می‌کند
+    # 3) حذف صندلی (فقط توسط گاد)
     # ─────────────────────────────────────────────────────────────
     if g.vote_type == "awaiting_delete" and uid == g.god_id:
         if not text.isdigit():
@@ -1780,110 +1685,38 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g)
         return
 
-
-    # -------------- defense threshold by God ------------------
-    #if g.vote_type == "awaiting_defense_threshold" and uid == g.god_id:
-        #try:
-         #   threshold = int(text.strip())
-        #except:
-        #    await ctx.bot.send_message(chat, "❗ فقط عدد بنویسید (مثلاً: 4)")
-            #return
-
-        #qualified = [s for s, votes in g.tally.items() if len(set(votes)) >= threshold]
-
-        #if not qualified:
-        #    await ctx.bot.send_message(chat, f"❗ هیچکس {threshold} رأی یا بیشتر نیاورده.")
-           # return
-
-        # 🧹 حذف پیام سوال رأی لازم برای دفاع
-            #try:
-           #     await ctx.bot.delete_message(chat_id=chat, message_id=g.defense_prompt_msg_id)
-          #  except:
-         #       pass
-        #    g.defense_prompt_msg_id = None
-
-       # g.defense_seats = qualified
-      #  g.selected_defense = []
-     #   g.vote_type = None
-
-    #    await ctx.bot.send_message(
-   #         chat,
-  #          f"🛡 صندلی‌هایی با {threshold} رأی: {', '.join(map(str, qualified))}"
- #       )
-#
-  #      await start_vote(ctx, chat, g, "final")
- #       store.save()
-#        return
-
-
-    # -------------- normal seat assignment ----------------
+    # ─────────────────────────────────────────────────────────────
+    # 4) تغییر نام کاربر (فقط وقتی از دکمه «✏️ تغییر نام» وارد شده)
+    #    g.waiting_name[uid] = seat_no
+    # ─────────────────────────────────────────────────────────────
     if uid in g.waiting_name:
-        seat = g.waiting_name.pop(uid)
+        target_seat = g.waiting_name.pop(uid)
 
+        # فقط نام فارسی
         import re
         if not re.match(r'^[\u0600-\u06FF\s]+$', text):
             await ctx.bot.send_message(chat, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید.")
             return
 
-        g.seats[seat] = (uid, text)
-        g.user_names[uid] = text  # ✅ ذخیره نام بازیکن برای استفاده‌های بعدی
-        save_usernames_to_gist(g.user_names)  # 👈 ذخیره در Gist
-        store.save()
-        await publish_seating(ctx, chat, g)
+        # نام کاربر را در دفترچهٔ نام‌ها به‌روز کن
+        g.user_names[uid] = text
+        save_usernames_to_gist(g.user_names)
 
+        # اگر هنوز در صندلی مشخص‌شده خودش نشسته بود، همونجا نام را عوض کن
+        if target_seat in g.seats and g.seats[target_seat][0] == uid:
+            g.seats[target_seat] = (uid, text)
+        else:
+            # اگر جای دیگری نشسته، همان صندلی فعلی‌اش را آپدیت کن
+            for s, (u, n) in list(g.seats.items()):
+                if u == uid:
+                    g.seats[s] = (uid, text)
+                    break
 
-        # حذف پیام قبلی "نام خود را وارد کنید"
-        if uid in g.pending_name_msgs:
-            try:
-                await ctx.bot.delete_message(chat_id=chat, message_id=g.pending_name_msgs[uid])
-            except:
-                pass
-            del g.pending_name_msgs[uid]
-        return
-
-    # -------------- God sets his own name (روش قدیمی) -----
-    if uid in g.waiting_god:
-        g.waiting_god.remove(uid)
-        g.god_id   = uid
-        g.god_name = text
         store.save()
         await publish_seating(ctx, chat, g)
         return
 
-    # -------------- تنظیم ساعت شروع -----------------------
-    if g.vote_type == "awaiting_time" and uid == g.god_id:
-        g.event_time = text
-        g.vote_type  = None
-        store.save()
-        await publish_seating(ctx, chat, g)
-        return
-    # -------------- اگر کاربر بدون ریپلای ولی در لیست انتظار اسم است
-    if uid in g.awaiting_name_input:
-        seat_no = g.awaiting_name_input.pop(uid)
 
-        import re
-        if not re.match(r'^[\u0600-\u06FF\s]+$', text):
-            await ctx.bot.send_message(chat, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید.")
-            return
-
-        g.seats[seat_no] = (uid, text)
-        g.user_names[uid] = text  # ✅ ذخیره نام برای استفاده بعدی
-        save_usernames_to_gist(g.user_names)  # ✅ ذخیره در Gist
-        store.save()
-
-        # حذف پیام راهنمای قبلی (اگه هست)
-        if uid in g.last_name_prompt_msg_id:
-            try:
-                await ctx.bot.delete_message(
-                    chat_id=chat,
-                    message_id=g.last_name_prompt_msg_id[uid]
-                )
-            except:
-                pass
-            del g.last_name_prompt_msg_id[uid]
-
-        await publish_seating(ctx, chat, g)
-        return
 
 async def show_scenario_selection(ctx, chat_id: int, g: GameState):
     """نمایش لیست سناریوهای موجود برای انتخاب"""
@@ -1915,20 +1748,22 @@ async def show_scenario_selection(ctx, chat_id: int, g: GameState):
     store.save()
 
 
-async def newgame(update: Update, ctx):
+async def newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
+    uid = update.effective_user.id
 
     # فقط گروه‌های فعال
     if chat not in store.active_groups:
         await update.message.reply_text("⛔ این گروه هنوز فعال نشده. ادمین اصلی باید /active بزند.")
         return
 
+    # فقط در گروه‌ها
     if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
 
-    # فقط ادمین‌های گروه
-    member = await ctx.bot.get_chat_member(chat, update.effective_user.id)
+    # فقط ادمین گروه
+    member = await ctx.bot.get_chat_member(chat, uid)
     if member.status not in {"administrator", "creator"}:
         await update.message.reply_text("فقط ادمین‌های گروه می‌تونن بازی جدید شروع کنن.")
         return
@@ -1942,31 +1777,40 @@ async def newgame(update: Update, ctx):
     store.games[chat] = GameState(max_seats=seats)
     g = gs(chat)
 
-    # لود نام‌ها و سناریو
+    # بارگذاری/ذخیره نام‌ها در Gist
     g.user_names = load_usernames_from_gist()
     save_usernames_to_gist(g.user_names)
 
-    # انتخاب سناریوی رندوم با ظرفیت seats
+    # گاد پیش‌فرض = اجراکنندهٔ /newgame
+    god_name = g.user_names.get(uid) or (update.effective_user.full_name or "—")
+    g.god_id = uid
+    g.god_name = god_name
+
+    # سناریوی تصادفی با ظرفیت seats
     candidates = [s for s in store.scenarios if sum(s.roles.values()) == seats]
     if candidates:
         import random
         g.scenario = random.choice(candidates)
         g.last_roles_scenario_name = None  # تا لیست نقش‌ها دوباره چاپ شود
         g.awaiting_scenario = False
-        g.from_startgame = True
-        # برای آمار حالت «در انتظار شروع/تکمیل لیست»
-        now = datetime.now(timezone.utc).timestamp()
-        store.group_stats.setdefault(chat, {"waiting_list": [], "started": [], "ended": []})
-        store.group_stats[chat]["waiting_list"].append(now)
-        store.save()
-        await publish_seating(ctx, chat, g, mode=REG)
     else:
-        # اگر سناریوی هم‌اندازه پیدا نشد، می‌بریم روی انتخاب سناریو مثل قبل
+        g.scenario = None
         g.awaiting_scenario = True
+
+    # آمار «waiting_list»
+    now = datetime.now(timezone.utc).timestamp()
+    store.group_stats.setdefault(chat, {"waiting_list": [], "started": [], "ended": []})
+    store.group_stats[chat]["waiting_list"].append(now)
+    store.save()
+
+    # انتشار لیست اولیه
+    await publish_seating(ctx, chat, g, mode=REG)
+    # اگر سناریو پیدا نشد، انتخاب سناریو را باز کن
+    if g.awaiting_scenario:
         g.from_startgame = True
         store.save()
-
         await show_scenario_selection(ctx, chat, g)
+
 
 
 async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = None, chat_id: int = None):
@@ -2271,7 +2115,32 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await start_vote(ctx, chat_id, g, "final")
         return
 
+    if uid in g.waiting_name:
+        target_seat = g.waiting_name.pop(uid)
 
+        # فقط نام فارسی
+        import re
+        if not re.match(r'^[\u0600-\u06FF\s]+$', text):
+            await ctx.bot.send_message(chat, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید.")
+            return
+
+        # نام کاربر را در دفترچهٔ نام‌ها به‌روز کن
+        g.user_names[uid] = text
+        save_usernames_to_gist(g.user_names)
+
+        # اگر هنوز در صندلی مشخص‌شده خودش نشسته بود، همونجا نام را عوض کن
+        if target_seat in g.seats and g.seats[target_seat][0] == uid:
+            g.seats[target_seat] = (uid, text)
+        else:
+            # اگر جای دیگری نشسته، همان صندلی فعلی‌اش را آپدیت کن
+            for s, (u, n) in list(g.seats.items()):
+                if u == uid:
+                    g.seats[s] = (uid, text)
+                    break
+
+        store.save()
+        await publish_seating(ctx, chat, g)
+        return
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc).timestamp()
@@ -2341,6 +2210,8 @@ async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در خروج از گروه: {e}")
 
+OWNER_IDS = {99347107, 449916967, 7501892705}
+
 async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in {"group", "supergroup"}:
@@ -2348,7 +2219,7 @@ async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
-    if user_id != 99347107:
+    if user_id not in OWNER_IDS:
         await update.message.reply_text("⛔ فقط سازندهٔ اصلی می‌تونه گروه رو فعال کنه.")
         return
 
