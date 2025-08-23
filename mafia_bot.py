@@ -9,7 +9,7 @@ import sys
 import re
 import asyncio
 import regex
-import subprocess 
+import subprocess
 from telegram.ext import filters
 from telegram.error import BadRequest
 group_filter = filters.ChatType.GROUPS
@@ -89,6 +89,8 @@ class GameState:
     status_mode: bool = False 
     ui_hint: str | None = None
 
+
+
     def __post_init__(self):
         self.seats = self.seats or {}
         self.waiting_name = self.waiting_name or {}
@@ -122,9 +124,7 @@ class GameState:
         self.chaos_mode = False        
         self.chaos_selected = set()       
         self.purchased_seat = None    
-         
-    
-    
+
 class Store:
     def __init__(self, path=PERSIST_FILE):
         self.path = path
@@ -733,6 +733,54 @@ async def announce_winner(ctx, update, g: GameState):
     except Exception as e:
         print("⚠️ خطا در پین کردن پیام:", e)
 
+
+
+def _apply_size_and_scenario(g: GameState, new_size: int, new_scenario: Scenario):
+    # اگر کم می‌کنیم: صندلی‌های بالای ظرفیت جدید حذف شوند
+    if new_size < g.max_seats:
+        for seat in sorted(list(g.seats.keys())):
+            if seat > new_size:
+                g.seats.pop(seat, None)
+        # خط‌خورده‌ها و دفاع و… هم تمیز شوند
+        g.striked = {s for s in g.striked if s <= new_size}
+        g.defense_seats = [s for s in g.defense_seats if s <= new_size]
+    # اگر زیاد می‌کنیم: فقط ظرفیت بالا برود؛ نفرات قبلی سر جایشان
+    g.max_seats = new_size
+    g.scenario = new_scenario
+    g.last_roles_scenario_name = None  # تا لیست نقش‌ها دوباره چاپ شود
+    # هرچیزی که مربوط به نقش‌های قبلی بوده پاک؛ چون هنوز بازی شروع نشده
+    g.assigned_roles = {}
+    g.phase = "idle"
+    g.awaiting_scenario = False
+    # فلگ‌های مربوط به تغییر سناریو
+    g.awaiting_scenario_change = False
+    g.pending_size = None
+
+def _scenario_sizes_available() -> list[int]:
+    sizes = sorted({sum(s.roles.values()) for s in store.scenarios})
+    return sizes
+
+def kb_choose_sizes() -> InlineKeyboardMarkup:
+    sizes = _scenario_sizes_available()
+    rows, row = [], []
+    for i, n in enumerate(sizes, 1):
+        row.append(InlineKeyboardButton(str(n), callback_data=f"scsize_{n}"))
+        if i % 4 == 0:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="scchange_back")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
+    options = [s for s in store.scenarios if sum(s.roles.values()) == size]
+    # هر سناریو یک دکمه
+    rows = [[InlineKeyboardButton(s.name, callback_data=f"scpick_{size}_{i}")]
+            for i, s in enumerate(options)]
+    rows.append([InlineKeyboardButton("⬅️ انتخاب ظرفیت دیگر", callback_data="scchange_again")])
+    return InlineKeyboardMarkup(rows)
+
+
 # ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
@@ -839,11 +887,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
+        if not getattr(g, "preview_uid_to_role", None):
+            await ctx.bot.send_message(
+                chat,
+                "🎲 قبل از شروع بازی، چند بار روی «رندوم نقش» بزنید تا نقش‌ها شافل شوند."
+            )
+            return
+
         if len(g.seats) != g.max_seats:
             await ctx.bot.send_message(chat, "⚠️ هنوز همهٔ صندلی‌ها پُر نشده!")
             return
 
-        # ✅ اگر سناریو از قبل انتخاب شده → بپرس که آیا می‌خواهی صندلی‌ها رندوم بشن؟
+     
         now = datetime.now(timezone.utc).timestamp()
         store.group_stats.setdefault(chat, {
             "waiting_list": [],
@@ -869,7 +924,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             store.save()
             return
 
-        # ⛔ اگر سناریو انتخاب نشده → برو سراغ انتخاب سناریو
+ 
         g.awaiting_scenario = True
         g.from_startgame = False
         store.save()
@@ -954,45 +1009,70 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-
+    # شروع «تغییر سناریو/ظرفیت»
     if data == "change_scenario":
         if g.god_id is None or uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند سناریو را تغییر دهد!")
+            await safe_q_answer(q, "⚠️ فقط راوی می‌تواند سناریو را تغییر دهد!", show_alert=True)
             return
-
-        g.awaiting_scenario = True
-        g.from_startgame = True  # 🔁 این بار برای نمایش ساده است نه نقش دادن
+        g.awaiting_scenario_change = True
+        g.pending_size = None
         store.save()
-        await show_scenario_selection(ctx, chat, g)
+        await set_hint_and_kb(ctx, chat, g, "ابتدا ظرفیت را انتخاب کنید:", kb_choose_sizes(), mode=REG if g.phase=="idle" else CTRL)
         return
 
-    if data.startswith("sc_"):
-        idx = int(data.split("_")[1])
-        valid = [s for s in store.scenarios if sum(s.roles.values()) == g.max_seats]
-
-        if idx < len(valid):
-            g.scenario = valid[idx]
-            g.awaiting_scenario = False
-            store.save()
-
-            # حذف پیام انتخاب سناریو
-            if g.scenario_prompt_msg_id:
-                try:
-                    await ctx.bot.delete_message(chat, g.scenario_prompt_msg_id)
-                except:
-                    pass
-                g.scenario_prompt_msg_id = None
-
-            # ⛳ تشخیص اینکه از /newgame آمده یا از دکمه شروع بازی
-            if g.from_startgame:
-                g.from_startgame = False  # ریست
-                await publish_seating(ctx, chat, g)
-            else:
-                if uid != g.god_id:
-                    await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند سناریو را انتخاب کند!")
-                    return
-                await shuffle_and_assign(ctx, chat, g)
+    # برگشت از انتخاب ظرفیت/سناریو
+    if data == "scchange_back":
+        g.awaiting_scenario_change = False
+        g.pending_size = None
+        g.ui_hint = None
+        store.save()
+        await publish_seating(ctx, chat, g, mode=REG if g.phase=="idle" else CTRL)
         return
+
+    # تغییر ظرفیت → نمایش لیست سناریوهای همان ظرفیت
+    if data.startswith("scsize_") and getattr(g, "awaiting_scenario_change", False):
+        try:
+            size = int(data.split("_")[1])
+        except:
+            return
+        g.pending_size = size
+        store.save()
+        await set_hint_and_kb(ctx, chat, g,
+                              f"سناریوی {size}نفره را انتخاب کنید:",
+                              kb_choose_scenarios_for(size),
+                              mode=REG if g.phase=="idle" else CTRL)
+        return
+
+    # انتخاب سناریو نهایی و اعمال تغییر
+    if data.startswith("scpick_") and getattr(g, "awaiting_scenario_change", False):
+        parts = data.split("_")
+        if len(parts) != 3:
+            return
+        try:
+            size = int(parts[1])
+            idx = int(parts[2])
+        except:
+            return
+        options = [s for s in store.scenarios if sum(s.roles.values()) == size]
+        if not (0 <= idx < len(options)):
+            return
+        chosen = options[idx]
+
+        _apply_size_and_scenario(g, size, chosen)
+        store.save()
+
+        # نمایش لیست با ظرفیت جدید (بدون حذف نفراتِ داخل ظرفیت)
+        await set_hint_and_kb(ctx, chat, g, None, text_seating_keyboard(g), mode=REG if g.phase=="idle" else CTRL)
+        return
+
+    # اگر وسط انتخاب سناریو بود و گفت «ظرفیت دیگر»
+    if data == "scchange_again" and getattr(g, "awaiting_scenario_change", False):
+        g.pending_size = None
+        store.save()
+        await set_hint_and_kb(ctx, chat, g, "ظرفیت را انتخاب کنید:", kb_choose_sizes(), mode=REG if g.phase=="idle" else CTRL)
+        return
+
+ 
 
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
     if data == "end_game" and uid == g.god_id:
@@ -1838,50 +1918,55 @@ async def show_scenario_selection(ctx, chat_id: int, g: GameState):
 async def newgame(update: Update, ctx):
     chat = update.effective_chat.id
 
+    # فقط گروه‌های فعال
     if chat not in store.active_groups:
+        await update.message.reply_text("⛔ این گروه هنوز فعال نشده. ادمین اصلی باید /active بزند.")
         return
 
     if update.effective_chat.type not in {"group", "supergroup"}:
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
 
+    # فقط ادمین‌های گروه
     member = await ctx.bot.get_chat_member(chat, update.effective_user.id)
     if member.status not in {"administrator", "creator"}:
         await update.message.reply_text("فقط ادمین‌های گروه می‌تونن بازی جدید شروع کنن.")
         return
 
-    # ✅ اعتبارسنجی آرگومان‌ها
-    if not ctx.args:
-        await update.message.reply_text("Usage: /newgame <seats> (مثال: /newgame 12)")
-        return
-    try:
+    # اگر آرگومان نداد → پیش‌فرض ۱۰
+    seats = 10
+    if ctx.args and ctx.args[0].isdigit():
         seats = int(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("❗ تعداد صندلی باید عدد باشد. مثال: /newgame 12")
-        return
-    if seats < 1 or seats > 20:
-        await update.message.reply_text("❗ تعداد صندلی باید بین 1 تا 20 باشد.")
-        return
 
+    # ساخت گیم جدید
     store.games[chat] = GameState(max_seats=seats)
     g = gs(chat)
 
+    # لود نام‌ها و سناریو
     g.user_names = load_usernames_from_gist()
     save_usernames_to_gist(g.user_names)
 
-    g.from_startgame = True
-    g.awaiting_scenario = True
+    # انتخاب سناریوی رندوم با ظرفیت seats
+    candidates = [s for s in store.scenarios if sum(s.roles.values()) == seats]
+    if candidates:
+        import random
+        g.scenario = random.choice(candidates)
+        g.last_roles_scenario_name = None  # تا لیست نقش‌ها دوباره چاپ شود
+        g.awaiting_scenario = False
+        g.from_startgame = True
+        # برای آمار حالت «در انتظار شروع/تکمیل لیست»
+        now = datetime.now(timezone.utc).timestamp()
+        store.group_stats.setdefault(chat, {"waiting_list": [], "started": [], "ended": []})
+        store.group_stats[chat]["waiting_list"].append(now)
+        store.save()
+        await publish_seating(ctx, chat, g, mode=REG)
+    else:
+        # اگر سناریوی هم‌اندازه پیدا نشد، می‌بریم روی انتخاب سناریو مثل قبل
+        g.awaiting_scenario = True
+        g.from_startgame = True
+        store.save()
 
-    now = datetime.now(timezone.utc).timestamp()
-    store.group_stats.setdefault(chat, {
-        "waiting_list": [],
-        "started": [],
-        "ended": []
-    })
-    store.group_stats[chat]["waiting_list"].append(now)
-    store.save()
-
-    await show_scenario_selection(ctx, chat, g)
+        await show_scenario_selection(ctx, chat, g)
 
 
 async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = None, chat_id: int = None):
