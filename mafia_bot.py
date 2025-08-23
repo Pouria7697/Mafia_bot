@@ -798,17 +798,19 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "change_name":
         if uid not in [u for u, _ in g.seats.values()]:
-            await ctx.bot.send_message(chat,"❗ شما هنوز ثبت‌نام نکرده‌اید.")
+            await ctx.bot.send_message(chat, "❗ شما هنوز ثبت‌نام نکرده‌اید.")
             return
 
-        g.waiting_name[uid] = [s for s in g.seats if g.seats[s][0] == uid][0]
+        seat_no = [s for s in g.seats if g.seats[s][0] == uid][0]
+        g.waiting_name[uid] = seat_no
         store.save()
 
         await ctx.bot.send_message(
             chat,
-            "✏️ این پیام را ریپلای کنید و نام جدید خود را به فارسی وارد کنید:"
+            f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
         )
         return
+
 
 
     # ─── صدا زدن همه قبلِ شروع ──────────────────────────────────
@@ -2115,32 +2117,6 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await start_vote(ctx, chat_id, g, "final")
         return
 
-    if uid in g.waiting_name:
-        target_seat = g.waiting_name.pop(uid)
-
-        # فقط نام فارسی
-        import re
-        if not re.match(r'^[\u0600-\u06FF\s]+$', text):
-            await ctx.bot.send_message(chat, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید.")
-            return
-
-        # نام کاربر را در دفترچهٔ نام‌ها به‌روز کن
-        g.user_names[uid] = text
-        save_usernames_to_gist(g.user_names)
-
-        # اگر هنوز در صندلی مشخص‌شده خودش نشسته بود، همونجا نام را عوض کن
-        if target_seat in g.seats and g.seats[target_seat][0] == uid:
-            g.seats[target_seat] = (uid, text)
-        else:
-            # اگر جای دیگری نشسته، همان صندلی فعلی‌اش را آپدیت کن
-            for s, (u, n) in list(g.seats.items()):
-                if u == uid:
-                    g.seats[s] = (uid, text)
-                    break
-
-        store.save()
-        await publish_seating(ctx, chat, g)
-        return
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc).timestamp()
