@@ -10,6 +10,7 @@ import re
 import asyncio
 import regex
 import subprocess
+from html import escape
 from telegram.ext import filters
 from telegram.error import BadRequest
 group_filter = filters.ChatType.GROUPS
@@ -430,6 +431,14 @@ async def set_hint_and_kb(ctx, chat_id: int, g: GameState, hint: str | None, kb:
     store.save()
     await publish_seating(ctx, chat_id, g, mode=mode, custom_kb=kb)
 
+EVENT_NUMBERS_CACHE = None
+
+def get_event_numbers():
+    global EVENT_NUMBERS_CACHE
+    if EVENT_NUMBERS_CACHE is None:
+        EVENT_NUMBERS_CACHE = load_event_numbers() or {}
+    return EVENT_NUMBERS_CACHE
+
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(
     ctx,
@@ -472,7 +481,7 @@ async def publish_seating(
 
     # شماره رویداد (همیشه مقدار فعلی را از گیت به‌روز بخوان)
     event_numbers = load_event_numbers()
-    event_num = event_numbers.get(str(chat_id), 1)
+    event_num = int(get_event_numbers().get(str(chat_id), 1))
     lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
 
     # سناریو
@@ -486,13 +495,15 @@ async def publish_seating(
         emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
         if i in g.seats:
             uid, name = g.seats[i]
-            txt = f"<a href='tg://user?id={uid}'>{name}</a>"
+            safe_name = escape(name, quote=False) 
+            txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
             if i in g.striked:
                 txt += " ❌☠️"
             line = f"♚{emoji_num}  {txt}"
         else:
             line = f"♚{emoji_num} ⬜ /{i}"
         lines.append(line)
+
 
     # گزارش کوتاه استعلام وضعیت (اختیاری)
     if g.status_counts.get("citizen", 0) > 0 or g.status_counts.get("mafia", 0) > 0:
@@ -765,11 +776,12 @@ async def announce_winner(ctx, update, g: GameState):
 
 
     # 📌 افزایش شماره ایونت بعد از اتمام بازی
-    chat_id_str = str(chat.id)
-    event_numbers = load_event_numbers()
-    current_num = event_numbers.get(chat_id_str, 0)
-    event_numbers[chat_id_str] = current_num + 1
-    save_event_numbers(event_numbers)
+
+    nums = get_event_numbers()          
+    key = str(chat.id)
+    nums[key] = int(nums.get(key, 0)) + 1
+    save_event_numbers(nums)            
+
 
 
 
@@ -1843,41 +1855,41 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #    g.waiting_name[uid] = seat_no
     # ─────────────────────────────────────────────────────────────
     if uid in g.waiting_name:
-        target_seat = g.waiting_name[uid]  # فلگ رو فعلاً پاک نکن
+        target_seat = g.waiting_name[uid]  # فلگ را فعلاً پاک نکن
 
         import re
         if not re.match(r'^[\u0600-\u06FF\s]+$', text):
             await ctx.bot.send_message(chat_id, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید. دوباره امتحان کنید:")
             return
 
-        # ورودی معتبر شد → فلگ رو پاک کن
+        # ورودی معتبر شد → حالا فلگ را پاک کن
         g.waiting_name.pop(uid, None)
 
         # ذخیره نام جدید
         g.user_names[uid] = text
 
-        # اگر هنوز روی همان صندلی است، همان را آپدیت کن
+        # اگر روی همان صندلی است، همان را آپدیت کن؛ وگرنه صندلی فعلیش را پیدا کن
         if target_seat in g.seats and g.seats[target_seat][0] == uid:
             g.seats[target_seat] = (uid, text)
         else:
-            # اگر جای دیگری نشسته، صندلی فعلی‌اش را آپدیت کن
             for s, (u, n) in list(g.seats.items()):
                 if u == uid:
                     g.seats[s] = (uid, text)
                     break
 
         store.save()
+
+        # ✅ اول UI را آپدیت کن
         await publish_seating(ctx, chat_id, g)
 
-
+        # ⏳ سپس (غیر بحرانی) روی Gist ذخیره کن تا کندی ایجاد نشود
         try:
             save_usernames_to_gist(g.user_names)
         except Exception:
             pass
 
-       
+        # (اختیاری) تأییدیه
         await ctx.bot.send_message(chat_id, f"✅ نام شما به «{text}» تغییر کرد.")
-
         return
 
 
