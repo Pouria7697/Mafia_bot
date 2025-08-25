@@ -142,25 +142,19 @@ class Store:
                 self.scenarios = obj.get("scenarios", [])
                 self.games = obj.get("games", {})
                 self.group_stats = obj.get("group_stats", {})
-                # منبع حقیقت: Gist (اگر نبود، از pickle)
-                try:
-                    ag = load_active_groups()
-                except Exception:
-                    ag = None
-                self.active_groups = ag if ag is not None and len(ag) > 0 else set(obj.get("active_groups", []))
+                # ⬇️ منبع حقیقت: Gist
+                ag = load_active_groups()
+                self.active_groups = ag if ag else set(obj.get("active_groups", []))
                 for g in self.games.values():
                     if isinstance(g, GameState):
                         g.__post_init__()
         else:
-            
-            try:
-                self.active_groups = load_active_groups()
-            except Exception:
-                self.active_groups = set()
+          
             self.scenarios = []
             self.games = {}
             self.group_stats = {}
-            self.save()
+            self.active_groups = load_active_groups()  
+            self.save()  # بعداً روی دیسک ذخیره کن
 
     def save(self):
         with open(self.path, "wb") as f:
@@ -170,11 +164,7 @@ class Store:
                 "group_stats": self.group_stats,
                 "active_groups": list(self.active_groups)
             }, f)
-        # سنکرون با Gist
-        try:
-            save_active_groups(self.active_groups)
-        except Exception as e:
-            print("⚠️ could not sync active_groups to gist:", e)
+
 
 def save_scenarios_to_gist(scenarios):
     if not GH_TOKEN or not GIST_ID:
@@ -480,7 +470,7 @@ async def publish_seating(
     ]
 
     # شماره رویداد (همیشه مقدار فعلی را از گیت به‌روز بخوان)
-    event_numbers = load_event_numbers()
+    
     event_num = int(get_event_numbers().get(str(chat_id), 1))
     lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
 
@@ -1554,7 +1544,19 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         elif data == "dec_citizen":
             if g.status_counts["citizen"] == 0:
+                
                 await safe_q_answer(q, "از صفر کمتر نمیشه.", show_alert=True)
+                warn = await ctx.bot.send_message(chat, "⚠️  کمتر از صفر نمی‌شود.")
+               
+                async def _cleanup(msg_id: int):
+                    await asyncio.sleep(2)
+                    try:
+                        await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
+                    except Exception:
+                        pass
+                asyncio.create_task(_cleanup(warn.message_id))
+                # UI را همان حالت status نگه دار
+                await publish_seating(ctx, chat, g, mode="status")
                 return
             g.status_counts["citizen"] -= 1
             changed = True
@@ -1566,6 +1568,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data == "dec_mafia":
             if g.status_counts["mafia"] == 0:
                 await safe_q_answer(q, "از صفر کمتر نمیشه.", show_alert=True)
+                warn = await ctx.bot.send_message(chat, "⚠️  کمتر از صفر نمی‌شود.")
+                async def _cleanup(msg_id: int):
+                    await asyncio.sleep(2)
+                    try:
+                        await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
+                    except Exception:
+                        pass
+                asyncio.create_task(_cleanup(warn.message_id))
+                await publish_seating(ctx, chat, g, mode="status")
                 return
             g.status_counts["mafia"] -= 1
             changed = True
@@ -1588,6 +1599,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             store.save()
             await publish_seating(ctx, chat, g, mode="status")
         return
+
 
 
     if data == "back_vote_final" and uid == g.god_id:
@@ -1770,7 +1782,6 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     await ctx.bot.send_message(chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
 
 
-
 async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
@@ -1778,119 +1789,129 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text.strip()
     uid = msg.from_user.id
-    chat = msg.chat.id
-    g = gs(chat)
+    chat_id = msg.chat.id
+    g = gs(chat_id)
 
     # ─────────────────────────────────────────────────────────────
-    # 1) تغییر ساعت شروع (فقط توسط گاد)
+    # 1) تغییر ساعت شروع (فقط توسط گاد) – با یا بدون ریپلای
     # ─────────────────────────────────────────────────────────────
     if g.vote_type == "awaiting_time" and uid == g.god_id:
+
         g.event_time = text
         g.vote_type = None
         store.save()
-        await publish_seating(ctx, chat, g)
+        await publish_seating(ctx, chat_id, g)
         await ctx.bot.send_message(chat_id, f"✅ ساعت رویداد روی {text} تنظیم شد.")
         return
 
     # ─────────────────────────────────────────────────────────────
     # 2) ثبت‌نام/جابجایی با ریپلای به لیست: کاربر شماره صندلی می‌نویسد
     #    - اگر قبلاً نشسته بود، جابه‌جا می‌شود
-    #    - اگر اسم در Gist نیست، با «ناشناس» وارد می‌شود
+    #    - اگر اسم ذخیره نباشد، «ناشناس»
     # ─────────────────────────────────────────────────────────────
-    if msg.reply_to_message and g.last_seating_msg_id and msg.reply_to_message.message_id == g.last_seating_msg_id:
+    if (
+        msg.reply_to_message
+        and g.last_seating_msg_id
+        and msg.reply_to_message.message_id == g.last_seating_msg_id
+    ):
         if text.isdigit():
             seat_no = int(text)
 
             if not (1 <= seat_no <= g.max_seats):
-                await ctx.bot.send_message(chat, "❌ شمارهٔ صندلی معتبر نیست.")
+                await ctx.bot.send_message(chat_id, "❌ شمارهٔ صندلی معتبر نیست.")
                 return
 
             if seat_no in g.seats:
-                await ctx.bot.send_message(chat, f"❌ صندلی {seat_no} قبلاً پُر شده.")
+                await ctx.bot.send_message(chat_id, f"❌ صندلی {seat_no} قبلاً پُر شده.")
                 return
 
-            # اگر قبلاً صندلی داشت، منتقلش کن
+            # نام ترجیحی
+            preferred_name = g.user_names.get(uid, None)
+
+            # آیا کاربر قبلاً روی صندلی‌ای نشسته؟
             existing_seat = None
-            existing_name = g.user_names.get(uid, None)
+            existing_name = None
             for s, (u, n) in g.seats.items():
                 if u == uid:
                     existing_seat = s
-                    if existing_name is None:
-                        existing_name = n
+                    existing_name = n
                     break
 
+            final_name = preferred_name or existing_name or "ناشناس"
+
             if existing_seat is not None:
+                # جابجایی
                 del g.seats[existing_seat]
-                g.seats[seat_no] = (uid, existing_name or "ناشناس")
+                g.seats[seat_no] = (uid, final_name)
                 store.save()
-                await publish_seating(ctx, chat, g)
-                await ctx.bot.send_message(chat, f"↪️ «{final_name}» از صندلی {existing_seat} به صندلی {seat_no} منتقل شد.")
+                await publish_seating(ctx, chat_id, g)
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"↪️ «{final_name}» از صندلی {existing_seat} به صندلی {seat_no} منتقل شد."
+                )
                 return
 
-            # ثبت‌نام جدید با نام ذخیره‌شده یا «ناشناس»
-            name = g.user_names.get(uid, "ناشناس")
-            g.seats[seat_no] = (uid, name)
+            # ثبت‌نام جدید
+            g.seats[seat_no] = (uid, final_name)
             store.save()
-            await publish_seating(ctx, chat, g)
-            await ctx.bot.send_message(chat, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{final_name}» انجام شد.")
+            await publish_seating(ctx, chat_id, g)
+            await ctx.bot.send_message(
+                chat_id,
+                f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{final_name}» انجام شد."
+            )
             return
 
     # ─────────────────────────────────────────────────────────────
-    # 3) حذف صندلی (فقط توسط گاد)
-    # ─────────────────────────────────────────────────────────────
-    #if g.vote_type == "awaiting_delete" and uid == g.god_id:
-        #if not text.isdigit():
-        #    await ctx.bot.send_message(chat, "❌ فقط شمارهٔ صندلی را بنویسید.")
-            #return
-        #seat_no = int(text)
-        #if seat_no in g.seats:
-         #   del g.seats[seat_no]
-        #g.vote_type = None
-       # store.save()
-      #  await publish_seating(ctx, chat, g)
-     #   return
-
-    # ─────────────────────────────────────────────────────────────
-    # 4) تغییر نام کاربر (فقط وقتی از دکمه «✏️ تغییر نام» وارد شده)
+    # 3) تغییر نام کاربر (فقط وقتی از دکمه «✏️ تغییر نام» وارد شده)
     #    g.waiting_name[uid] = seat_no
     # ─────────────────────────────────────────────────────────────
     if uid in g.waiting_name:
-        target_seat = g.waiting_name[uid]  # فلگ را فعلاً پاک نکن
+        target_seat = g.waiting_name[uid]  # فلگ را فعلاً پاک نکنیم
 
         import re
         if not re.match(r'^[\u0600-\u06FF\s]+$', text):
-            await ctx.bot.send_message(chat_id, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید. دوباره امتحان کنید:")
+            await ctx.bot.send_message(
+                chat_id,
+                "❗ لطفاً نام را فقط با حروف فارسی وارد کنید. دوباره امتحان کنید:"
+            )
             return
 
-        # ورودی معتبر شد → حالا فلگ را پاک کن
+        # ورودی معتبر شد → فلگ را پاک کن
         g.waiting_name.pop(uid, None)
 
-        # ذخیره نام جدید
+        # ذخیره نام جدید در دفترچه
         g.user_names[uid] = text
 
-        # اگر روی همان صندلی است، همان را آپدیت کن؛ وگرنه صندلی فعلیش را پیدا کن
+        # اگر هنوز روی همان صندلی است، همان را آپدیت کن
         if target_seat in g.seats and g.seats[target_seat][0] == uid:
             g.seats[target_seat] = (uid, text)
+            changed_seat = target_seat
         else:
+            # اگر جای دیگری نشسته، صندلی فعلی‌اش را پیدا و آپدیت کن
+            changed_seat = None
             for s, (u, n) in list(g.seats.items()):
                 if u == uid:
                     g.seats[s] = (uid, text)
+                    changed_seat = s
                     break
 
         store.save()
-
-        # ✅ اول UI را آپدیت کن
         await publish_seating(ctx, chat_id, g)
 
-        # ⏳ سپس (غیر بحرانی) روی Gist ذخیره کن تا کندی ایجاد نشود
+        # پیام تأیید
+        if changed_seat:
+            await ctx.bot.send_message(chat_id, f"✅ نام صندلی {changed_seat} به «{text}» تغییر کرد.")
+        else:
+            await ctx.bot.send_message(chat_id, f"✅ نام شما به «{text}» تغییر کرد.")
+
+        # نوشتن روی Gist بعد از UI (برای جلوگیری از کندی)
         try:
             save_usernames_to_gist(g.user_names)
         except Exception:
             pass
 
-        # (اختیاری) تأییدیه
-        await ctx.bot.send_message(chat_id, f"✅ نام شما به «{text}» تغییر کرد.")
         return
+
 
 
 
@@ -2379,10 +2400,7 @@ OWNER_IDS = {99347107, 449916967, 7501892705,5904091398}
 def load_active_groups():
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {
-            "Authorization": f"token {GH_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
         res = requests.get(url, headers=headers)
         if res.status_code != 200:
             print("❌ active_groups gist fetch failed:", res.status_code)
@@ -2398,15 +2416,8 @@ def load_active_groups():
 def save_active_groups(active_groups: set[int]):
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {
-            "Authorization": f"token {GH_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
-        files = {
-            "active_groups.json": {
-                "content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)
-            }
-        }
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        files = {"active_groups.json": {"content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)}}
         requests.patch(url, headers=headers, json={"files": files})
     except Exception as e:
         print("❌ save_active_groups error:", e)
@@ -2425,6 +2436,10 @@ async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     store.active_groups.add(chat.id)
     store.save() 
+    try:
+        save_active_groups(store.active_groups)  # ⬅️ فقط اینجا
+    except Exception as e:
+        print("⚠️ could not sync active_groups to gist:", e)
     await update.message.reply_text("✅ این گروه با موفقیت فعال شد.")
 
 
@@ -2441,7 +2456,11 @@ async def deactivate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if chat.id in store.active_groups:
         store.active_groups.remove(chat.id)
-        store.save()  # ← اینجا هم‌زمان از Gist حذف می‌شود
+        store.save()
+        try:
+            save_active_groups(store.active_groups)  # ⬅️ و اینجا
+        except Exception as e:
+            print("⚠️ could not sync active_groups to gist:", e)
         await update.message.reply_text("🛑 این گروه غیرفعال شد و از Gist هم پاک شد.")
     else:
         await update.message.reply_text("ℹ️ این گروه از قبل فعال نبود.")
