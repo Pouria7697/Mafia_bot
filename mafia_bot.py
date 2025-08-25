@@ -528,6 +528,44 @@ def get_event_numbers():
         EVENT_NUMBERS_CACHE = load_event_numbers() or {}
     return EVENT_NUMBERS_CACHE
 
+
+# ---- Concurrency / Debounce / Retry helpers ----
+DEBOUNCE_EDIT_SEC = 0.15
+SAVE_DEBOUNCE_SEC = 0.30
+
+CHAT_LOCKS: dict[int, asyncio.Lock] = {}
+def get_chat_lock(chat_id: int) -> asyncio.Lock:
+    lock = CHAT_LOCKS.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        CHAT_LOCKS[chat_id] = lock
+    return lock
+
+
+_SAVE_TASK: asyncio.Task | None = None
+def save_debounced():
+    global _SAVE_TASK
+    if _SAVE_TASK and not _SAVE_TASK.done():
+        return
+    async def _do():
+        await asyncio.sleep(SAVE_DEBOUNCE_SEC)
+        try:
+            store.save()
+        except Exception as e:
+            print("save_debounced error:", e)
+    _SAVE_TASK = asyncio.create_task(_do())
+
+# Retry wrapper for Telegram rate limits
+from telegram.error import RetryAfter
+async def _retry(coro):
+    try:
+        return await coro
+    except RetryAfter as e:
+        await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.1)
+        return await coro
+
+
+
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(
     ctx,
@@ -536,208 +574,204 @@ async def publish_seating(
     mode: str = REG,
     custom_kb: InlineKeyboardMarkup | None = None,
 ):
-    # اگر بازی هنوز با /newgame راه‌اندازی نشده
-    if not g.max_seats or g.max_seats <= 0:
-        await ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند.")
-        return
+    lock = get_chat_lock(chat_id)
+    async with lock:
+        # debounce کوتاه برای ادغام ادیت‌های پشت‌سرهم
+        await asyncio.sleep(DEBOUNCE_EDIT_SEC)
 
-    today = jdatetime.date.today().strftime("%Y/%m/%d")
-    emoji_numbers = [
-        "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒",
-        "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"
-    ]
+        # اگر بازی هنوز با /newgame راه‌اندازی نشده
+        if not g.max_seats or g.max_seats <= 0:
+            await _retry(ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند."))
+            return
 
-    # آیدی/لینک گروه
-    group_id_or_link = f"🆔 {chat_id}"
-    if ctx.bot.username and chat_id < 0:
-        try:
-            chat_obj = await ctx.bot.get_chat(chat_id)
-            if getattr(chat_obj, "username", None):
-                group_id_or_link = f"🔗 <a href='https://t.me/{chat_obj.username}'>{chat_obj.title}</a>"
-            else:
-                group_id_or_link = f"🔒 {chat_obj.title}"
-        except:
-            pass
+        today = jdatetime.date.today().strftime("%Y/%m/%d")
+        emoji_numbers = [
+            "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒",
+            "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"
+        ]
 
-    # بدنه متن
-    lines = [
-        f"{group_id_or_link}",
-        "♚🎭 <b>رویداد مافیا</b>",
-        f"♚📆 <b>تاریخ:</b> {today}",
-        f"♚🕰 <b>زمان:</b> {g.event_time or '---'}",
-        f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
-    ]
-
-    # شماره رویداد (همیشه مقدار فعلی را از گیت به‌روز بخوان)
-    
-    event_num = int(get_event_numbers().get(str(chat_id), 1))
-    lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
-
-    # سناریو
-    if g.scenario:
-        lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
-
-    lines.append("\n\n♚📂 <b>بازیکنان:</b>\n")
-
-    # لیست صندلی‌ها
-    for i in range(1, g.max_seats + 1):
-        emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
-
-        if i in g.seats:
-            uid, name = g.seats[i]
-            safe_name = escape(name, quote=False)
-            txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
-
-            
-            wn = 0
-            if isinstance(getattr(g, "warnings", None), dict):
-                wn = g.warnings.get(i, 0)
+        # آیدی/لینک گروه (با کش داخل g)
+        if not hasattr(g, "_chat_cache"):
+            g._chat_cache = {}
+        group_id_or_link = f"🆔 {chat_id}"
+        if ctx.bot.username and chat_id < 0:
             try:
-                wn = int(wn)
-            except Exception:
-                wn = 0
-            wn = max(0, wn)
-            if wn > 0:
-                txt += " " + ("❗️" * wn)
-
-            # ☠️ خط‌خورده‌ها
-            if i in g.striked:
-                txt += " ❌☠️"
-
-            line = f"♚{emoji_num}  {txt}"
-        else:
-            line = f"♚{emoji_num} ⬜ /{i}"
-
-        lines.append(line)
-
-
-
-
-    # گزارش کوتاه استعلام وضعیت (اختیاری)
-    if g.status_counts.get("citizen", 0) > 0 or g.status_counts.get("mafia", 0) > 0:
-        c = g.status_counts.get("citizen", 0)
-        m = g.status_counts.get("mafia", 0)
-        lines.append(f"\n🧾 <i>استعلام وضعیت: {c} شهروند و {m} مافیا</i>")
-
-    # راهنمای مرحله (در همان پیام)
-    if getattr(g, "ui_hint", None):
-        lines.append("")
-        lines.append(f"ℹ️ <i>{g.ui_hint}</i>")
-
-    text = "\n".join(lines)
-
-    # انتخاب کیبورد
-    if custom_kb is not None:
-        kb = custom_kb
-    else:
-        if mode == REG:
-            kb = text_seating_keyboard(g)
-        elif mode == "strike":
-            kb = strike_button_markup(g)
-        elif mode == "status":
-            kb = status_button_markup(g)
-        elif mode == "delete":
-            kb = delete_button_markup(g)                
-        elif mode == "warn":
-            kb = warn_button_markup_plusminus(g)       
-        else:
-            kb = control_keyboard()
-
-    # ارسال/ویرایش پیام لیست
-    from telegram.error import BadRequest
-
-    try:
-        if g.last_seating_msg_id:
-            try:
-                # تلاش برای ادیت متن + کیبورد
-                await ctx.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=g.last_seating_msg_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=kb,
-                )
-            except BadRequest as e:
-                s = str(e)
-                if "message is not modified" in s:
-                    # متن تغییری نکرده؛ شاید فقط کیبورد باید عوض شود
-                    try:
-                        await ctx.bot.edit_message_reply_markup(
-                            chat_id=chat_id,
-                            message_id=g.last_seating_msg_id,
-                            reply_markup=kb
-                        )
-                    except BadRequest as e2:
-                        # اگر این هم تغییری نداشت، کاری لازم نیست
-                        if "message is not modified" in str(e2):
-                            pass
-                        else:
-                            raise
+                if "username" in g._chat_cache and "title" in g._chat_cache:
+                    username = g._chat_cache["username"]
+                    title = g._chat_cache["title"]
                 else:
-                    # خطای دیگری بود → اجازه بده شاخه‌ی بیرونی پیام جدید بسازد
-                    raise
+                    chat_obj = await _retry(ctx.bot.get_chat(chat_id))
+                    username = getattr(chat_obj, "username", None)
+                    title = getattr(chat_obj, "title", None)
+                    g._chat_cache["username"] = username
+                    g._chat_cache["title"] = title
+
+                if username:
+                    group_id_or_link = f"🔗 <a href='https://t.me/{username}'>{title}</a>"
+                elif title:
+                    group_id_or_link = f"🔒 {title}"
+            except Exception:
+                pass
+
+        # بدنه متن
+        lines = [
+            f"{group_id_or_link}",
+            "♚🎭 <b>رویداد مافیا</b>",
+            f"♚📆 <b>تاریخ:</b> {today}",
+            f"♚🕰 <b>زمان:</b> {g.event_time or '---'}",
+            f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+        ]
+
+        # شماره رویداد از کش
+        event_num = int(get_event_numbers().get(str(chat_id), 1))
+        lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
+
+        # سناریو
+        if g.scenario:
+            lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
+
+        lines.append("\n\n♚📂 <b>بازیکنان:</b>\n")
+
+        # لیست صندلی‌ها
+        for i in range(1, g.max_seats + 1):
+            emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
+            if i in g.seats:
+                uid, name = g.seats[i]
+                safe_name = escape(name, quote=False)
+                txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
+
+                # اخطارها (بدون سقف؛ فقط اطمینان از >=0)
+                wn = 0
+                if isinstance(getattr(g, "warnings", None), dict):
+                    wn = g.warnings.get(i, 0)
+                try:
+                    wn = int(wn)
+                except Exception:
+                    wn = 0
+                wn = max(0, wn)
+                if wn > 0:
+                    txt += " " + ("❗️" * wn)
+
+                # خط‌خورده
+                if i in g.striked:
+                    txt += " ❌☠️"
+
+                line = f"♚{emoji_num}  {txt}"
+            else:
+                line = f"♚{emoji_num} ⬜ /{i}"
+            lines.append(line)
+
+        # گزارش استعلام وضعیت
+        if g.status_counts.get("citizen", 0) > 0 or g.status_counts.get("mafia", 0) > 0:
+            c = g.status_counts.get("citizen", 0)
+            m = g.status_counts.get("mafia", 0)
+            lines.append(f"\n🧾 <i>استعلام وضعیت: {c} شهروند و {m} مافیا</i>")
+
+        # راهنمای مرحله
+        if getattr(g, "ui_hint", None):
+            lines.append("")
+            lines.append(f"ℹ️ <i>{g.ui_hint}</i>")
+
+        text = "\n".join(lines)
+
+        # انتخاب کیبورد
+        if custom_kb is not None:
+            kb = custom_kb
         else:
-            # هنوز پیامی نداریم → ارسال پیام جدید و پین
-            msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            if mode == REG:
+                kb = text_seating_keyboard(g)
+            elif mode == "strike":
+                kb = strike_button_markup(g)
+            elif mode == "status":
+                kb = status_button_markup(g)
+            elif mode == "delete":
+                kb = delete_button_markup(g)
+            elif mode == "warn":
+                kb = warn_button_markup_plusminus(g)
+            else:
+                kb = control_keyboard()
+
+        # ارسال/ویرایش پیام لیست (با retry و fallbacks)
+        try:
+            if g.last_seating_msg_id:
+                try:
+                    await _retry(ctx.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=g.last_seating_msg_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    ))
+                except BadRequest as e:
+                    s = str(e)
+                    if "message is not modified" in s:
+                        try:
+                            await _retry(ctx.bot.edit_message_reply_markup(
+                                chat_id=chat_id,
+                                message_id=g.last_seating_msg_id,
+                                reply_markup=kb
+                            ))
+                        except BadRequest as e2:
+                            if "message is not modified" in str(e2):
+                                pass
+                            else:
+                                raise
+                    else:
+                        raise
+            else:
+                msg = await _retry(ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb))
+                g.last_seating_msg_id = msg.message_id
+                if chat_id < 0:
+                    try:
+                        await _retry(ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True))
+                    except Exception:
+                        pass
+        except Exception:
+            # ساخت پیام جدید در صورت شکست ادیت
+            old_msg_id = g.last_seating_msg_id
+            msg = await _retry(ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb))
             g.last_seating_msg_id = msg.message_id
             if chat_id < 0:
                 try:
-                    await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+                    await _retry(ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True))
                 except Exception:
                     pass
-    except Exception:
-        # اگر ادیت به هر دلیل ممکن نشد → پیام جدید بساز
-        old_msg_id = g.last_seating_msg_id
-        msg = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
-        g.last_seating_msg_id = msg.message_id
+            # در صورت نیاز می‌توان پیام قدیمی را پاک کرد؛ فعلاً غیرفعال
 
-        # پین پیام جدید
-        if chat_id < 0:
-            try:
-                await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
-            except Exception:
-                pass
-        # (اختیاری) حذف پیام قدیمی برای جلوگیری از دو لیست
-        # if old_msg_id:
-        #     try:
-        #         await ctx.bot.delete_message(chat_id, old_msg_id)
-        #     except Exception:
-        #         pass
+        # نمایش یک‌باره لیست نقش‌ها (وقتی سناریو عوض شود)
+        if g.scenario and mode == REG:
+            if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
+                role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+                for role, count in g.scenario.roles.items():
+                    for _ in range(count):
+                        role_lines.append(f"🔸 {role}")
+                role_text = "\n".join(role_lines)
 
-    # نمایش یک‌باره لیست نقش‌ها (وقتی سناریو عوض شود)
-    if g.scenario and mode == REG:
-        if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
-            role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
-            for role, count in g.scenario.roles.items():
-                for _ in range(count):
-                    role_lines.append(f"🔸 {role}")
-            role_text = "\n".join(role_lines)
-
-            try:
-                if getattr(g, "last_roles_msg_id", None):
-                    try:
-                        await ctx.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=g.last_roles_msg_id,
-                            text=role_text,
-                            parse_mode="HTML",
-                        )
-                    except BadRequest as e:
-                        if "message is not modified" in str(e):
-                            # نیازی به پیام جدید نیست
-                            pass
-                        else:
-                            raise
-                else:
-                    role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+                try:
+                    if getattr(g, "last_roles_msg_id", None):
+                        try:
+                            await _retry(ctx.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=g.last_roles_msg_id,
+                                text=role_text,
+                                parse_mode="HTML",
+                            ))
+                        except BadRequest as e:
+                            if "message is not modified" in str(e):
+                                pass
+                            else:
+                                raise
+                    else:
+                        role_msg = await _retry(ctx.bot.send_message(chat_id, role_text, parse_mode="HTML"))
+                        g.last_roles_msg_id = role_msg.message_id
+                except Exception:
+                    role_msg = await _retry(ctx.bot.send_message(chat_id, role_text, parse_mode="HTML"))
                     g.last_roles_msg_id = role_msg.message_id
-            except Exception:
-                role_msg = await ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
-                g.last_roles_msg_id = role_msg.message_id
 
-            g.last_roles_scenario_name = g.scenario.name
+                g.last_roles_scenario_name = g.scenario.name
 
-    store.save()
+        
+        save_debounced()
 
 
 # ─────────────────────────────────────────────────────────────
