@@ -39,7 +39,30 @@ TOKEN = os.environ.get("TOKEN")
 PERSIST_FILE = "mafia_data.pkl"
 SEAT_EMOJI = "👤"; LOCKED_EMOJI = "🔒"; GOD_EMOJI = "👳🏻‍♂️"; START_EMOJI = "🚀"
 
+def load_active_groups():
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            print("❌ active_groups gist fetch failed:", res.status_code)
+            return set()
+        data = res.json()
+        content = data["files"].get("active_groups.json", {}).get("content", "[]")
+        arr = json.loads(content) if content else []
+        return set(int(x) for x in arr)
+    except Exception as e:
+        print("❌ load_active_groups error:", e)
+        return set()
 
+def save_active_groups(active_groups: set[int]):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        files = {"active_groups.json": {"content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)}}
+        requests.patch(url, headers=headers, json={"files": files})
+    except Exception as e:
+        print("❌ save_active_groups error:", e)
 @dataclass
 class Scenario:
     name: str
@@ -2397,30 +2420,7 @@ async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 OWNER_IDS = {99347107, 449916967, 7501892705,5904091398}
 
 
-def load_active_groups():
-    try:
-        url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        res = requests.get(url, headers=headers)
-        if res.status_code != 200:
-            print("❌ active_groups gist fetch failed:", res.status_code)
-            return set()
-        data = res.json()
-        content = data["files"].get("active_groups.json", {}).get("content", "[]")
-        arr = json.loads(content) if content else []
-        return set(int(x) for x in arr)
-    except Exception as e:
-        print("❌ load_active_groups error:", e)
-        return set()
 
-def save_active_groups(active_groups: set[int]):
-    try:
-        url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        files = {"active_groups.json": {"content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)}}
-        requests.patch(url, headers=headers, json={"files": files})
-    except Exception as e:
-        print("❌ save_active_groups error:", e)
 
 
 async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
