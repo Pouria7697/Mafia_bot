@@ -39,15 +39,18 @@ TOKEN = os.environ.get("TOKEN")
 PERSIST_FILE = "mafia_data.pkl"
 SEAT_EMOJI = "👤"; LOCKED_EMOJI = "🔒"; GOD_EMOJI = "👳🏻‍♂️"; START_EMOJI = "🚀"
 
-def load_active_groups():
+def load_active_groups() -> set[int]:
     try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; load_active_groups -> empty set")
+            return set()
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        res = requests.get(url, headers=headers)
-        if res.status_code != 200:
-            print("❌ active_groups gist fetch failed:", res.status_code)
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            print("❌ load_active_groups failed:", r.status_code, r.text)
             return set()
-        data = res.json()
+        data = r.json()
         content = data["files"].get("active_groups.json", {}).get("content", "[]")
         arr = json.loads(content) if content else []
         return set(int(x) for x in arr)
@@ -55,14 +58,29 @@ def load_active_groups():
         print("❌ load_active_groups error:", e)
         return set()
 
-def save_active_groups(active_groups: set[int]):
+def save_active_groups(active_groups: set[int]) -> bool:
     try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; save_active_groups skipped")
+            return False
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        files = {"active_groups.json": {"content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)}}
-        requests.patch(url, headers=headers, json={"files": files})
+        payload = {
+            "files": {
+                "active_groups.json": {
+                    "content": json.dumps(sorted(list(active_groups)), ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        r = requests.patch(url, headers=headers, json=payload, timeout=10)
+        if r.status_code not in (200, 201):
+            print("❌ save_active_groups failed:", r.status_code, r.text)
+            return False
+        return True
     except Exception as e:
         print("❌ save_active_groups error:", e)
+        return False
+
 @dataclass
 class Scenario:
     name: str
@@ -2413,9 +2431,6 @@ async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 OWNER_IDS = {99347107, 449916967, 7501892705,5904091398}
 
 
-
-
-
 async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in {"group", "supergroup"}:
@@ -2428,11 +2443,12 @@ async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     store.active_groups.add(chat.id)
-    store.save() 
-    try:
-        save_active_groups(store.active_groups)  # ⬅️ فقط اینجا
-    except Exception as e:
-        print("⚠️ could not sync active_groups to gist:", e)
+    store.save()
+    ok = save_active_groups(store.active_groups)
+    if not ok:
+        await update.message.reply_text("⚠️ گروه فعال شد، اما ذخیره در Gist ناموفق بود.")
+        return
+
     await update.message.reply_text("✅ این گروه با موفقیت فعال شد.")
 
 
@@ -2450,10 +2466,10 @@ async def deactivate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.id in store.active_groups:
         store.active_groups.remove(chat.id)
         store.save()
-        try:
-            save_active_groups(store.active_groups)  # ⬅️ و اینجا
-        except Exception as e:
-            print("⚠️ could not sync active_groups to gist:", e)
+        ok = save_active_groups(store.active_groups)
+        if not ok:
+            await update.message.reply_text("⚠️ گروه از لیست محلی حذف شد، ولی ذخیره در Gist ناموفق بود.")
+            return
         await update.message.reply_text("🛑 این گروه غیرفعال شد و از Gist هم پاک شد.")
     else:
         await update.message.reply_text("ℹ️ این گروه از قبل فعال نبود.")
