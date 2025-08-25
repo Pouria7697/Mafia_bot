@@ -300,14 +300,33 @@ def load_event_numbers():
     except:
         return {}
 
-def save_event_numbers(event_numbers):
-    url = f"https://api.github.com/gists/{GIST_ID}"
-    files = {
-        "event_numbers.json": {
-            "content": json.dumps(event_numbers, ensure_ascii=False, indent=2)
+def save_event_numbers(event_numbers: dict) -> bool:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; save_event_numbers skipped")
+            return False
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {
+            "files": {
+                "event_numbers.json": {
+                    "content": json.dumps(event_numbers, ensure_ascii=False, indent=2)
+                }
+            }
         }
-    }
-    requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
+        res = requests.patch(url, headers=headers, json=payload, timeout=10)
+        if res.status_code not in (200, 201):
+            print("❌ save_event_numbers PATCH failed:", res.status_code, res.text)
+            return False
+
+        # ✅ کش را همزمان به‌روز کن
+        global EVENT_NUMBERS_CACHE
+        EVENT_NUMBERS_CACHE = event_numbers
+        return True
+    except Exception as e:
+        print("❌ save_event_numbers error:", e)
+        return False
+
 
 
 def load_stickers():
@@ -734,16 +753,18 @@ async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
     date_str = jdatetime.date.today().strftime("%Y/%m/%d")
-    god_name = g.god_name or "—"
     scenario_name = getattr(g.scenario, "name", "—")
-    chat_id_str = str(chat.id)
-    event_numbers = load_event_numbers()
-    event_num = event_numbers.get(str(chat_id_str), 1)
+
+    # ← فقط از کش
+    nums = get_event_numbers()
+    key = str(chat.id)
+    event_num = int(nums.get(key, 1))  # نمایش عدد فعلی
+
     # لینک‌دار کردن گروه
     if chat.username:
         group_link = f"<a href='https://t.me/{chat.username}'>{group_title}</a>"
     else:
-        group_link = group_title  # گروه خصوصی لینک‌نداره
+        group_link = group_title
 
     lines = [
         f"░⚜️🎮 گروه: {group_link}",
@@ -756,57 +777,29 @@ async def announce_winner(ctx, update, g: GameState):
         "",
     ]
 
- 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
-
-    
-        if getattr(g, "purchased_seat", None) == seat:
-            role_display = f"{role} / مافیاساده"
-        else:
-            role_display = role
-
-        # اگر حالت کی‌آس فعال است و این صندلی داخل انتخاب‌های کی‌آس است، علامت 🟢 بزن
+        role_display = f"{role} / مافیاساده" if getattr(g, "purchased_seat", None) == seat else role
         chaos_mark = " 🟢" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
-
-        lines.append(
-            f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
-        )
-
-
+        lines.append(f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}")
 
     lines.append("")
-
- 
     result_line = f"🏆 نتیجه بازی: برد {g.winner_side}"
-    if getattr(g, "clean_win", False):
-        result_line += " (کلین‌شیت)"
-    if getattr(g, "chaos_mode", False):
-        result_line += " (کی‌آس)"
+    if getattr(g, "clean_win", False): result_line += " (کلین‌شیت)"
+    if getattr(g, "chaos_mode", False): result_line += " (کی‌آس)"
     lines.append(result_line)
 
-
-
-    # 📌 افزایش شماره ایونت بعد از اتمام بازی
-
-    nums = get_event_numbers()          
-    key = str(chat.id)
-    nums[key] = int(nums.get(key, 0)) + 1
-    save_event_numbers(nums)            
-
-
-
+    # ✅ افزایش شماره ایونت (کش + Gist)
+    nums[key] = event_num + 1
+    ok = save_event_numbers(nums)
+    if not ok:
+        print(f"⚠️ save_event_numbers failed for chat {key}")
 
     g.phase = "ended"
     store.save()
 
-    msg = await ctx.bot.send_message(
-        chat.id,
-        "\n".join(lines),
-        parse_mode="HTML"  # لازم برای لینک
-    )
-
+    msg = await ctx.bot.send_message(chat.id, "\n".join(lines), parse_mode="HTML")
     try:
         await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
     except Exception as e:
@@ -2480,16 +2473,17 @@ async def set_event_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     num = int(ctx.args[0])
-    event_numbers = load_event_numbers()
-    event_numbers[chat_id] = num
-    save_event_numbers(event_numbers)
 
-    # ✅ همین‌جا لیست فعلی را هم آپدیت کن
+    # ✅ به جای load/save خام، از کش استفاده کن و همون رو به‌روز کن
+    nums = get_event_numbers()             # ← از کش می‌خوانیم
+    nums[chat_id] = num                    # ← کش را بلافاصله به‌روز می‌کنیم
+    save_event_numbers(nums)               # ← سپس یک PATCH به Gist
+
+    # حالا لیست را ادیت کن؛ چون کش به‌روز شده، متن جدید می‌شود
     try:
         mode = CTRL if g.phase != "idle" else REG
         await publish_seating(ctx, chat_id_int, g, mode=mode)
-    except Exception as e:
-        # اگر ویرایش پیام به هر دلیل نشد، فقط پیام تأییدی بده
+    except Exception:
         pass
 
     await update.message.reply_text(f"✅ شماره ایونت برای این گروه روی {num} تنظیم شد.")
