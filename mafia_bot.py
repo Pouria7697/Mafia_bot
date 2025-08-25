@@ -580,7 +580,7 @@ async def publish_seating(
             safe_name = escape(name, quote=False)
             txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
 
-            # ❗️ اخطارها با گارد کامل (dict بودن، int شدن، و clamp به 0..5)
+            
             wn = 0
             if isinstance(getattr(g, "warnings", None), dict):
                 wn = g.warnings.get(i, 0)
@@ -1137,7 +1137,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    # data == "shuffle_no"
+    
     if data == "shuffle_no":
         if uid != g.god_id:
             await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
@@ -1177,15 +1177,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # اخطار
 
-     if data == "warn_mode":
+    if data == "warn_mode":
         if uid != g.god_id:
             await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند اخطار بدهد!")
             return
-        # شروع حالت اخطار: اطمینان از dict بودن، و ساخت کپی موقت
         if not isinstance(g.warnings, dict):
             g.warnings = {}
         g.warning_mode = True
-        g.pending_warnings = dict(g.warnings) if isinstance(g.warnings, dict) else {}
+        g.pending_warnings = dict(g.warnings)
         store.save()
         await publish_seating(ctx, chat, g, mode="warn")
         return
