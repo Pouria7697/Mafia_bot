@@ -637,9 +637,9 @@ async def publish_seating(
         elif mode == "status":
             kb = status_button_markup(g)
         elif mode == "delete":
-            kb = warn_button_markup_plusminus(g)
-        elif mode == "warn":                         
-            kb = warn_button_markup(g)
+            kb = delete_button_markup(g)                
+        elif mode == "warn":
+            kb = warn_button_markup_plusminus(g)       
         else:
             kb = control_keyboard()
 
@@ -1183,7 +1183,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         return
 
-    # اخطار
+
 
     # ورود به حالت اخطار
     if data == "warn_mode":
