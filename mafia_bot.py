@@ -1133,20 +1133,33 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             idx = int(parts[2])
         except:
             return
+
         options = [s for s in store.scenarios if sum(s.roles.values()) == size]
         if not (0 <= idx < len(options)):
+            await safe_q_answer(q, "سناریوی نامعتبر.", show_alert=True)
             return
+
         chosen = options[idx]
 
-    if g.scenario and g.scenario.name == chosen.name and g.max_seats == size:
-        await safe_q_answer(q, "سناریو تغییری نکرد.", show_alert=False)
-        return
+        # ⛔ اگر تغییری نیست، کاری نکن
+        if g.scenario and g.scenario.name == chosen.name and g.max_seats == size:
+            await safe_q_answer(q, "سناریو تغییری نکرد.", show_alert=False)
+            return
 
         _apply_size_and_scenario(g, size, chosen)
+        # خروج از مود تغییر سناریو و پاک کردن hint
+        g.awaiting_scenario_change = False
+        g.pending_size = None
+        g.ui_hint = None
         store.save()
 
-        # نمایش لیست با ظرفیت جدید (بدون حذف نفراتِ داخل ظرفیت)
-        await set_hint_and_kb(ctx, chat, g, None, text_seating_keyboard(g), mode=REG if g.phase=="idle" else CTRL)
+        # نمایش لیست با ظرفیت/سناریوی جدید
+        await set_hint_and_kb(
+            ctx, chat, g,
+            None,
+            text_seating_keyboard(g),
+            mode=REG if g.phase == "idle" else CTRL
+        )
         return
 
     # اگر وسط انتخاب سناریو بود و گفت «ظرفیت دیگر»
@@ -1830,25 +1843,24 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #    g.waiting_name[uid] = seat_no
     # ─────────────────────────────────────────────────────────────
     if uid in g.waiting_name:
-
-        target_seat = g.waiting_name[uid]
+        target_seat = g.waiting_name[uid]  # فلگ رو فعلاً پاک نکن
 
         import re
         if not re.match(r'^[\u0600-\u06FF\s]+$', text):
-            await ctx.bot.send_message(chat, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید. دوباره امتحان کنید:")
+            await ctx.bot.send_message(chat_id, "❗ لطفاً نام را فقط با حروف فارسی وارد کنید. دوباره امتحان کنید:")
             return
 
+        # ورودی معتبر شد → فلگ رو پاک کن
         g.waiting_name.pop(uid, None)
 
-
+        # ذخیره نام جدید
         g.user_names[uid] = text
-        save_usernames_to_gist(g.user_names)
 
-
+        # اگر هنوز روی همان صندلی است، همان را آپدیت کن
         if target_seat in g.seats and g.seats[target_seat][0] == uid:
             g.seats[target_seat] = (uid, text)
         else:
-       
+            # اگر جای دیگری نشسته، صندلی فعلی‌اش را آپدیت کن
             for s, (u, n) in list(g.seats.items()):
                 if u == uid:
                     g.seats[s] = (uid, text)
@@ -1856,6 +1868,16 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         store.save()
         await publish_seating(ctx, chat_id, g)
+
+
+        try:
+            save_usernames_to_gist(g.user_names)
+        except Exception:
+            pass
+
+       
+        await ctx.bot.send_message(chat_id, f"✅ نام شما به «{text}» تغییر کرد.")
+
         return
 
 
