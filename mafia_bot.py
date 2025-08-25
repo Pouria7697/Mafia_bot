@@ -419,12 +419,19 @@ def control_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def warn_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    # اطمینان از dict بودن
+    pw = g.pending_warnings if isinstance(g.pending_warnings, dict) else {}
+    w = g.warnings if isinstance(g.warnings, dict) else {}
+
     rows = []
     alive_seats = [s for s in sorted(g.seats) if s not in g.striked]
     for s in alive_seats:
-        # اگر dictها None بودند، با {} امنشون می‌کنیم
-        base = (g.pending_warnings or {}).get(s, (g.warnings or {}).get(s, 0))
-        n = max(0, min(int(base), 5))  # گارد
+        base = pw.get(s, w.get(s, 0))
+        try:
+            n = int(base)
+        except Exception:
+            n = 0
+        n = max(0, min(n, 5))
         icons = "❗️" * n
         label = f"{s} {icons if n > 0 else '(0)'}"
         rows.append([InlineKeyboardButton(label, callback_data=f"warn_toggle_{s}")])
@@ -432,6 +439,7 @@ def warn_button_markup(g: GameState) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("✅ تأیید", callback_data="warn_confirm")])
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="warn_back")])
     return InlineKeyboardMarkup(rows)
+
 
 
 def kb_endgame_root() -> InlineKeyboardMarkup:
@@ -571,11 +579,20 @@ async def publish_seating(
             uid, name = g.seats[i]
             safe_name = escape(name, quote=False)
             txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
-            
-            wn = g.warnings.get(i, 0) 
-            if wn > 0:
-                txt += " " + ("❗️" * min(wn, 5))
 
+            # ❗️ اخطارها با گارد کامل (dict بودن، int شدن، و clamp به 0..5)
+            wn = 0
+            if isinstance(getattr(g, "warnings", None), dict):
+                wn = g.warnings.get(i, 0)
+            try:
+                wn = int(wn)
+            except Exception:
+                wn = 0
+            wn = max(0, min(wn, 5))
+            if wn > 0:
+                txt += " " + ("❗️" * wn)
+
+            # ☠️ خط‌خورده‌ها
             if i in g.striked:
                 txt += " ❌☠️"
 
@@ -584,6 +601,7 @@ async def publish_seating(
             line = f"♚{emoji_num} ⬜ /{i}"
 
         lines.append(line)
+
 
 
 
@@ -1159,56 +1177,81 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # اخطار
 
-    if data == "warn_mode":
+     if data == "warn_mode":
         if uid != g.god_id:
             await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند اخطار بدهد!")
             return
-        # شروع حالت اخطار: از وضعیت فعلی یک کپی موقت بساز
+        # شروع حالت اخطار: اطمینان از dict بودن، و ساخت کپی موقت
+        if not isinstance(g.warnings, dict):
+            g.warnings = {}
         g.warning_mode = True
-        g.pending_warnings = dict(g.warnings) if g.warnings else {}
+        g.pending_warnings = dict(g.warnings) if isinstance(g.warnings, dict) else {}
         store.save()
-        await publish_seating(ctx, chat, g, mode="warn")  # کیبورد اخطار
+        await publish_seating(ctx, chat, g, mode="warn")
         return
 
     if data.startswith("warn_toggle_") and g.warning_mode and uid == g.god_id:
         try:
             seat = int(data.split("_")[2])
-        except:
+        except Exception:
             return
 
-        # فقط زنده‌ها
-        if seat in g.seats and seat not in g.striked:
-            # مقدار پایه از pending یا warnings
-            base = (g.pending_warnings or {}).get(seat, (g.warnings or {}).get(seat, 0))
-            nxt = (base + 1) % 6  # 0..5
+        try:
+            # فقط زنده‌ها
+            if seat in g.seats and seat not in g.striked:
+                # اطمینان از dict بودن
+                if not isinstance(g.pending_warnings, dict):
+                    g.pending_warnings = {}
+                if not isinstance(g.warnings, dict):
+                    g.warnings = {}
 
-            # همیشه نگه می‌داریم؛ حتی اگر 0 باشد (برای جلوگیری از pop-related bugs)
-            if g.pending_warnings is None:
-                g.pending_warnings = {}
-            g.pending_warnings[seat] = nxt
+                base = g.pending_warnings.get(
+                    seat,
+                    g.warnings.get(seat, 0)
+                )
 
-            store.save()
-            await publish_seating(ctx, chat, g, mode="warn")
+                # تبدیل مطمئن به int و clamp در بازه 0..5
+                try:
+                    base = int(base)
+                except Exception:
+                    base = 0
+                base = max(0, min(base, 5))
+
+                nxt = (base + 1) % 6  # 0..5
+
+                # به‌جای pop، همیشه نگه می‌داریم (حتی اگر 0 باشد)
+                g.pending_warnings[seat] = nxt
+
+                store.save()
+                await publish_seating(ctx, chat, g, mode="warn")
+        except Exception as e:
+            # لاگ خطا برای عیب‌یابی؛ جلوی «هنگ» را می‌گیرد
+            print("❌ warn_toggle error:", e)
         return
 
     if data == "warn_confirm" and g.warning_mode and uid == g.god_id:
-        # اعمال نهایی: صفرها حذف شوند تا نهایی تمیز بماند
-        final_src = g.pending_warnings or {}
-        g.warnings = {k: v for k, v in final_src.items() if v > 0}
+        # اطمینان از dict بودن
+        if not isinstance(g.pending_warnings, dict):
+            g.pending_warnings = {}
+        # اعمال نهایی: صفرها حذف شوند تا تمیز بماند
+        g.warnings = {
+            int(k): int(v)
+            for k, v in g.pending_warnings.items()
+            if isinstance(v, int) and v > 0
+        }
         g.warning_mode = False
         g.pending_warnings = {}
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
-
 
     if data == "warn_back" and g.warning_mode and uid == g.god_id:
-        # لغو تغییرات
         g.warning_mode = False
         g.pending_warnings = {}
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
+
     # شروع «تغییر سناریو/ظرفیت»
     if data == "change_scenario":
         if g.god_id is None or uid != g.god_id:
