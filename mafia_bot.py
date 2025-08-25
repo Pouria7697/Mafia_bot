@@ -129,7 +129,9 @@ class GameState:
     status_counts: dict[str, int] = None
     status_mode: bool = False 
     ui_hint: str | None = None
-
+    warnings: dict[int, int] | None = None
+    warning_mode: bool = False
+    pending_warnings: dict[int, int] | None = None
 
 
     def __post_init__(self):
@@ -166,6 +168,9 @@ class GameState:
         self.chaos_selected = set()       
         self.purchased_seat = None    
         self.pending_delete = getattr(self, "pending_delete", None) or set()  
+        self.warnings = self.warnings or {}
+        self.pending_warnings = self.pending_warnings or {}
+        self.warning_mode = getattr(self, "warning_mode", False)
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -405,12 +410,28 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
 # ─────────────────────────────────────────────────────────────
 def control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✂️ خط‌زدن",           callback_data="strike_out")],
-        [InlineKeyboardButton("📊 استعلام وضعیت",     callback_data="status_query")],
-        [InlineKeyboardButton("🗳 رأی‌گیری اولیه",     callback_data="init_vote")],
-        [InlineKeyboardButton("🗳 رأی‌گیری نهایی",     callback_data="final_vote")],
-        [InlineKeyboardButton("🏁 اتمام بازی",        callback_data="end_game")]
+        [InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode")],
+        [InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out")],
+        [InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_query")],
+        [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
+        [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
+        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
     ])
+
+def warn_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    rows = []
+    # فقط صندلی‌های زنده
+    alive_seats = [s for s in sorted(g.seats) if s not in g.striked]
+    for s in alive_seats:
+        n = g.pending_warnings.get(s, g.warnings.get(s, 0))
+        icons = "❗️" * min(n, 5)
+        label = f"{s} {icons if icons else '(0)'}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"warn_toggle_{s}")])
+
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="warn_confirm")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="warn_back")])
+    return InlineKeyboardMarkup(rows)
+
 def kb_endgame_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏙 شهر", callback_data="winner_city")],
@@ -543,16 +564,25 @@ async def publish_seating(
     # لیست صندلی‌ها
     for i in range(1, g.max_seats + 1):
         emoji_num = emoji_numbers[i] if i < len(emoji_numbers) else str(i)
+
         if i in g.seats:
             uid, name = g.seats[i]
-            safe_name = escape(name, quote=False) 
+            safe_name = escape(name, quote=False)
             txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
+            
+            wn = g.warnings.get(i, 0) 
+            if wn > 0:
+                txt += " " + ("❗️" * min(wn, 5))
+
             if i in g.striked:
                 txt += " ❌☠️"
+
             line = f"♚{emoji_num}  {txt}"
         else:
             line = f"♚{emoji_num} ⬜ /{i}"
+
         lines.append(line)
+
 
 
     # گزارش کوتاه استعلام وضعیت (اختیاری)
@@ -580,6 +610,8 @@ async def publish_seating(
             kb = status_button_markup(g)
         elif mode == "delete":
             kb = delete_button_markup(g)
+        elif mode == "warn":                         
+            kb = warn_button_markup(g)
         else:
             kb = control_keyboard()
 
@@ -1123,8 +1155,51 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         return
 
+    # اخطار
 
+    if data == "warn_mode":
+        if uid != g.god_id:
+            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند اخطار بدهد!")
+            return
+        # شروع حالت اخطار: از وضعیت فعلی یک کپی موقت بساز
+        g.warning_mode = True
+        g.pending_warnings = dict(g.warnings) if g.warnings else {}
+        store.save()
+        await publish_seating(ctx, chat, g, mode="warn")  # کیبورد اخطار
+        return
 
+    if data.startswith("warn_toggle_") and g.warning_mode and uid == g.god_id:
+        try:
+            seat = int(data.split("_")[2])
+        except:
+            return
+        # فقط زنده‌ها
+        if seat in g.seats and seat not in g.striked:
+            cur = g.pending_warnings.get(seat, g.warnings.get(seat, 0))
+            nxt = (cur + 1) % 6  # 0..5
+            if nxt == 0:
+                g.pending_warnings.pop(seat, None)
+            else:
+                g.pending_warnings[seat] = nxt
+            store.save()
+            await publish_seating(ctx, chat, g, mode="warn")
+        return
+
+    if data == "warn_confirm" and g.warning_mode and uid == g.god_id:
+        # اعمال نهایی
+        g.warnings = {k: v for k, v in g.pending_warnings.items() if v > 0}
+        g.warning_mode = False
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
+    if data == "warn_back" and g.warning_mode and uid == g.god_id:
+        # لغو تغییرات
+        g.warning_mode = False
+        g.pending_warnings = {}
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
     # شروع «تغییر سناریو/ظرفیت»
     if data == "change_scenario":
         if g.god_id is None or uid != g.god_id:
