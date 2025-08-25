@@ -420,17 +420,19 @@ def control_keyboard() -> InlineKeyboardMarkup:
 
 def warn_button_markup(g: GameState) -> InlineKeyboardMarkup:
     rows = []
-    # فقط صندلی‌های زنده
     alive_seats = [s for s in sorted(g.seats) if s not in g.striked]
     for s in alive_seats:
-        n = g.pending_warnings.get(s, g.warnings.get(s, 0))
-        icons = "❗️" * min(n, 5)
-        label = f"{s} {icons if icons else '(0)'}"
+        # اگر dictها None بودند، با {} امنشون می‌کنیم
+        base = (g.pending_warnings or {}).get(s, (g.warnings or {}).get(s, 0))
+        n = max(0, min(int(base), 5))  # گارد
+        icons = "❗️" * n
+        label = f"{s} {icons if n > 0 else '(0)'}"
         rows.append([InlineKeyboardButton(label, callback_data=f"warn_toggle_{s}")])
 
     rows.append([InlineKeyboardButton("✅ تأیید", callback_data="warn_confirm")])
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="warn_back")])
     return InlineKeyboardMarkup(rows)
+
 
 def kb_endgame_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -1173,25 +1175,32 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             seat = int(data.split("_")[2])
         except:
             return
+
         # فقط زنده‌ها
         if seat in g.seats and seat not in g.striked:
-            cur = g.pending_warnings.get(seat, g.warnings.get(seat, 0))
-            nxt = (cur + 1) % 6  # 0..5
-            if nxt == 0:
-                g.pending_warnings.pop(seat, None)
-            else:
-                g.pending_warnings[seat] = nxt
+            # مقدار پایه از pending یا warnings
+            base = (g.pending_warnings or {}).get(seat, (g.warnings or {}).get(seat, 0))
+            nxt = (base + 1) % 6  # 0..5
+
+            # همیشه نگه می‌داریم؛ حتی اگر 0 باشد (برای جلوگیری از pop-related bugs)
+            if g.pending_warnings is None:
+                g.pending_warnings = {}
+            g.pending_warnings[seat] = nxt
+
             store.save()
             await publish_seating(ctx, chat, g, mode="warn")
         return
 
     if data == "warn_confirm" and g.warning_mode and uid == g.god_id:
-        # اعمال نهایی
-        g.warnings = {k: v for k, v in g.pending_warnings.items() if v > 0}
+        # اعمال نهایی: صفرها حذف شوند تا نهایی تمیز بماند
+        final_src = g.pending_warnings or {}
+        g.warnings = {k: v for k, v in final_src.items() if v > 0}
         g.warning_mode = False
+        g.pending_warnings = {}
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
+
 
     if data == "warn_back" and g.warning_mode and uid == g.god_id:
         # لغو تغییرات
