@@ -26,7 +26,9 @@ BTN_PLAYER  = "player_name"
 BTN_DELETE  = "delete_seat"      
 BTN_START   = "start_game"      
 BTN_CALL = "call_players"   
-BTN_REROLL = "reroll_roles"  
+BTN_REROLL = "reroll_roles" 
+MAFIA_FILENAME = "mafia.json"
+ 
 
 GH_TOKEN = os.environ.get("GH_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
@@ -351,6 +353,49 @@ def save_event_numbers(event_numbers: dict) -> bool:
         return False
 
 
+def load_mafia_roles() -> set[str]:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; load_mafia_roles -> empty set")
+            return set()
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            print("❌ load_mafia_roles failed:", r.status_code, r.text)
+            return set()
+        data = r.json()
+        content = data["files"].get(MAFIA_FILENAME, {}).get("content", "[]")
+        arr = json.loads(content) if content else []
+        # رشته‌های خالی رو حذف کن
+        clean = [x.strip() for x in arr if isinstance(x, str) and x.strip()]
+        return set(clean)
+    except Exception as e:
+        print("❌ load_mafia_roles error:", e)
+        return set()
+
+def save_mafia_roles(roles: set[str]) -> bool:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; save_mafia_roles skipped")
+            return False
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {
+            "files": {
+                MAFIA_FILENAME: {
+                    "content": json.dumps(sorted(list(roles)), ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        r = requests.patch(url, headers=headers, json=payload, timeout=10)
+        if r.status_code not in (200, 201):
+            print("❌ save_mafia_roles failed:", r.status_code, r.text)
+            return False
+        return True
+    except Exception as e:
+        print("❌ save_mafia_roles error:", e)
+        return False
 
 def load_stickers():
     url = f"https://api.github.com/gists/{GIST_ID}"
@@ -412,7 +457,8 @@ def control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode")],
         [InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out")],
-        [InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_query")],
+        [InlineKeyboardButton("📊 استعلام وضعیت (اتومات)", callback_data="status_auto")],
+        [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
@@ -1812,6 +1858,34 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await publish_seating(ctx, chat, g, mode="status")
         return
 
+    if data == "status_auto":
+        if uid != g.god_id:
+            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند استعلام وضعیت بگیرد!")
+            return
+
+        mafia_roles = load_mafia_roles()
+        dead_seats = [s for s in g.striked]  # صندلی‌های خط‌خورده = حذف‌شده‌ها
+        mafia_count = 0
+        citizen_count = 0
+
+        for s in dead_seats:
+            role = g.assigned_roles.get(s)
+            if role and role in mafia_roles:
+                mafia_count += 1
+            else:
+                citizen_count += 1
+
+        # ذخیره برای نمایش در لیست
+        g.status_counts = {"citizen": citizen_count, "mafia": mafia_count}
+        g.status_mode = False
+        store.save()
+
+        await ctx.bot.send_message(
+            chat,
+            f"📢 استعلام وضعیت :\n {citizen_count} شهروند\n {mafia_count} مافیا"
+        )
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
 
 
     if data == "back_vote_final" and uid == g.god_id:
@@ -2719,6 +2793,61 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] chat={chat_id} err={err}")
     except Exception:
         pass
+
+async def cmd_addmafia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("این دستور فقط در گروه قابل استفاده است.")
+        return
+
+    # چک ادمین بودن
+    try:
+        member = await ctx.bot.get_chat_member(chat.id, update.effective_user.id)
+        if member.status not in ("administrator", "creator"):
+            await update.message.reply_text("⛔ فقط ادمین‌های گروه می‌توانند نقش مافیایی اضافه کنند.")
+            return
+    except Exception:
+        await update.message.reply_text("⛔ خطا در بررسی ادمین بودن.")
+        return
+
+    role = " ".join(ctx.args).strip() if ctx.args else ""
+    if not role:
+        await update.message.reply_text("فرمت درست: /addmafia نام_نقش\nمثال: /addmafia گادفادر")
+        return
+
+    roles = load_mafia_roles()
+    if role in roles:
+        await update.message.reply_text(f"ℹ️ «{role}» از قبل در لیست مافیا هست.")
+        return
+
+    roles.add(role)
+    ok = save_mafia_roles(roles)
+    if ok:
+        await update.message.reply_text(f"✅ نقش «{role}» به لیست مافیا اضافه شد.")
+    else:
+        await update.message.reply_text("❌ ذخیره‌سازی در Gist ناموفق بود.")
+
+
+async def cmd_listmafia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("این دستور فقط در گروه قابل استفاده است.")
+        return
+
+    # این یکی نیاز به ادمین‌بودن نداره → همه می‌تونن ببینن
+    roles = sorted(list(load_mafia_roles()))
+    if not roles:
+        await update.message.reply_text("لیست نقش‌های مافیایی خالی است.")
+        return
+
+    txt = "🕶 لیست نقش‌های مافیایی ثبت‌شده:\n" + "\n".join(f"• {r}" for r in roles)
+    await update.message.reply_text(txt)
+
+
+
+
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
@@ -2738,6 +2867,8 @@ async def main():
     app.add_handler(CommandHandler("addscenario", addscenario, filters=group_filter))
     app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=group_filter))
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
+    app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
+    app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
