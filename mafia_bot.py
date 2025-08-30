@@ -415,16 +415,15 @@ def save_stickers(stickers):
         }
     }
     requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
-
+      #  [
+       #     InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup_below")
+        #],
 
 def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
-        ],
-        [
             InlineKeyboardButton("❌ حذف بازیکن", callback_data=BTN_DELETE),
-            InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup_below")
+            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
         ],
         [
             InlineKeyboardButton("↩️ لغو ثبت‌نام", callback_data="cancel_self"),
@@ -738,59 +737,97 @@ async def publish_seating(
                 kb = control_keyboard()
 
         # ارسال/ویرایش پیام لیست (با retry و fallbacks)
-        try:
-            if g.last_seating_msg_id:
-                try:
-                    await _retry(ctx.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=g.last_seating_msg_id,
-                        text=text,
-                        parse_mode="HTML",
-                        reply_markup=kb,
-                    ))
-                except BadRequest as e:
-                    s = str(e)
-                    if "message is not modified" in s:
-                        try:
-                            await _retry(ctx.bot.edit_message_reply_markup(
-                                chat_id=chat_id,
-                                message_id=g.last_seating_msg_id,
-                                reply_markup=kb
-                            ))
-                        except BadRequest as e2:
-                            if "message is not modified" in str(e2):
-                                pass
-                            else:
-                                raise
-                    else:
-                        raise
-            else:
-                msg = await _retry(ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb))
-                g.last_seating_msg_id = msg.message_id
-                if chat_id < 0:
+    try:
+        if g.last_seating_msg_id:
+            try:
+                await _retry(ctx.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=g.last_seating_msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                ))
+            except BadRequest as e:
+                s = str(e)
+                if "message is not modified" in s:
                     try:
-                        await _retry(ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True))
-                    except Exception:
-                        pass
-        except Exception:
-            # ساخت پیام جدید در صورت شکست ادیت
-            old_msg_id = g.last_seating_msg_id
-            msg = await _retry(ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb))
+                        await _retry(ctx.bot.edit_message_reply_markup(
+                            chat_id=chat_id,
+                            message_id=g.last_seating_msg_id,
+                            reply_markup=kb
+                        ))
+                    except BadRequest as e2:
+                        if "message is not modified" in str(e2):
+                            pass
+                        else:
+                            raise
+                else:
+                    raise
+        else:
+            msg = await _retry(ctx.bot.send_message(
+                chat_id,
+                text,
+                parse_mode="HTML",
+                reply_markup=kb
+            ))
             g.last_seating_msg_id = msg.message_id
             if chat_id < 0:
                 try:
-                    await _retry(ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True))
+                    await _retry(ctx.bot.pin_chat_message(
+                        chat_id,
+                        msg.message_id,
+                        disable_notification=True
+                    ))
                 except Exception:
                     pass
-            # در صورت نیاز می‌توان پیام قدیمی را پاک کرد؛ فعلاً غیرفعال
+    except Exception:
+        # ساخت پیام جدید در صورت شکست ادیت
+        old_msg_id = g.last_seating_msg_id
+        msg = await _retry(ctx.bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=kb
+        ))
+        g.last_seating_msg_id = msg.message_id
+
+        if chat_id < 0:
+            try:
+                await _retry(ctx.bot.pin_chat_message(
+                    chat_id,
+                    msg.message_id,
+                    disable_notification=True
+                ))
+            except Exception:
+                pass
+
+        # ✅ پاک کردن لیست قبلی در صورت ایجاد لیست جدید
+        if old_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id, old_msg_id)
+            except Exception:
+                pass
+
 
         # نمایش یک‌باره لیست نقش‌ها (وقتی سناریو عوض شود)
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
-                role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+                mafia_roles = load_mafia_roles()  
+                mafia_lines = ["🖤 <b>نقش‌های مافیا:</b>"]
+                citizen_lines = ["🤍 <b>نقش‌های شهروند:</b>"]
+
                 for role, count in g.scenario.roles.items():
                     for _ in range(count):
-                        role_lines.append(f"🔸 {role}")
+                        if role in mafia_roles:
+                            mafia_lines.append(f"🔸 {role}")
+                        else:
+                            citizen_lines.append(f"🔹 {role}")
+
+                role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+                role_lines.extend(mafia_lines)
+                role_lines.append("")  # خط خالی بین دسته‌ها
+                role_lines.extend(citizen_lines)
+
                 role_text = "\n".join(role_lines)
 
                 try:
@@ -815,6 +852,7 @@ async def publish_seating(
                     g.last_roles_msg_id = role_msg.message_id
 
                 g.last_roles_scenario_name = g.scenario.name
+
 
         
         save_debounced()
@@ -935,17 +973,37 @@ async def announce_winner(ctx, update, g: GameState):
         "",
     ]
 
+    mafia_roles = load_mafia_roles()
+
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
-        role_display = f"{role} / مافیاساده" if getattr(g, "purchased_seat", None) == seat else role
-        chaos_mark = " 🟢" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
-        lines.append(f"░⚜️▪️{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}")
+
+        # تعیین مارک قلب
+        if getattr(g, "purchased_seat", None) == seat:
+            # اگر خریداری شده باشه → همیشه مافیا حساب میشه
+            role_display = f"{role} / مافیاساده"
+            marker = "▪️"
+        else:
+            if role in mafia_roles:
+                marker = "▪️"
+                role_display = role
+            else:
+                marker = "▫️"
+                role_display = role
+
+        chaos_mark = " 🟧" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
+
+        lines.append(
+            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
+        )
 
     lines.append("")
     result_line = f"🏆 نتیجه بازی: برد {g.winner_side}"
-    if getattr(g, "clean_win", False): result_line += " (کلین‌شیت)"
-    if getattr(g, "chaos_mode", False): result_line += " (کی‌آس)"
+    if getattr(g, "clean_win", False):
+        result_line += " (کلین‌شیت)"
+    if getattr(g, "chaos_mode", False):
+        result_line += " (کی‌آس)"
     lines.append(result_line)
 
     # ✅ افزایش شماره ایونت (کش + Gist)
@@ -962,6 +1020,7 @@ async def announce_winner(ctx, update, g: GameState):
         await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
     except Exception as e:
         print("⚠️ خطا در پین کردن پیام:", e)
+
 
 
 
@@ -1010,6 +1069,23 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ انتخاب ظرفیت دیگر", callback_data="scchange_again")])
     return InlineKeyboardMarkup(rows)
 
+async def cleanup_between(ctx, chat_id: int, first_id: int, last_id: int):
+
+    try:
+        start = min(first_id, last_id)
+        end = max(first_id, last_id)
+
+        # حداکثر 100 تا 100 تا پاک می‌کنیم
+        for msg_id in range(start + 1, end):
+            try:
+                await ctx.bot.delete_message(chat_id, msg_id)
+            except Exception:
+                
+                pass
+            await asyncio.sleep(0.05)  # تاخیر کوتاه برای جلوگیری از FloodLimit
+
+    except Exception as e:
+        print(f"⚠️ cleanup_between error: {e}")
 
 # ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
@@ -1189,7 +1265,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "shuffle_yes":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
+            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -1199,25 +1275,33 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.from_startgame = False
         store.save()
 
-        if hasattr(g, "shuffle_prompt_msg_id") and g.shuffle_prompt_msg_id:
+        prompt_id = g.shuffle_prompt_msg_id 
+        if prompt_id:
             try:
-                await ctx.bot.delete_message(chat, g.shuffle_prompt_msg_id)
+                await ctx.bot.delete_message(chat, prompt_id)
             except:
                 pass
             g.shuffle_prompt_msg_id = None
 
         repeats = getattr(g, "shuffle_repeats", None) or 1
 
+        # اول نقش‌ها داده شود
         await shuffle_and_assign(
             ctx,
             chat,
             g,
-            shuffle_seats=True,                         # صندلی‌ها جابجا بشن
-            uid_to_role=g.preview_uid_to_role or None,  # اگر ریرول زده بود، همون نقش‌ها
-            notify_players=True,                        # این بار برای پلیرها هم بفرست
+            shuffle_seats=True,
+            uid_to_role=g.preview_uid_to_role or None,
+            notify_players=True,
             preview_mode=False,
-            role_shuffle_repeats=repeats,               # ✨ تعداد دفعات شافل سیت مطابق ریرول
+            role_shuffle_repeats=repeats,
         )
+
+        # بعد از نقش‌دهی → پاکسازی پیام‌ها بین لیست و بله/خیر
+        if g.last_seating_msg_id and prompt_id:
+            asyncio.create_task(
+                cleanup_between(ctx, chat, g.last_seating_msg_id, prompt_id)
+            )
 
         g.preview_uid_to_role = None
         g.shuffle_repeats = None
@@ -1225,10 +1309,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    
     if data == "shuffle_no":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
+            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -1238,30 +1321,39 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.from_startgame = False
         store.save()
 
-        if hasattr(g, "shuffle_prompt_msg_id") and g.shuffle_prompt_msg_id:
+        prompt_id = g.shuffle_prompt_msg_id  
+        if prompt_id:
             try:
-                await ctx.bot.delete_message(chat, g.shuffle_prompt_msg_id)
+                await ctx.bot.delete_message(chat, prompt_id)
             except:
                 pass
             g.shuffle_prompt_msg_id = None
 
         repeats = getattr(g, "shuffle_repeats", None) or 1
 
+        # اول نقش‌ها داده شود
         await shuffle_and_assign(
             ctx,
             chat,
             g,
-            shuffle_seats=False,                        # صندلی‌ها ثابت بمانند
-            uid_to_role=g.preview_uid_to_role or None,  # اگر ریرول زده بود، همان نقش‌ها
-            notify_players=True,                        # این بار برای پلیرها هم بفرست
+            shuffle_seats=False,
+            uid_to_role=g.preview_uid_to_role or None,
+            notify_players=True,
             preview_mode=False,
-            role_shuffle_repeats=repeats,               # (برای سازگاری پاس می‌دهیم)
+            role_shuffle_repeats=repeats,
         )
+
+        # بعد از نقش‌دهی → پاکسازی پیام‌ها بین لیست و بله/خیر
+        if g.last_seating_msg_id and prompt_id:
+            asyncio.create_task(
+                cleanup_between(ctx, chat, g.last_seating_msg_id, prompt_id)
+            )
 
         g.preview_uid_to_role = None
         g.shuffle_repeats = None
         store.save()
         return
+
 
 
 
@@ -1864,7 +1956,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         mafia_roles = load_mafia_roles()
-        dead_seats = [s for s in g.striked]  # صندلی‌های خط‌خورده = حذف‌شده‌ها
+        dead_seats = [s for s in g.striked]  
         mafia_count = 0
         citizen_count = 0
 
