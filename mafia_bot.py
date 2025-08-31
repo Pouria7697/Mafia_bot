@@ -737,33 +737,52 @@ async def publish_seating(
                 kb = control_keyboard()
 
         # ارسال/ویرایش پیام لیست (با retry و fallbacks)
-    try:
-        if g.last_seating_msg_id:
-            try:
-                await _retry(ctx.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=g.last_seating_msg_id,
-                    text=text,
+        try:
+            if g.last_seating_msg_id:
+                try:
+                    await _retry(ctx.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=g.last_seating_msg_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    ))
+                except BadRequest as e:
+                    s = str(e)
+                    if "message is not modified" in s:
+                        try:
+                            await _retry(ctx.bot.edit_message_reply_markup(
+                                chat_id=chat_id,
+                                message_id=g.last_seating_msg_id,
+                                reply_markup=kb
+                            ))
+                        except BadRequest as e2:
+                            if "message is not modified" in str(e2):
+                                pass
+                            else:
+                                raise
+                    else:
+                        raise
+            else:
+                msg = await _retry(ctx.bot.send_message(
+                    chat_id,
+                    text,
                     parse_mode="HTML",
-                    reply_markup=kb,
+                    reply_markup=kb
                 ))
-            except BadRequest as e:
-                s = str(e)
-                if "message is not modified" in s:
+                g.last_seating_msg_id = msg.message_id
+                if chat_id < 0:
                     try:
-                        await _retry(ctx.bot.edit_message_reply_markup(
-                            chat_id=chat_id,
-                            message_id=g.last_seating_msg_id,
-                            reply_markup=kb
+                        await _retry(ctx.bot.pin_chat_message(
+                            chat_id,
+                            msg.message_id,
+                            disable_notification=True
                         ))
-                    except BadRequest as e2:
-                        if "message is not modified" in str(e2):
-                            pass
-                        else:
-                            raise
-                else:
-                    raise
-        else:
+                    except Exception:
+                        pass
+        except Exception:
+            # ساخت پیام جدید در صورت شکست ادیت
+            old_msg_id = g.last_seating_msg_id
             msg = await _retry(ctx.bot.send_message(
                 chat_id,
                 text,
@@ -771,6 +790,7 @@ async def publish_seating(
                 reply_markup=kb
             ))
             g.last_seating_msg_id = msg.message_id
+
             if chat_id < 0:
                 try:
                     await _retry(ctx.bot.pin_chat_message(
@@ -780,35 +800,13 @@ async def publish_seating(
                     ))
                 except Exception:
                     pass
-    except Exception:
-        # ساخت پیام جدید در صورت شکست ادیت
-        old_msg_id = g.last_seating_msg_id
-        msg = await _retry(ctx.bot.send_message(
-            chat_id,
-            text,
-            parse_mode="HTML",
-            reply_markup=kb
-        ))
-        g.last_seating_msg_id = msg.message_id
 
-        if chat_id < 0:
-            try:
-                await _retry(ctx.bot.pin_chat_message(
-                    chat_id,
-                    msg.message_id,
-                    disable_notification=True
-                ))
-            except Exception:
-                pass
-
-        # ✅ پاک کردن لیست قبلی در صورت ایجاد لیست جدید
-        if old_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id, old_msg_id)
-            except Exception:
-                pass
-
-
+            # ✅ پاک کردن لیست قبلی در صورت ایجاد لیست جدید
+            if old_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id, old_msg_id)
+                except Exception:
+                    pass
         # نمایش یک‌باره لیست نقش‌ها (وقتی سناریو عوض شود)
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
@@ -852,9 +850,6 @@ async def publish_seating(
                     g.last_roles_msg_id = role_msg.message_id
 
                 g.last_roles_scenario_name = g.scenario.name
-
-
-        
         save_debounced()
 
 
