@@ -811,15 +811,15 @@ async def publish_seating(
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
                 mafia_roles = load_mafia_roles()  
-                mafia_lines = ["🖤 <b>نقش‌های مافیا:</b>"]
-                citizen_lines = ["🤍 <b>نقش‌های شهروند:</b>"]
+                mafia_lines = ["<b>نقش‌های مافیا:</b>"]
+                citizen_lines = ["<b>نقش‌های شهروند:</b>"]
 
                 for role, count in g.scenario.roles.items():
                     for _ in range(count):
                         if role in mafia_roles:
-                            mafia_lines.append(f"🔸 {role}")
+                            mafia_lines.append(f"♠️ {role}")
                         else:
-                            citizen_lines.append(f"🔹 {role}")
+                            citizen_lines.append(f"♥️ {role}")
 
                 role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
                 role_lines.extend(mafia_lines)
