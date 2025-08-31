@@ -987,7 +987,7 @@ async def announce_winner(ctx, update, g: GameState):
                 marker = "▫️"
                 role_display = role
 
-        chaos_mark = " 🟧" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
+        chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
 
         lines.append(
             f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
