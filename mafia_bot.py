@@ -2549,9 +2549,9 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     g = gs(chat)
 
-    # ❗ جلوگیری از اجرای تایمر روی پیام‌های قدیمی (مثلاً در لحظهٔ ری‌استارت بات)
+    # جلوگیری از اجرای تایمر روی پیام‌های قدیمی
     if (datetime.now(timezone.utc) - update.message.date).total_seconds() > 10:
-        return  # اگر پیام خیلی قدیمیه، هیچی نکن
+        return  
 
     if uid != g.god_id:
         await update.message.reply_text("⛔ فقط گاد می‌تونه تایمر بزنه.")
@@ -2564,8 +2564,17 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     seconds = int(cmd[:-1])
     await update.message.reply_text(f"⏳ تایمر {seconds} ثانیه‌ای شروع شد...")
-    await asyncio.sleep(seconds)
-    await ctx.bot.send_message(chat, "⏰ تایم تمام")
+
+    
+    asyncio.create_task(run_timer(ctx, chat, seconds))
+
+
+async def run_timer(ctx, chat: int, seconds: int):
+    try:
+        await asyncio.sleep(seconds)
+        await ctx.bot.send_message(chat, "⏰ تایم تمام")
+    except Exception as e:
+        print("⚠️ run_timer error:", e)
 
 
 async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
