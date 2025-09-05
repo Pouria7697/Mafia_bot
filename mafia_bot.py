@@ -1597,6 +1597,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.target_mode = True
         g.allow_target_schange = False
         g.awaiting_mafia_roles = True
+        g.target_original_scenario_name = chosen.name
         store.save()
 
         # فقط نقش‌های مافیا را انتخاب کن
