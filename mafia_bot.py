@@ -143,6 +143,8 @@ class GameState:
     target_role_to_seat: dict[str, int] | None = None  
     allow_target_schange: bool = False             
     target_original_scenario_name: str | None = None  
+    main_chat_id: int | None = None
+
 
 
 
@@ -524,6 +526,13 @@ def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def kb_pick_seat_for_role(g: GameState, role: str, selected: int | None = None):
+    rows = []
+    for s in sorted(g.seats.keys()):
+        label = f"{s} ✅" if selected == s else str(s)
+        rows.append([InlineKeyboardButton(label, callback_data=f"target_seat_{role}_{s}")])
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data=f"target_confirm_role_{role}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_endgame_root() -> InlineKeyboardMarkup:
@@ -1598,21 +1607,27 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.allow_target_schange = False
         g.awaiting_mafia_roles = True
         g.target_original_scenario_name = chosen.name
+
+        g.main_chat_id = chat.id
         store.save()
 
-        # فقط نقش‌های مافیا را انتخاب کن
-        mafia_all = load_mafia_roles()  # 👈 از gist
+        # فقط نقش‌های مافیا
+        mafia_all = load_mafia_roles()
         mafia_roles = [r for r in chosen.roles.keys() if r in mafia_all]
 
         if mafia_roles:
             g.pending_mafia_roles = mafia_roles
             g.mafia_role_index = 0
+            g.selected_seats_for_roles = {}  # نقشه role -> seat
             store.save()
+
             first_role = mafia_roles[0]
             await ctx.bot.send_message(
                 g.god_id,
-                f"🔢 برای نقش «{first_role}» شمارهٔ صندلی را بفرستید."
+                f"🔢 صندلی برای نقش «{first_role}» را انتخاب کنید:",
+                reply_markup=kb_pick_seat_for_role(g, first_role)
             )
+
 
         await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
         return
@@ -1626,6 +1641,71 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await set_hint_and_kb(ctx, chat, g, "انتخاب سناریو لغو شد.", text_seating_keyboard(g), mode=CTRL)
         return
 
+    if data.startswith("target_seat_"):
+        _, role, seat = data.split("_")
+        seat = int(seat)
+        group_id = g.main_chat_id or chat   # برگرد به گروه اصلی
+        g = gs(group_id)
+
+        g.temp_selected_seat = seat
+        store.save()
+        await ctx.bot.edit_message_reply_markup(
+            chat_id=uid,  # پیوی گاد
+            message_id=q.message.message_id,
+            reply_markup=kb_pick_seat_for_role(g, role, seat)
+        )
+        return
+
+    if data.startswith("target_confirm_role_"):
+        _, _, role = data.split("_")
+        group_id = g.main_chat_id or chat
+        g = gs(group_id)
+
+        seat = getattr(g, "temp_selected_seat", None)
+        if seat is None:
+            await safe_q_answer(q, "❗ ابتدا صندلی را انتخاب کنید.", show_alert=True)
+            return
+
+        g.assigned_roles[seat] = role
+        g.selected_seats_for_roles[role] = seat
+        g.mafia_role_index += 1
+        g.temp_selected_seat = None
+        store.save()
+
+        # نقش بعدی؟
+        if g.mafia_role_index < len(g.pending_mafia_roles):
+            next_role = g.pending_mafia_roles[g.mafia_role_index]
+            await ctx.bot.send_message(
+                g.god_id,
+                f"🔢 صندلی برای نقش «{next_role}» را انتخاب کنید:",
+                reply_markup=kb_pick_seat_for_role(g, next_role)
+            )
+        else:
+            # همه مافیا داده شدند → بقیه نقش‌ها رندوم
+            mafia_seats = set(g.assigned_roles.keys())
+            free_roles = []
+            chosen = g.scenario
+            for role, count in chosen.roles.items():
+                assigned = sum(1 for r in g.assigned_roles.values() if r == role)
+                free_roles.extend([role] * max(count - assigned, 0))
+            free_seats = [s for s in g.seats if s not in mafia_seats]
+            random.shuffle(free_roles)
+            for seat, role in zip(free_seats, free_roles):
+                g.assigned_roles[seat] = role
+
+            g.awaiting_mafia_roles = False
+            store.save()
+
+            # 📜 گزارش نهایی نقش‌ها برای گاد
+            report_lines = ["📜 نقش‌های نهایی:"]
+            for seat in sorted(g.seats):
+                uid, name = g.seats[seat]
+                role = g.assigned_roles.get(seat, "—")
+                report_lines.append(f"{seat}. {name} ⇦ {role}")
+            await ctx.bot.send_message(g.god_id, "\n".join(report_lines))
+
+            await ctx.bot.send_message(g.god_id, "✅ نقش‌ها تکمیل شد و بین بازیکنان پخش شدند.")
+        return
 
 
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
@@ -2395,53 +2475,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    if g.target_mode and g.awaiting_mafia_roles and uid == g.god_id:
-        text = msg.text.strip()
-        if text.isdigit():
-            seat = int(text)
-            if seat in g.seats:
-                role = g.pending_mafia_roles[g.mafia_role_index]
-                g.assigned_roles[seat] = role
-                g.mafia_role_index += 1
-                store.save()
-
-                # هنوز نقش مافیای بعدی مونده؟
-                if g.mafia_role_index < len(g.pending_mafia_roles):
-                    next_role = g.pending_mafia_roles[g.mafia_role_index]
-                    await ctx.bot.send_message(
-                        uid,
-                        f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید."
-                    )
-                else:
-                    # همه نقش‌های مافیا مشخص شدند
-                    mafia_seats = set(g.assigned_roles.keys())
-
-                    # نقش‌های باقی‌مانده (شهروندها) → به تعداد دفعات رندوم اولیه
-                    free_roles = []
-                    for role, count in g.scenario.roles.items():
-                        if role not in g.pending_mafia_roles:  # فقط شهروندی
-                            assigned = sum(1 for r in g.assigned_roles.values() if r == role)
-                            remaining = count - assigned
-                            free_roles.extend([role] * max(remaining, 0))
-
-                    free_seats = [s for s in g.seats if s not in mafia_seats]
-                    random.shuffle(free_roles)
-                    for seat, role in zip(free_seats, free_roles):
-                        g.assigned_roles[seat] = role
-
-                    g.awaiting_mafia_roles = False
-                    g.pending_mafia_roles = []
-                    store.save()
-
-                    # گزارش نهایی برای گاد
-                    report_lines = ["📜 نقش‌های نهایی:"]
-                    for seat in sorted(g.assigned_roles):
-                        role = g.assigned_roles[seat]
-                        name = g.seats[seat][1]
-                        report_lines.append(f"{seat}. {name} ⇦ {role}")
-                    await ctx.bot.send_message(uid, "\n".join(report_lines))
-                    await ctx.bot.send_message(uid, "✅ نقش‌ها تکمیل شد و بین بازیکنان پخش شدند.")
-        return
 
 
 
@@ -2862,54 +2895,6 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         store.save()
         await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
         await start_vote(ctx, chat_id, g, "final")
-        return
-
-    if g.target_mode and g.awaiting_mafia_roles and uid == g.god_id:
-        text = msg.text.strip()
-        if text.isdigit():
-            seat = int(text)
-            if seat in g.seats:
-                role = g.pending_mafia_roles[g.mafia_role_index]
-                g.assigned_roles[seat] = role
-                g.mafia_role_index += 1
-                store.save()
-
-                # هنوز نقش مافیای بعدی مونده؟
-                if g.mafia_role_index < len(g.pending_mafia_roles):
-                    next_role = g.pending_mafia_roles[g.mafia_role_index]
-                    await ctx.bot.send_message(
-                        uid,
-                        f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید."
-                    )
-                else:
-                    # همه نقش‌های مافیا مشخص شدند
-                    mafia_seats = set(g.assigned_roles.keys())
-
-                    # نقش‌های باقی‌مانده (شهروندها) → به تعداد دفعات رندوم اولیه
-                    free_roles = []
-                    for role, count in g.scenario.roles.items():
-                        if role not in g.pending_mafia_roles:  # فقط شهروندی
-                            assigned = sum(1 for r in g.assigned_roles.values() if r == role)
-                            remaining = count - assigned
-                            free_roles.extend([role] * max(remaining, 0))
-
-                    free_seats = [s for s in g.seats if s not in mafia_seats]
-                    random.shuffle(free_roles)
-                    for seat, role in zip(free_seats, free_roles):
-                        g.assigned_roles[seat] = role
-
-                    g.awaiting_mafia_roles = False
-                    g.pending_mafia_roles = []
-                    store.save()
-
-                    # گزارش نهایی برای گاد
-                    report_lines = ["📜 نقش‌های نهایی:"]
-                    for seat in sorted(g.assigned_roles):
-                        role = g.assigned_roles[seat]
-                        name = g.seats[seat][1]
-                        report_lines.append(f"{seat}. {name} ⇦ {role}")
-                    await ctx.bot.send_message(uid, "\n".join(report_lines))
-                    await ctx.bot.send_message(uid, "✅ نقش‌ها تکمیل شد و بین بازیکنان پخش شدند.")
         return
 
 
