@@ -1629,7 +1629,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
 
 
-        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+        asyncio.create_task(set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL))
         return
 
 
