@@ -2234,6 +2234,17 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    if g.phase == "idle" and text.strip() == "کنسل":
+        for seat, (player_uid, _) in list(g.seats.items()):
+            if player_uid == uid:
+                del g.seats[seat]
+                store.save()
+                await ctx.bot.send_message(chat_id, "❎ ثبت‌نام شما با موفقیت لغو شد.")
+                await publish_seating(ctx, chat_id, g)
+                break
+        else:
+            await ctx.bot.send_message(chat_id, "❗ شما در لیست نیستید.")
+        return
     # ─────────────────────────────────────────────────────────────
     # 3) تغییر نام کاربر (فقط وقتی از دکمه «✏️ تغییر نام» وارد شده)
     #    g.waiting_name[uid] = seat_no
@@ -2284,10 +2295,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
         return
-
-
-
-
 
 async def show_scenario_selection(ctx, chat_id: int, g: GameState):
     """نمایش لیست سناریوهای موجود برای انتخاب"""
@@ -2707,6 +2714,17 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await start_vote(ctx, chat_id, g, "final")
         return
 
+    if g.phase == "idle" and text.strip() == "کنسل":
+        for seat, (player_uid, _) in list(g.seats.items()):
+            if player_uid == uid:
+                del g.seats[seat]
+                store.save()
+                await ctx.bot.send_message(chat_id, "❎ ثبت‌نام شما با موفقیت لغو شد.")
+                await publish_seating(ctx, chat_id, g)
+                break
+        else:
+            await ctx.bot.send_message(chat_id, "❗ شما در لیست نیستید.")
+        return
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc).timestamp()
