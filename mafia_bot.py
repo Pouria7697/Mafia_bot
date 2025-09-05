@@ -492,11 +492,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(rows)
 
-def kb_target_confirm() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ تأیید", callback_data="target_confirm")],
-        [InlineKeyboardButton("↩️ بازگشت", callback_data="target_cancel")]
-    ])
+
 
 def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
     # از dict بودن مطمئن شو
@@ -1518,6 +1514,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # انتخاب سناریو نهایی و اعمال تغییر
+
     if data.startswith("scpick_") and getattr(g, "awaiting_scenario_change", False):
         parts = data.split("_")
         if len(parts) != 3:
@@ -1535,35 +1532,51 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         chosen = options[idx]
 
-        # اگر انتخاب = تارگت → مود ویژه
-        if chosen.name == "تارگت":
-            g.pending_size = size
-            g.pending_scenario = chosen
-            g.ui_hint = "لطفاً تأیید کنید تا سناریوی تارگت اعمال شود."
-            store.save()
-            await set_hint_and_kb(ctx, chat, g, g.ui_hint, kb_target_confirm(), mode=CTRL)
-            return
-
-        # ⛔ اگر تغییری نیست، کاری نکن
+        # اگر تغییری نیست، بی‌کار
         if g.scenario and g.scenario.name == chosen.name and g.max_seats == size:
             await safe_q_answer(q, "سناریو تغییری نکرد.", show_alert=False)
             return
 
-        _apply_size_and_scenario(g, size, chosen)
-        # خروج از مود تغییر سناریو و پاک کردن hint
-        g.awaiting_scenario_change = False
-        g.pending_size = None
-        g.ui_hint = None
-        store.save()
+        # ── حالت ویژهٔ تارگت: بازی شروع شده و هنوز در فلو تارگت هستیم
+        if getattr(g, "target_mode", False) and g.phase != "idle":
+            # در تارگت، انتخاب دوبارهٔ «تارگت» بی‌معنیه
+            if chosen.name == "تارگت":
+                await safe_q_answer(q, "در حالت تارگت باید سناریوی نهایی را انتخاب کنید.", show_alert=True)
+                return
 
-        # نمایش لیست با ظرفیت/سناریوی جدید
-        await set_hint_and_kb(
-            ctx, chat, g,
-            None,
-            text_seating_keyboard(g),
-            mode=REG if g.phase == "idle" else CTRL
-        )
-        return
+            # سناریوی نهاییِ کاندیدا → تایید/بازگشت
+            g.pending_scenario = chosen
+            g.pending_size = size
+            g.ui_hint = "سناریوی نهایی را تایید می‌کنید؟"
+            store.save()
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="target_confirm")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="target_cancel")],
+            ])
+            await set_hint_and_kb(ctx, chat, g, g.ui_hint, kb, mode=CTRL)
+            return
+
+        # ── حالت عادی:
+        if g.phase == "idle":
+            # قبل از شروع بازی: اعمال مستقیم سناریو/ظرفیت
+            _apply_size_and_scenario(g, size, chosen)
+            g.awaiting_scenario_change = False
+            g.pending_size = None
+            g.ui_hint = None
+            store.save()
+            await set_hint_and_kb(ctx, chat, g, None, text_seating_keyboard(g), mode=REG)
+            return
+        else:
+            # وسط بازی و خارج از تارگت → رفتار قبلی (اعمال مستقیم یا هر چه خودت داشتی)
+            _apply_size_and_scenario(g, size, chosen)
+            g.awaiting_scenario_change = False
+            g.pending_size = None
+            g.ui_hint = None
+            store.save()
+            await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+            return
+
 
 
     if data == "scchange_again" and getattr(g, "awaiting_scenario_change", False):
@@ -1586,8 +1599,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.awaiting_mafia_roles = True
         store.save()
 
-        # پیام به گاد در پی‌وی: شروع گرفتن نقش‌های مافیا
-        mafia_roles = [r for r in chosen.roles.keys() if r]  # لیست نقش‌های سناریو
+        # فقط نقش‌های مافیا را انتخاب کن
+        mafia_all = load_mafia_roles()  # 👈 از gist
+        mafia_roles = [r for r in chosen.roles.keys() if r in mafia_all]
+
         if mafia_roles:
             g.pending_mafia_roles = mafia_roles
             g.mafia_role_index = 0
@@ -1600,6 +1615,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
         return
+
 
     if data == "target_cancel" and getattr(g, "pending_scenario", None):
         g.pending_scenario = None
@@ -2378,7 +2394,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         return
 
-
     if g.target_mode and g.awaiting_mafia_roles and uid == g.god_id:
         text = msg.text.strip()
         if text.isdigit():
@@ -2389,17 +2404,24 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 g.mafia_role_index += 1
                 store.save()
 
+                # هنوز نقش مافیای بعدی مونده؟
                 if g.mafia_role_index < len(g.pending_mafia_roles):
                     next_role = g.pending_mafia_roles[g.mafia_role_index]
-                    await ctx.bot.send_message(uid, f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید.")
+                    await ctx.bot.send_message(
+                        uid,
+                        f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید."
+                    )
                 else:
-                    # همه نقش‌های مافیا داده شدند → بقیه نقش‌ها رندوم شوند
+                    # همه نقش‌های مافیا مشخص شدند
                     mafia_seats = set(g.assigned_roles.keys())
+
+                    # نقش‌های باقی‌مانده (شهروندها) → به تعداد دفعات رندوم اولیه
                     free_roles = []
                     for role, count in g.scenario.roles.items():
-                        assigned = sum(1 for r in g.assigned_roles.values() if r == role)
-                        remaining = count - assigned
-                        free_roles.extend([role] * max(remaining, 0))
+                        if role not in g.pending_mafia_roles:  # فقط شهروندی
+                            assigned = sum(1 for r in g.assigned_roles.values() if r == role)
+                            remaining = count - assigned
+                            free_roles.extend([role] * max(remaining, 0))
 
                     free_seats = [s for s in g.seats if s not in mafia_seats]
                     random.shuffle(free_roles)
@@ -2410,17 +2432,15 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     g.pending_mafia_roles = []
                     store.save()
 
-                    # 📜 گزارش کامل برای گاد
+                    # گزارش نهایی برای گاد
                     report_lines = ["📜 نقش‌های نهایی:"]
                     for seat in sorted(g.assigned_roles):
                         role = g.assigned_roles[seat]
                         name = g.seats[seat][1]
                         report_lines.append(f"{seat}. {name} ⇦ {role}")
                     await ctx.bot.send_message(uid, "\n".join(report_lines))
-
                     await ctx.bot.send_message(uid, "✅ نقش‌ها تکمیل شد و بین بازیکنان پخش شدند.")
         return
-
 
 
 
@@ -2853,17 +2873,24 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 g.mafia_role_index += 1
                 store.save()
 
+                # هنوز نقش مافیای بعدی مونده؟
                 if g.mafia_role_index < len(g.pending_mafia_roles):
                     next_role = g.pending_mafia_roles[g.mafia_role_index]
-                    await ctx.bot.send_message(uid, f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید.")
+                    await ctx.bot.send_message(
+                        uid,
+                        f"🔢 برای نقش «{next_role}» شمارهٔ صندلی را بفرستید."
+                    )
                 else:
-                    # همه نقش‌های مافیا داده شدند → بقیه نقش‌ها رندوم شوند
+                    # همه نقش‌های مافیا مشخص شدند
                     mafia_seats = set(g.assigned_roles.keys())
+
+                    # نقش‌های باقی‌مانده (شهروندها) → به تعداد دفعات رندوم اولیه
                     free_roles = []
                     for role, count in g.scenario.roles.items():
-                        assigned = sum(1 for r in g.assigned_roles.values() if r == role)
-                        remaining = count - assigned
-                        free_roles.extend([role] * max(remaining, 0))
+                        if role not in g.pending_mafia_roles:  # فقط شهروندی
+                            assigned = sum(1 for r in g.assigned_roles.values() if r == role)
+                            remaining = count - assigned
+                            free_roles.extend([role] * max(remaining, 0))
 
                     free_seats = [s for s in g.seats if s not in mafia_seats]
                     random.shuffle(free_roles)
@@ -2874,16 +2901,16 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     g.pending_mafia_roles = []
                     store.save()
 
-                    # 📜 گزارش کامل برای گاد
+                    # گزارش نهایی برای گاد
                     report_lines = ["📜 نقش‌های نهایی:"]
                     for seat in sorted(g.assigned_roles):
                         role = g.assigned_roles[seat]
                         name = g.seats[seat][1]
                         report_lines.append(f"{seat}. {name} ⇦ {role}")
                     await ctx.bot.send_message(uid, "\n".join(report_lines))
-
                     await ctx.bot.send_message(uid, "✅ نقش‌ها تکمیل شد و بین بازیکنان پخش شدند.")
         return
+
 
 
 
