@@ -134,7 +134,7 @@ class GameState:
     warnings: dict[int, int] | None = None
     warning_mode: bool = False
     pending_warnings: dict[int, int] | None = None
-
+    remaining_cards: dict[str, list[str]] = None
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -173,6 +173,7 @@ class GameState:
         self.warnings = self.warnings or {}
         self.pending_warnings = self.pending_warnings or {}
         self.warning_mode = getattr(self, "warning_mode", False)
+        self.remaining_cards = self.remaining_cards or {}
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -447,21 +448,68 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(rows)
 
+CARDS_FILENAME = "cards.json"
+
+def load_cards() -> dict[str, list[str]]:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; load_cards -> empty dict")
+            return {}
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            print("❌ load_cards failed:", r.status_code, r.text)
+            return {}
+        data = r.json()
+        content = data["files"].get(CARDS_FILENAME, {}).get("content", "{}")
+        return json.loads(content) if content else {}
+    except Exception as e:
+        print("❌ load_cards error:", e)
+        return {}
+
+def save_cards(cards: dict[str, list[str]]) -> bool:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; save_cards skipped")
+            return False
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {
+            "files": {
+                CARDS_FILENAME: {
+                    "content": json.dumps(cards, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        r = requests.patch(url, headers=headers, json=payload, timeout=10)
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print("❌ save_cards error:", e)
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
 #  دکمه‌های کنترل راوی در حین بازی
 # ─────────────────────────────────────────────────────────────
-def control_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode")],
         [InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out")],
         [InlineKeyboardButton("📊 استعلام وضعیت (اتومات)", callback_data="status_auto")],
         [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
-        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
-    ])
+        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
+    ]
+
+
+    cards = load_cards()
+    if g.scenario and g.scenario.name in cards and cards[g.scenario.name]:
+        rows.append([InlineKeyboardButton("🃏 شافل کارت", callback_data="shuffle_card")])
+
+    return InlineKeyboardMarkup(rows)
+
 
 def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
     # از dict بودن مطمئن شو
@@ -1776,6 +1824,37 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, f"❌ خطا در پاکسازی: {e}")
         return
 
+    # ────────────────────────────────────────────────────────────
+    #  کارت
+    # ────────────────────────────────────────────────────────────
+
+    if data == "shuffle_card":
+        if uid != g.god_id:
+            await ctx.bot.send_message(chat, "⛔ فقط راوی می‌تواند کارت بکشد!")
+            return
+
+        cards = load_cards()
+        scn = g.scenario.name if g.scenario else None
+        if not scn or scn not in cards:
+            await ctx.bot.send_message(chat, "❌ برای این سناریو کارتی تعریف نشده.")
+            return
+
+        deck = g.remaining_cards.get(scn, cards[scn].copy())
+
+        if not deck:
+            await ctx.bot.send_message(chat, "🃏 همه کارت‌ها مصرف شدند.")
+            return
+
+        choice = random.choice(deck)
+        deck.remove(choice)
+        g.remaining_cards[scn] = deck
+        store.save()
+
+        await ctx.bot.send_message(chat, f"🃏 کارت انتخاب‌شده:\n<b>{choice}</b>", parse_mode="HTML")
+        return
+
+
+
 
     # ────────────────────────────────────────────────────────────
     #  بخش‌های قدیمی (seat_ / cancel_ / strike_out / …)
@@ -2960,6 +3039,67 @@ async def cmd_listmafia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def add_card(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+
+    # فقط در گروه
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("⛔ این دستور فقط در گروه قابل استفاده است.")
+        return
+
+    # فقط ادمین‌ها
+    member = await ctx.bot.get_chat_member(chat.id, user_id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ فقط ادمین‌های گروه می‌توانند کارت اضافه کنند.")
+        return
+
+    if len(ctx.args) < 2:
+        await update.message.reply_text("❗ فرمت درست: /addcard <سناریو> <متن کارت>")
+        return
+
+    scn = ctx.args[0]
+    card_text = " ".join(ctx.args[1:])
+
+    cards = load_cards()
+    cards.setdefault(scn, [])
+    if card_text in cards[scn]:
+        await update.message.reply_text("⚠️ این کارت قبلاً اضافه شده است.")
+        return
+
+    cards[scn].append(card_text)
+    save_cards(cards)
+    await update.message.reply_text(f"✅ کارت «{card_text}» به سناریو {scn} اضافه شد.")
+
+
+async def list_cards(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+
+    # فقط در گروه
+    if chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("⛔ این دستور فقط در گروه قابل استفاده است.")
+        return
+
+    # فقط ادمین‌ها
+    member = await ctx.bot.get_chat_member(chat.id, user_id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ فقط ادمین‌های گروه می‌توانند کارت‌ها را ببینند.")
+        return
+
+    if not ctx.args:
+        await update.message.reply_text("❗ فرمت درست: /listcards <سناریو>")
+        return
+
+    scn = ctx.args[0]
+    cards = load_cards().get(scn, [])
+
+    if not cards:
+        await update.message.reply_text(f"❌ برای سناریو {scn} کارتی ثبت نشده.")
+        return
+
+    msg = f"🃏 کارت‌های سناریو {scn}:\n" + "\n".join([f"- {c}" for c in cards])
+    await update.message.reply_text(msg)
 
 
 async def main():
@@ -2970,6 +3110,7 @@ async def main():
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
+
     # 🪑 انتخاب صندلی با دستور مثل /3
     app.add_handler(
         MessageHandler(
@@ -2983,6 +3124,8 @@ async def main():
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
     app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
+    app.add_handler(CommandHandler("addcard", addcard))
+    app.add_handler(CommandHandler("listcard", listcard))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
