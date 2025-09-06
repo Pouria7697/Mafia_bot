@@ -398,6 +398,45 @@ def save_mafia_roles(roles: set[str]) -> bool:
         print("❌ save_mafia_roles error:", e)
         return False
 
+
+INDEP_FILENAME = "indep_roles.json"
+
+def load_indep_roles() -> dict[str, list[str]]:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            return {}
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        content = data["files"].get(INDEP_FILENAME, {}).get("content", "{}")
+        return json.loads(content) if content else {}
+    except Exception as e:
+        print("❌ load_indep_roles error:", e)
+        return {}
+
+def save_indep_roles(indep: dict[str, list[str]]) -> bool:
+    try:
+        if not GH_TOKEN or not GIST_ID:
+            return False
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {
+            "files": {
+                INDEP_FILENAME: {"content": json.dumps(indep, ensure_ascii=False, indent=2)}
+            }
+        }
+        r = requests.patch(url, headers=headers, json=payload, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print("❌ save_indep_roles error:", e)
+        return False
+
+
+
+
 def load_stickers():
     url = f"https://api.github.com/gists/{GIST_ID}"
     res = requests.get(url, headers={"Authorization": f"token {GH_TOKEN}"})
@@ -493,7 +532,15 @@ def save_cards(cards: dict[str, list[str]]) -> bool:
 #  دکمه‌های کنترل راوی در حین بازی
 # ─────────────────────────────────────────────────────────────
 def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
-    rows = [
+    rows = []
+
+    # اگر کارت برای این سناریو وجود داشت → اول بیاد
+    cards = load_cards()
+    if g.scenario and g.scenario.name in cards and cards[g.scenario.name]:
+        rows.append([InlineKeyboardButton("🃏 شافل کارت", callback_data="shuffle_card")])
+
+    # بعد بقیه دکمه‌ها
+    rows.extend([
         [InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode")],
         [InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out")],
         [InlineKeyboardButton("📊 استعلام وضعیت (اتومات)", callback_data="status_auto")],
@@ -501,14 +548,10 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
-    ]
-
-
-    cards = load_cards()
-    if g.scenario and g.scenario.name in cards and cards[g.scenario.name]:
-        rows.append([InlineKeyboardButton("🃏 شافل کارت", callback_data="shuffle_card")])
+    ])
 
     return InlineKeyboardMarkup(rows)
+
 
 
 def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
@@ -544,15 +587,17 @@ def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
 
 
 def kb_endgame_root() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("🏙 شهر", callback_data="winner_city")],
         [InlineKeyboardButton("😈 مافیا", callback_data="winner_mafia")],
         [InlineKeyboardButton("🏙 کلین‌شیت شهر", callback_data="clean_city")],
         [InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")],
         [InlineKeyboardButton("🏙 شهر (کی‌آس)", callback_data="winner_city_chaos")],
         [InlineKeyboardButton("😈 مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
+        [InlineKeyboardButton("♦️ مستقل", callback_data="winner_indep")],  # ✨ اضافه شد
         [InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")]
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 
@@ -669,10 +714,8 @@ async def publish_seating(
 ):
     lock = get_chat_lock(chat_id)
     async with lock:
-        # debounce کوتاه برای ادغام ادیت‌های پشت‌سرهم
         await asyncio.sleep(DEBOUNCE_EDIT_SEC)
 
-        # اگر بازی هنوز با /newgame راه‌اندازی نشده
         if not g.max_seats or g.max_seats <= 0:
             await _retry(ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند."))
             return
@@ -683,7 +726,7 @@ async def publish_seating(
             "➓", "⓫", "⓬", "⓭", "⓮", "⓯", "⓰", "⓱", "⓲", "⓳", "⓴"
         ]
 
-        # آیدی/لینک گروه (با کش داخل g)
+        # آیدی/لینک گروه
         if not hasattr(g, "_chat_cache"):
             g._chat_cache = {}
         group_id_or_link = f"🆔 {chat_id}"
@@ -706,7 +749,7 @@ async def publish_seating(
             except Exception:
                 pass
 
-        # بدنه متن
+        # متن اصلی
         lines = [
             f"{group_id_or_link}",
             "♚🎭 <b>رویداد مافیا</b>",
@@ -715,11 +758,9 @@ async def publish_seating(
             f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
         ]
 
-        # شماره رویداد از کش
         event_num = int(get_event_numbers().get(str(chat_id), 1))
         lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
 
-        # سناریو
         if g.scenario:
             lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
 
@@ -733,7 +774,6 @@ async def publish_seating(
                 safe_name = escape(name, quote=False)
                 txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
 
-                # اخطارها (بدون سقف؛ فقط اطمینان از >=0)
                 wn = 0
                 if isinstance(getattr(g, "warnings", None), dict):
                     wn = g.warnings.get(i, 0)
@@ -745,7 +785,6 @@ async def publish_seating(
                 if wn > 0:
                     txt += " " + ("❗️" * wn)
 
-                # خط‌خورده
                 if i in g.striked:
                     txt += " ❌☠️"
 
@@ -754,13 +793,12 @@ async def publish_seating(
                 line = f"♚{emoji_num} ⬜ /{i}"
             lines.append(line)
 
-        # گزارش استعلام وضعیت
+        # استعلام وضعیت
         if g.status_counts.get("citizen", 0) > 0 or g.status_counts.get("mafia", 0) > 0:
             c = g.status_counts.get("citizen", 0)
             m = g.status_counts.get("mafia", 0)
             lines.append(f"\n🧾 <i>استعلام وضعیت: {c} شهروند و {m} مافیا</i>")
 
-        # راهنمای مرحله
         if getattr(g, "ui_hint", None):
             lines.append("")
             lines.append(f"ℹ️ <i>{g.ui_hint}</i>")
@@ -784,7 +822,7 @@ async def publish_seating(
             else:
                 kb = control_keyboard(g)
 
-        # ارسال/ویرایش پیام لیست (با retry و fallbacks)
+        # پیام لیست
         try:
             if g.last_seating_msg_id:
                 try:
@@ -829,7 +867,6 @@ async def publish_seating(
                     except Exception:
                         pass
         except Exception:
-            # ساخت پیام جدید در صورت شکست ادیت
             old_msg_id = g.last_seating_msg_id
             msg = await _retry(ctx.bot.send_message(
                 chat_id,
@@ -849,30 +886,37 @@ async def publish_seating(
                 except Exception:
                     pass
 
-            # ✅ پاک کردن لیست قبلی در صورت ایجاد لیست جدید
             if old_msg_id:
                 try:
                     await ctx.bot.delete_message(chat_id, old_msg_id)
                 except Exception:
                     pass
-        # نمایش یک‌باره لیست نقش‌ها (وقتی سناریو عوض شود)
+
+        # لیست نقش‌ها
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
-                mafia_roles = load_mafia_roles()  
+                mafia_roles = load_mafia_roles()
+                indep_roles = load_indep_roles()
                 mafia_lines = ["<b>نقش‌های مافیا:</b>"]
                 citizen_lines = ["<b>نقش‌های شهروند:</b>"]
+                indep_lines = ["<b>نقش‌های مستقل:</b>"]
 
                 for role, count in g.scenario.roles.items():
                     for _ in range(count):
                         if role in mafia_roles:
                             mafia_lines.append(f"♠️ {role}")
+                        elif role in indep_roles:
+                            indep_lines.append(f"♦️ {role}")
                         else:
                             citizen_lines.append(f"♥️ {role}")
 
                 role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
                 role_lines.extend(mafia_lines)
-                role_lines.append("")  # خط خالی بین دسته‌ها
+                role_lines.append("")
                 role_lines.extend(citizen_lines)
+                if len(indep_lines) > 1:
+                    role_lines.append("")
+                    role_lines.extend(indep_lines)
 
                 role_text = "\n".join(role_lines)
 
@@ -898,6 +942,7 @@ async def publish_seating(
                     g.last_roles_msg_id = role_msg.message_id
 
                 g.last_roles_scenario_name = g.scenario.name
+
         save_debounced()
 
 
@@ -988,6 +1033,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 import jdatetime
 
 
+
+
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
@@ -1017,28 +1064,24 @@ async def announce_winner(ctx, update, g: GameState):
     ]
 
     mafia_roles = load_mafia_roles()
+    indep_roles = load_indep_roles()
 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
 
-        # تعیین مارک قلب
         if getattr(g, "purchased_seat", None) == seat:
-            # اگر خریداری شده باشه → همیشه مافیا حساب میشه
-            role_display = f"{role} / مافیاساده"
-            marker = "▪️"
+            marker = "◾️"  # خریداری شده → مافیا
+        elif role in mafia_roles:
+            marker = "◾️"  # مافیا
+        elif role in indep_roles:
+            marker = "♦️"  # مستقل
         else:
-            if role in mafia_roles:
-                marker = "▪️"
-                role_display = role
-            else:
-                marker = "▫️"
-                role_display = role
+            marker = "◽️"  # شهروند
 
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
-
         lines.append(
-            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
+            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role}{chaos_mark}"
         )
 
     lines.append("")
@@ -1063,7 +1106,6 @@ async def announce_winner(ctx, update, g: GameState):
         await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
     except Exception as e:
         print("⚠️ خطا در پین کردن پیام:", e)
-
 
 
 
@@ -1597,11 +1639,24 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data in {
         "winner_city", "winner_mafia", "clean_city", "clean_mafia",
-        "winner_city_chaos", "winner_mafia_chaos"
+        "winner_city_chaos", "winner_mafia_chaos", "winner_indep"   # 🔹 مستقل اضافه شد
     } and g.awaiting_winner:
         g.temp_winner = data
         g.chaos_mode = data.endswith("_chaos")
         store.save()
+
+        if data == "winner_indep":
+            # مستقل → مستقیم تأیید (بدون خریداری یا کی‌آس)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+            await set_hint_and_kb(
+                ctx, chat, g,
+                "🔒 نقش مستقل انتخاب شد. برای نهایی‌سازی «تأیید» را بزنید.",
+                kb
+            )
+            return
 
         # کلین‌شیت → مستقیماً تأیید نهایی
         if data in {"clean_city", "clean_mafia"}:
@@ -1773,8 +1828,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "confirm_winner" and uid == g.god_id and getattr(g, "temp_winner", None):
         g.awaiting_winner = False
-        g.winner_side = "شهر" if "city" in g.temp_winner else "مافیا"
-        g.clean_win = "clean" in g.temp_winner
+
+        if g.temp_winner == "winner_indep":
+            g.winner_side = "مستقل"
+            g.clean_win = False
+        else:
+            g.winner_side = "شهر" if "city" in g.temp_winner else "مافیا"
+            g.clean_win = "clean" in g.temp_winner
+
         # در صورت حالت کی‌آس، g.chaos_selected قبلاً تنظیم شده
         g.temp_winner = None
         store.save()
@@ -1782,6 +1843,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await announce_winner(ctx, update, g)
         await reset_game(update=update)
         return
+
 
 
 
@@ -3102,6 +3164,53 @@ async def list_cards(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+async def add_indep_role(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    uid = update.effective_user.id
+
+    # فقط ادمین‌های گروه
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("❗ این دستور فقط در گروه قابل استفاده است.")
+        return
+    member = await ctx.bot.get_chat_member(chat.id, uid)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ فقط ادمین‌ها می‌توانند نقش مستقل اضافه کنند.")
+        return
+
+    if len(ctx.args) < 2:
+        await update.message.reply_text("❗ فرمت درست: /addindep <سناریو> <نقش>")
+        return
+
+    scn = ctx.args[0]
+    role = " ".join(ctx.args[1:])
+
+    indep = load_indep_roles()
+    indep.setdefault(scn, [])
+    if role in indep[scn]:
+        await update.message.reply_text("⚠️ این نقش قبلاً اضافه شده است.")
+        return
+
+    indep[scn].append(role)
+    save_indep_roles(indep)
+    await update.message.reply_text(f"✅ نقش مستقل «{role}» به سناریو {scn} اضافه شد.")
+
+
+async def list_indep_roles(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("❗ فرمت درست: /listindep <سناریو>")
+        return
+
+    scn = ctx.args[0]
+    roles = load_indep_roles().get(scn, [])
+
+    if not roles:
+        await update.message.reply_text(f"❌ برای سناریو {scn} نقش مستقلی ثبت نشده.")
+        return
+
+    msg = f"♦️ نقش‌های مستقل سناریو {scn}:\n" + "\n".join([f"- {r}" for r in roles])
+    await update.message.reply_text(msg)
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
@@ -3126,6 +3235,8 @@ async def main():
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("listcard", list_cards))
+    app.add_handler(CommandHandler("addindep", add_indep_role))
+    app.add_handler(CommandHandler("listindep", list_indep_roles))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
