@@ -585,8 +585,7 @@ def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
 
 
 
-
-def kb_endgame_root() -> InlineKeyboardMarkup:
+def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🏙 شهر", callback_data="winner_city")],
         [InlineKeyboardButton("😈 مافیا", callback_data="winner_mafia")],
@@ -594,10 +593,16 @@ def kb_endgame_root() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")],
         [InlineKeyboardButton("🏙 شهر (کی‌آس)", callback_data="winner_city_chaos")],
         [InlineKeyboardButton("😈 مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
-        [InlineKeyboardButton("♦️ مستقل", callback_data="winner_indep")],  # ✨ اضافه شد
-        [InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")]
     ]
+
+    # ✨ فقط اگر این سناریو نقش مستقل داشت
+    indep_roles = load_indep_roles()
+    if g.scenario and any(r in indep_roles for r in g.scenario.roles):
+        rows.append([InlineKeyboardButton("♦️ مستقل", callback_data="winner_indep")])
+
+    rows.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")])
     return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -892,6 +897,7 @@ async def publish_seating(
                 except Exception:
                     pass
 
+  
         # لیست نقش‌ها
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
@@ -914,7 +920,7 @@ async def publish_seating(
                 role_lines.extend(mafia_lines)
                 role_lines.append("")
                 role_lines.extend(citizen_lines)
-                if len(indep_lines) > 1:
+                if len(indep_lines) > 1:  # یعنی حداقل یک نقش مستقل هست
                     role_lines.append("")
                     role_lines.extend(indep_lines)
 
@@ -935,13 +941,18 @@ async def publish_seating(
                             else:
                                 raise
                     else:
-                        role_msg = await _retry(ctx.bot.send_message(chat_id, role_text, parse_mode="HTML"))
+                        role_msg = await _retry(
+                            ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+                        )
                         g.last_roles_msg_id = role_msg.message_id
                 except Exception:
-                    role_msg = await _retry(ctx.bot.send_message(chat_id, role_text, parse_mode="HTML"))
+                    role_msg = await _retry(
+                        ctx.bot.send_message(chat_id, role_text, parse_mode="HTML")
+                    )
                     g.last_roles_msg_id = role_msg.message_id
 
                 g.last_roles_scenario_name = g.scenario.name
+
 
         save_debounced()
 
@@ -1070,6 +1081,7 @@ async def announce_winner(ctx, update, g: GameState):
         uid, name = g.seats[seat]
         role = g.assigned_roles.get(seat, "—")
 
+        # انتخاب مارکر بر اساس نقش
         if getattr(g, "purchased_seat", None) == seat:
             marker = "◾️"  # خریداری شده → مافیا
         elif role in mafia_roles:
@@ -1106,6 +1118,7 @@ async def announce_winner(ctx, update, g: GameState):
         await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
     except Exception as e:
         print("⚠️ خطا در پین کردن پیام:", e)
+
 
 
 
@@ -1621,7 +1634,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.chaos_selected = set()
         store.save()
 
-        await set_hint_and_kb(ctx, chat, g, "برنده را انتخاب کنید.", kb_endgame_root())
+        await set_hint_and_kb(ctx, chat, g, "برنده را انتخاب کنید.", kb_endgame_root(g))
         return
 
 
@@ -1821,7 +1834,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await set_hint_and_kb(
             ctx, chat, g,
             "برنده را انتخاب کنید:",
-            kb_endgame_root()
+            kb_endgame_root(g)
         )
         return
 
