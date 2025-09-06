@@ -404,18 +404,22 @@ INDEP_FILENAME = "indep_roles.json"
 def load_indep_roles() -> dict[str, list[str]]:
     try:
         if not GH_TOKEN or not GIST_ID:
+            print("⚠️ GH_TOKEN/GIST_ID not set; load_indep_roles -> empty dict")
             return {}
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200:
+            print("❌ load_indep_roles failed:", r.status_code, r.text)
             return {}
         data = r.json()
-        content = data["files"].get(INDEP_FILENAME, {}).get("content", "{}")
-        return json.loads(content) if content else {}
+        content = data["files"].get("indep_roles.json", {}).get("content", "{}")
+        roles = json.loads(content) if content else {}
+        return roles  # ← حالا خروجی مثل جیستت هست
     except Exception as e:
         print("❌ load_indep_roles error:", e)
         return {}
+
 
 def save_indep_roles(indep: dict[str, list[str]]) -> bool:
     try:
@@ -595,13 +599,13 @@ def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("😈 مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
     ]
 
-    # ✨ فقط اگر این سناریو نقش مستقل داشت
     indep_roles = load_indep_roles()
-    if g.scenario and any(r in indep_roles for r in g.scenario.roles):
+    if g.scenario and g.scenario.name in indep_roles and indep_roles[g.scenario.name]:
         rows.append([InlineKeyboardButton("♦️ مستقل", callback_data="winner_indep")])
 
     rows.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")])
     return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -903,6 +907,7 @@ async def publish_seating(
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
                 mafia_roles = load_mafia_roles()
                 indep_roles = load_indep_roles()
+                indep_for_this = indep_roles.get(g.scenario.name, [])
                 mafia_lines = ["<b>نقش‌های مافیا:</b>"]
                 citizen_lines = ["<b>نقش‌های شهروند:</b>"]
                 indep_lines = ["<b>نقش‌های مستقل:</b>"]
@@ -911,7 +916,7 @@ async def publish_seating(
                     for _ in range(count):
                         if role in mafia_roles:
                             mafia_lines.append(f"♠️ {role}")
-                        elif role in indep_roles:
+                        elif role in indep_for_this:
                             indep_lines.append(f"♦️ {role}")
                         else:
                             citizen_lines.append(f"♥️ {role}")
@@ -1076,6 +1081,7 @@ async def announce_winner(ctx, update, g: GameState):
 
     mafia_roles = load_mafia_roles()
     indep_roles = load_indep_roles()
+    indep_for_this = indep_roles.get(g.scenario.name, [])
 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
@@ -1086,7 +1092,7 @@ async def announce_winner(ctx, update, g: GameState):
             marker = "◾️"  # خریداری شده → مافیا
         elif role in mafia_roles:
             marker = "◾️"  # مافیا
-        elif role in indep_roles:
+        elif role in indep_for_this:
             marker = "♦️"  # مستقل
         else:
             marker = "◽️"  # شهروند
