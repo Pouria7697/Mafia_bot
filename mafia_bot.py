@@ -782,7 +782,7 @@ async def publish_seating(
             elif mode == "warn":
                 kb = warn_button_markup_plusminus(g)
             else:
-                kb = control_keyboard()
+                kb = control_keyboard(g)
 
         # ارسال/ویرایش پیام لیست (با retry و fallbacks)
         try:
