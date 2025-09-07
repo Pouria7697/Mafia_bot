@@ -2000,11 +2000,43 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند رأی‌گیری را شروع کند!")
+            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند رأی‌گیری را شروع کند!")
             return
 
-        g.voted_targets = set()  # 🧹 ریست تیک‌های قبلی هنگام شروع رأی‌گیری جدید
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗳 پل", callback_data="init_vote_poll")],
+            [InlineKeyboardButton("🗳 تک تک", callback_data="init_vote_classic")],
+        ])
+        await set_hint_and_kb(ctx, chat, g, "روش رأی‌گیری اولیه را انتخاب کنید:", kb)
+        return
+
+    if data == "init_vote_classic" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+        g.voted_targets = set()
         await start_vote(ctx, chat, g, "initial_vote")
+        return
+
+    if data == "init_vote_poll" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+
+        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        options = [f"{s}. {g.seats[s][1]}" for s in alive]
+        options.append("📊 دیدن نتایج")
+
+        poll_msg = await ctx.bot.send_poll(
+            chat_id=chat,
+            question="🗳 رأی‌گیری اولیه (پل - ۵ ثانیه)",
+            options=options,
+            is_anonymous=False,
+            allows_multiple_answers=True
+        )
+
+        await asyncio.sleep(5)
+        try:
+            await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
+        except Exception as e:
+            print("⚠️ stop_poll error:", e)
+
         return
 
 
