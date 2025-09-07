@@ -2006,6 +2006,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🗳 پل", callback_data="init_vote_poll")],
             [InlineKeyboardButton("🗳 تک تک", callback_data="init_vote_classic")],
+            [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_controls")],
         ])
         await set_hint_and_kb(ctx, chat, g, "روش رأی‌گیری اولیه را انتخاب کنید:", kb)
         return
@@ -2036,6 +2037,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
         except Exception as e:
             print("⚠️ stop_poll error:", e)
+
+        return
+
+    if data == "back_to_controls" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+        return
 
         return
 
