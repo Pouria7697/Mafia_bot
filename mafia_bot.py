@@ -464,13 +464,13 @@ def save_stickers(stickers):
 def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("❌ حذف بازیکن", callback_data=BTN_DELETE),
+            InlineKeyboardButton("❌ حذف ", callback_data=BTN_DELETE),
             InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time"),
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup")
         
         ],
         [
-            InlineKeyboardButton("↩️ لغو ثبت‌نام", callback_data="cancel_self"),
+            InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
             InlineKeyboardButton("✏️ تغییر نام", callback_data="change_name")
         ]
     ]
@@ -1174,11 +1174,15 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
 
 
 
-async def cleanup_after(ctx, chat_id: int, from_message_id: int):
+async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None):
 
     try:
-        # فرض: تا 5000 پیام بعدی رو تلاش کنه پاک کنه (قابل تنظیم)
-        limit = from_message_id + 5000  
+        
+        if stop_message_id:
+            limit = stop_message_id
+        else:
+            
+            limit = from_message_id + 5000
 
         batch = []
         for msg_id in range(from_message_id + 1, limit):
@@ -1201,6 +1205,7 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int):
 
     except Exception as e:
         print(f"⚠️ cleanup_after error: {e}")
+
 
 
 
@@ -1976,13 +1981,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "cleanup" and uid == g.god_id:
         if g.last_seating_msg_id:
+            stop_id = g.shuffle_prompt_msg_id or None
             asyncio.create_task(
-                cleanup_after(ctx, chat, g.last_seating_msg_id)
+                cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id)
             )
             await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
         else:
             await ctx.bot.send_message(chat, "⚠️ لیست بازیکنان مشخص نیست، پاکسازی انجام نشد.")
         return
+
 
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
