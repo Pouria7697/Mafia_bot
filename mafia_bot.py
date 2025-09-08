@@ -12,7 +12,7 @@ import regex
 import subprocess
 from html import escape
 from telegram.ext import filters
-from telegram.error import BadRequest
+from telegram.error import RetryAfter, TimedOut, BadRequest
 group_filter = filters.ChatType.GROUPS
 from datetime import datetime, timezone, timedelta  
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
@@ -459,15 +459,15 @@ def save_stickers(stickers):
         }
     }
     requests.patch(url, headers={"Authorization": f"token {GH_TOKEN}"}, json={"files": files})
-      #  [
-       #     InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup_below")
-        #],
+
 
 def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton("❌ حذف بازیکن", callback_data=BTN_DELETE),
-            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")
+            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time"),
+            InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup")
+        
         ],
         [
             InlineKeyboardButton("↩️ لغو ثبت‌نام", callback_data="cancel_self"),
@@ -703,7 +703,6 @@ def save_debounced():
     _SAVE_TASK = asyncio.create_task(_do())
 
 # Retry wrapper for Telegram rate limits
-from telegram.error import RetryAfter
 async def _retry(coro):
     try:
         return await coro
@@ -1173,23 +1172,37 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ انتخاب ظرفیت دیگر", callback_data="scchange_again")])
     return InlineKeyboardMarkup(rows)
 
-async def cleanup_between(ctx, chat_id: int, first_id: int, last_id: int):
+
+
+async def cleanup_after(ctx, chat_id: int, from_message_id: int):
 
     try:
-        start = min(first_id, last_id)
-        end = max(first_id, last_id)
+        # فرض: تا 5000 پیام بعدی رو تلاش کنه پاک کنه (قابل تنظیم)
+        limit = from_message_id + 5000  
 
-        # حداکثر 100 تا 100 تا پاک می‌کنیم
-        for msg_id in range(start + 1, end):
+        batch = []
+        for msg_id in range(from_message_id + 1, limit):
+            batch.append(msg_id)
+            if len(batch) == 100:  # هر 100 تا
+                for mid in batch:
+                    try:
+                        await ctx.bot.delete_message(chat_id, mid)
+                    except Exception:
+                        pass
+                batch = []
+                await asyncio.sleep(1)  # جلوگیری از FloodLimit
+
+        # باقی‌مانده
+        for mid in batch:
             try:
-                await ctx.bot.delete_message(chat_id, msg_id)
+                await ctx.bot.delete_message(chat_id, mid)
             except Exception:
-                
                 pass
-            await asyncio.sleep(0.05)  # تاخیر کوتاه برای جلوگیری از FloodLimit
 
     except Exception as e:
-        print(f"⚠️ cleanup_between error: {e}")
+        print(f"⚠️ cleanup_after error: {e}")
+
+
 
 # ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
@@ -1401,11 +1414,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             role_shuffle_repeats=repeats,
         )
 
-        # بعد از نقش‌دهی → پاکسازی پیام‌ها بین لیست و بله/خیر
-        if g.last_seating_msg_id and prompt_id:
-            asyncio.create_task(
-                cleanup_between(ctx, chat, g.last_seating_msg_id, prompt_id)
-            )
 
         g.preview_uid_to_role = None
         g.shuffle_repeats = None
@@ -1447,19 +1455,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             role_shuffle_repeats=repeats,
         )
 
-        # بعد از نقش‌دهی → پاکسازی پیام‌ها بین لیست و بله/خیر
-        if g.last_seating_msg_id and prompt_id:
-            asyncio.create_task(
-                cleanup_between(ctx, chat, g.last_seating_msg_id, prompt_id)
-            )
-
         g.preview_uid_to_role = None
         g.shuffle_repeats = None
         store.save()
         return
-
-
-
 
     # ورود به حالت اخطار
     if data == "warn_mode":
@@ -1885,26 +1884,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if data == "cleanup_below":
-        if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تونه این کار رو انجام بده!")
-            return
-
-        try:
-            deleted = 0
-            # 🔄 پیام‌هایی که بعد از لیست ارسال شدن رو حذف می‌کنیم (حداکثر 100 عدد)
-            for msg_id in range(g.last_seating_msg_id + 1, g.last_seating_msg_id + 100):
-                try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=msg_id)
-                    deleted += 1
-                except:
-                    pass
-
-            #await ctx.bot.send_message(chat, f"✅ {deleted} پیام زیر لیست پاک شد.")
-        except Exception as e:
-            await ctx.bot.send_message(chat, f"❌ خطا در پاکسازی: {e}")
-        return
-
     # ────────────────────────────────────────────────────────────
     #  کارت
     # ────────────────────────────────────────────────────────────
@@ -1995,6 +1974,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         return
 
+    if data == "cleanup" and uid == g.god_id:
+        if g.last_seating_msg_id:
+            asyncio.create_task(
+                cleanup_after(ctx, chat, g.last_seating_msg_id)
+            )
+            await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
+        else:
+            await ctx.bot.send_message(chat, "⚠️ لیست بازیکنان مشخص نیست، پاکسازی انجام نشد.")
+        return
 
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
