@@ -470,7 +470,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
-            InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")
+            InlineKeyboardButton("➕ (به زودی) سناریو جدید", callback_data="add_scenario")
         ],
         [
             InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
@@ -1995,13 +1995,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
-        g.adding_scenario_step = "name"
-        g.adding_scenario_data = {}
-        g.adding_scenario_last = datetime.now()
-        store.save()
-        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۳۰ ثانیه فرصت دارید).")
-        return
+ #    if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
+ #        g.adding_scenario_step = "name"
+ #        g.adding_scenario_data = {}
+ #        g.adding_scenario_last = datetime.now()
+ #        store.save()
+ #        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۴۰ ثانیه فرصت دارید).")
+ #        return
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
@@ -2933,7 +2933,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     if hasattr(g, "adding_scenario_step") and g.adding_scenario_step:
         # ⏱ چک تایم‌اوت ۳۰ ثانیه
-        if (datetime.now() - g.adding_scenario_last).total_seconds() > 30:
+        if (datetime.now() - g.adding_scenario_last).total_seconds() > 45:
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
             store.save()
@@ -2987,6 +2987,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await ctx.bot.send_message(chat_id, "♥️ آیا کارت دارد؟ اگر بله، لیست را بفرستید (نقش ها را با / از هم جدا کنید). اگر نه، «خیر».")
             return
 
+
         # مرحله ۵: کارت‌ها
         if g.adding_scenario_step == "cards":
             if text != "خیر":
@@ -3013,8 +3014,19 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             for c in cards:
                 add_card_to_gist(name, c)
 
+            # 🛠 تبدیل لیست‌ها به شمارش نقش‌ها
+            def list_to_counts(role_list):
+                counts = {}
+                for r in role_list:
+                    counts[r] = counts.get(r, 0) + 1
+                return counts
+
+            mafia_counts = list_to_counts(mafia_roles)
+            citizen_counts = list_to_counts(citizen_roles)
+            indep_counts = list_to_counts(indep_roles)
+
             # مثل /addscenario
-            save_scenario_to_gist(name, mafia_roles, citizen_roles, indep_roles)
+            save_scenario_to_gist(name, mafia_counts, citizen_counts, indep_counts)
 
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
