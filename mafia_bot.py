@@ -469,12 +469,12 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         
         ],
         [
-            InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
-            InlineKeyboardButton("✏️ تغییر نام", callback_data="change_name")
-        ],
-        [
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
             InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")
+        ],
+        [
+            InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
+            InlineKeyboardButton("✏️ تغییر نام", callback_data="change_name")
         ]
 
     ]
@@ -1998,6 +1998,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
         g.adding_scenario_step = "name"
         g.adding_scenario_data = {}
+        g.adding_scenario_last = datetime.now()
         store.save()
         await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۳۰ ثانیه فرصت دارید).")
         return
