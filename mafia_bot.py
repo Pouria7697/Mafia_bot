@@ -465,14 +465,18 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton("❌ حذف ", callback_data=BTN_DELETE),
-            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time"),
-            InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup")
+            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time"),   
         
         ],
         [
             InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
             InlineKeyboardButton("✏️ تغییر نام", callback_data="change_name")
+        ],
+        [
+            InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
+            InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")
         ]
+
     ]
 
     if g.god_id:
@@ -1991,6 +1995,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
+        g.adding_scenario_step = "name"
+        g.adding_scenario_data = {}
+        store.save()
+        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۳۰ ثانیه فرصت دارید).")
+        return
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
@@ -2919,6 +2929,101 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         else:
             await ctx.bot.send_message(chat_id, "❗ شما در لیست نیستید.")
         return
+
+    if hasattr(g, "adding_scenario_step") and g.adding_scenario_step:
+        # ⏱ چک تایم‌اوت ۳۰ ثانیه
+        if (datetime.now() - g.adding_scenario_last).total_seconds() > 30:
+            g.adding_scenario_step = None
+            g.adding_scenario_data = {}
+            store.save()
+            await ctx.bot.send_message(chat_id, "⏱ زمان شما تمام شد. اضافه کردن سناریو لغو شد.")
+            return
+
+        text = msg.text.strip()
+
+        # مرحله ۱: نام سناریو
+        if g.adding_scenario_step == "name":
+            g.adding_scenario_data["name"] = text
+            g.adding_scenario_step = "mafia"
+            g.adding_scenario_last = datetime.now()
+            store.save()
+            await ctx.bot.send_message(chat_id, " ♠️ آیا نقش مافیا دارد؟ اگر بله، لیست را بفرستید (نقش ها را با / از هم جدا کنید). اگر نه، «خیر».")
+            return
+
+        # مرحله ۲: نقش مافیا
+        if g.adding_scenario_step == "mafia":
+            if text != "خیر":
+                g.adding_scenario_data["mafia"] = [r.strip() for r in text.split("/") if r.strip()]
+            else:
+                g.adding_scenario_data["mafia"] = []
+            g.adding_scenario_step = "citizen"
+            g.adding_scenario_last = datetime.now()
+            store.save()
+            await ctx.bot.send_message(chat_id, "♥️ آیا نقش شهروند دارد؟ اگر بله، لیست را بفرستید (نقش ها را با / از هم جدا کنید). اگر نه، «خیر».")
+            return
+
+        # مرحله ۳: نقش شهروند
+        if g.adding_scenario_step == "citizen":
+            if text != "خیر":
+                g.adding_scenario_data["citizen"] = [r.strip() for r in text.split("/") if r.strip()]
+            else:
+                g.adding_scenario_data["citizen"] = []
+            g.adding_scenario_step = "indep"
+            g.adding_scenario_last = datetime.now()
+            store.save()
+            await ctx.bot.send_message(chat_id, "♦️ آیا نقش مستقل دارد؟ اگر بله، لیست را بفرستید. اگر نه، «خیر».")
+            return
+
+        # مرحله ۴: نقش مستقل
+        if g.adding_scenario_step == "indep":
+            if text != "خیر":
+                g.adding_scenario_data["indep"] = [r.strip() for r in text.split("/") if r.strip()]
+            else:
+                g.adding_scenario_data["indep"] = []
+            g.adding_scenario_step = "cards"
+            g.adding_scenario_last = datetime.now()
+            store.save()
+            await ctx.bot.send_message(chat_id, "♥️ آیا کارت دارد؟ اگر بله، لیست را بفرستید (نقش ها را با / از هم جدا کنید). اگر نه، «خیر».")
+            return
+
+        # مرحله ۵: کارت‌ها
+        if g.adding_scenario_step == "cards":
+            if text != "خیر":
+                g.adding_scenario_data["cards"] = [r.strip() for r in text.split("/") if r.strip()]
+            else:
+                g.adding_scenario_data["cards"] = []
+
+            # ✅ ذخیره در Gist
+            name = g.adding_scenario_data["name"]
+            mafia_roles = g.adding_scenario_data["mafia"]
+            citizen_roles = g.adding_scenario_data["citizen"]
+            indep_roles = g.adding_scenario_data["indep"]
+            cards = g.adding_scenario_data["cards"]
+
+            # مثل /addmafia
+            for r in mafia_roles:
+                add_mafia_role_to_gist(r)
+
+            # مثل /addindep
+            for r in indep_roles:
+                add_indep_role_to_gist(name, r)
+
+            # مثل /addcard
+            for c in cards:
+                add_card_to_gist(name, c)
+
+            # مثل /addscenario
+            save_scenario_to_gist(name, mafia_roles, citizen_roles, indep_roles)
+
+            g.adding_scenario_step = None
+            g.adding_scenario_data = {}
+            store.save()
+
+            await ctx.bot.send_message(chat_id, f"✅ سناریوی «{name}» با موفقیت ذخیره شد.")
+            return
+
+
+
 
 async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc).timestamp()
