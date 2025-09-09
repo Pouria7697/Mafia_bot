@@ -2992,7 +2992,6 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await ctx.bot.send_message(chat_id, "♥️ آیا کارت دارد؟ اگر بله، لیست را بفرستید (نقش ها را با / از هم جدا کنید). اگر نه، «خیر».")
             return
 
-
         # مرحله ۵: کارت‌ها
         if g.adding_scenario_step == "cards":
             if text != "خیر":
@@ -3002,47 +3001,54 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
             # ✅ ذخیره در Gist
             name = g.adding_scenario_data["name"]
-            mafia_roles = g.adding_scenario_data["mafia"]
+            mafia_roles   = g.adding_scenario_data["mafia"]
             citizen_roles = g.adding_scenario_data["citizen"]
-            indep_roles = g.adding_scenario_data["indep"]
-            cards = g.adding_scenario_data["cards"]
+            indep_roles   = g.adding_scenario_data["indep"]
+            cards         = g.adding_scenario_data["cards"]
 
-            # مثل /addmafia
-            for r in mafia_roles:
-                add_mafia_role_to_gist(r)
+            # --- مافیا ---
+            mafia_set = load_mafia_roles() or set()
+            mafia_set |= set(mafia_roles)
+            save_mafia_roles(mafia_set)
 
-            # مثل /addindep
-            for r in indep_roles:
-                add_indep_role_to_gist(name, r)
+            # --- مستقل ---
+            indep_map = load_indep_roles() or {}
+            cur_indep = set(indep_map.get(name, []))
+            cur_indep |= set(indep_roles)
+            if cur_indep:
+                indep_map[name] = sorted(cur_indep)
+            save_indep_roles(indep_map)
 
-            # مثل /addcard
-            for c in cards:
-                add_card_to_gist(name, c)
+            # --- کارت‌ها ---
+            cards_map = load_cards() or {}
+            cur_cards = set(cards_map.get(name, []))
+            cur_cards |= set(cards)
+            if cur_cards:
+                cards_map[name] = sorted(cur_cards)
+            save_cards(cards_map)
 
-            # 🛠 تبدیل لیست‌ها به شمارش نقش‌ها
+            # --- سناریو ---
             def list_to_counts(role_list):
                 counts = {}
                 for r in role_list:
                     counts[r] = counts.get(r, 0) + 1
                 return counts
 
-            mafia_counts = list_to_counts(mafia_roles)
+            mafia_counts   = list_to_counts(mafia_roles)
             citizen_counts = list_to_counts(citizen_roles)
-            indep_counts = list_to_counts(indep_roles)
+            indep_counts   = list_to_counts(indep_roles)
 
             roles = {}
             roles.update(mafia_counts)
             roles.update(citizen_counts)
             roles.update(indep_counts)
 
-            # ذخیره مثل /addscenario
             new_scenario = Scenario(name, roles)
             store.scenarios.append(new_scenario)
             store.save()
             save_scenarios_to_gist(store.scenarios)
 
-
-
+            # پاکسازی وضعیت
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
             store.save()
