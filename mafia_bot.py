@@ -470,7 +470,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
-            InlineKeyboardButton("➕ (به زودی) سناریو جدید", callback_data="add_scenario")
+            InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")
         ],
         [
             InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
@@ -2000,13 +2000,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
- #    if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
- #        g.adding_scenario_step = "name"
- #        g.adding_scenario_data = {}
- #        g.adding_scenario_last = datetime.now()
- #        store.save()
- #        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۴۰ ثانیه فرصت دارید).")
- #        return
+     if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
+         g.adding_scenario_step = "name"
+         g.adding_scenario_data = {}
+         g.adding_scenario_last = datetime.now()
+         store.save()
+         await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۴۰ ثانیه فرصت دارید).")
+         return
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
