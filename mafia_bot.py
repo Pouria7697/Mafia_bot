@@ -1092,17 +1092,22 @@ async def announce_winner(ctx, update, g: GameState):
 
         # انتخاب مارکر بر اساس نقش
         if getattr(g, "purchased_seat", None) == seat:
+            role_display = f"{role} / مافیا"
             marker = "◾️"  # خریداری شده → مافیا
         elif role in mafia_roles:
             marker = "◾️"  # مافیا
+            role_display = role
         elif role in indep_for_this:
             marker = "♦️"  # مستقل
+            role_display = role
+                
         else:
             marker = "◽️"  # شهروند
+            role_display = role
 
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
         lines.append(
-            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role}{chaos_mark}"
+            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
         )
 
     lines.append("")
@@ -3025,8 +3030,18 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             citizen_counts = list_to_counts(citizen_roles)
             indep_counts = list_to_counts(indep_roles)
 
-            # مثل /addscenario
-            save_scenario_to_gist(name, mafia_counts, citizen_counts, indep_counts)
+            roles = {}
+            roles.update(mafia_counts)
+            roles.update(citizen_counts)
+            roles.update(indep_counts)
+
+            # ذخیره مثل /addscenario
+            new_scenario = Scenario(name, roles)
+            store.scenarios.append(new_scenario)
+            store.save()
+            save_scenarios_to_gist(store.scenarios)
+
+
 
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
