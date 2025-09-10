@@ -470,7 +470,7 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
-            InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")
+            InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings_menu")
         ],
         [
             InlineKeyboardButton("↩️ لغو", callback_data="cancel_self"),
@@ -494,6 +494,14 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
             ])
 
     return InlineKeyboardMarkup(rows)
+
+def settings_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")],
+        [InlineKeyboardButton("⬅️ برگشت", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(rows)
+
 
 CARDS_FILENAME = "cards.json"
 
@@ -1308,6 +1316,21 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    if data == "settings_menu" and uid == g.god_id:
+        await ctx.bot.edit_message_reply_markup(
+            chat_id=chat,
+            message_id=g.last_seating_msg_id,
+            reply_markup=settings_keyboard()
+        )
+        return
+
+    if data == "back_to_main" and uid == g.god_id:
+        await ctx.bot.edit_message_reply_markup(
+            chat_id=chat,
+            message_id=g.last_seating_msg_id,
+            reply_markup=text_seating_keyboard(g)
+        )
+        return
 
     # ─── صدا زدن همه قبلِ شروع ──────────────────────────────────
     if data == BTN_CALL:
