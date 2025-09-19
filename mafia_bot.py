@@ -1040,15 +1040,19 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     end_time = start_time + 5
     g.vote_window = (start_time, end_time, target_seat)
 
-    # ✅ اول مود شمارش رو روشن کن
+    # ✅ آماده‌سازی ساختار شمارش و لاگ
     g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
+    if not hasattr(g, "vote_logs"):
+        g.vote_logs = {}
+    g.vote_logs.setdefault(target_seat, [])
+
     store.save()
 
-    # بعد پیام شروع رأی‌گیری رو بفرست
+    # 📢 پیام شروع رأی‌گیری
     await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> (۵ ثانیه)",
         parse_mode="HTML"
     )
 
@@ -1063,7 +1067,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
-
 
 
 import jdatetime
@@ -1921,7 +1924,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
             except:
                 pass
-            # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
             g.last_vote_msg_id = None
 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
@@ -1930,12 +1932,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             name = g.seats[seat][1]
             results.append(f"{seat}. {name} → {len(voters)} رأی")
 
+            # 🕒 نمایش جزئیات رأی‌ها
+            for uid, rel_time in g.vote_logs.get(seat, []):
+                voter_name = g.user_names.get(uid, str(uid))
+                results.append(f"   - {voter_name} در {rel_time:.2f} ثانیه")
+
         if len(results) == 1:
             results.append("هیچ رأیی ثبت نشد.")
 
         await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
 
         g.votes_cast = {}
+        g.vote_logs = {}
         g.current_vote_target = None
         store.save()
         return
@@ -2943,12 +2951,22 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
     if getattr(g, "vote_collecting", False) and g.current_vote_target:
+        start, end, target = g.vote_window
+        now = datetime.now().timestamp()
         voter_seat = next((s for s,(u,_) in g.seats.items() if u == uid), None)
-        target = g.current_vote_target
 
-        if voter_seat and voter_seat != target:
+        if voter_seat and voter_seat != target and start <= now <= end:
+            # ثبت رأی یکتا
             g.votes_cast.setdefault(target, set())
-            g.votes_cast[target].add(uid)   # ← چون set هست، دوباره‌شمار نمیشه
+            g.votes_cast[target].add(uid)
+
+            # 🕒 ذخیره لاگ رأی‌ها با زمان نسبی
+            if not hasattr(g, "vote_logs"):
+                g.vote_logs = {}
+            g.vote_logs.setdefault(target, [])
+            rel_time = now - start  # زمان از شروع بازه
+            g.vote_logs[target].append((uid, rel_time))
+
 
     # -------------- defense seats by God ------------------
     if g.vote_type == "awaiting_defense" and uid == g.god_id:
