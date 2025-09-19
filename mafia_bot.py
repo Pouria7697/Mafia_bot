@@ -1034,12 +1034,18 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
-    g.vote_collecting = True
 
-    # فقط برای همین صندلی
+    # ⏱ بازه‌ی رأی‌گیری از همین الان
+    start_time = datetime.now().timestamp()
+    end_time = start_time + 5
+    g.vote_window = (start_time, end_time, target_seat)
+
+    # ✅ اول مود شمارش رو روشن کن
+    g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
     store.save()
 
+    # بعد پیام شروع رأی‌گیری رو بفرست
     await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
