@@ -109,6 +109,7 @@ class GameState:
     current_vote_target: int | None = None
     vote_type: str | None = None
     vote_candidates: list[int] | None = None
+    votes_cast: dict[int, set[int]] | None = None
     defense_seats: list[int] | None = None
     last_seating_msg_id: int | None = None
     last_roles_msg_id: int | None = None
@@ -174,6 +175,7 @@ class GameState:
         self.pending_warnings = self.pending_warnings or {}
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
+        self.votes_cast = self.votes_cast or {}
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -1032,30 +1034,30 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
+    g.votes_cast = {}      # ← ریست رأی‌ها
+    g.vote_collecting = True
 
     await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> شروع شد (۵ ثانیه)",
         parse_mode="HTML"
     )
 
+    # ۵ ثانیه فرصت
     await asyncio.sleep(5)
 
-    await ctx.bot.send_message(
-        chat_id,
-        f"🛑 تمام",
-        parse_mode="HTML"
-    )
+    g.vote_collecting = False
+    await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
 
-    # ✅ علامت‌گذاری اینکه این صندلی رأی‌گیری شده
+    # علامت‌گذاری صندلی که رأی‌گیریش تموم شد
     if not hasattr(g, "voted_targets"):
         g.voted_targets = set()
     g.voted_targets.add(target_seat)
 
-    # 🔁 آپدیت دکمه‌ها
+    # برو به مرحله بعد (تیک خوردن دکمه‌ها)
     await update_vote_buttons(ctx, chat_id, g)
-
     store.save()
+
 
 import jdatetime
 
@@ -1907,16 +1909,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
-        # 🧹 حذف پیام رأی‌گیری (اگر هنوز هست)
-        if g.last_vote_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
-            except:
-                pass
-           # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
-            g.last_vote_msg_id = None
+        results = ["📊 نتیجه رأی‌گیری:"]
+        for seat, voters in g.votes_cast.items():
+            name = g.seats[seat][1]
+            results.append(f"{seat}. {name} → {len(voters)} رأی")
 
-        await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
+        if len(results) == 1:
+            results.append("هیچ رأیی ثبت نشد.")
+
+        await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
+
+        g.votes_cast = {}
+        g.current_vote_target = None
         store.save()
         return
 
@@ -2920,7 +2924,15 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             del g.last_name_prompt_msg_id[uid]
 
         await publish_seating(ctx, chat_id, g)
-        return  
+        return
+
+    if getattr(g, "vote_collecting", False) and g.current_vote_target:
+        voter_seat = next((s for s,(u,_) in g.seats.items() if u == uid), None)
+        target = g.current_vote_target
+
+        if voter_seat and voter_seat != target:
+            g.votes_cast.setdefault(target, set())
+            g.votes_cast[target].add(uid)   # ← چون set هست، دوباره‌شمار نمیشه
 
     # -------------- defense seats by God ------------------
     if g.vote_type == "awaiting_defense" and uid == g.god_id:
@@ -2960,7 +2972,11 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
     if hasattr(g, "adding_scenario_step") and g.adding_scenario_step:
-        # ⏱ چک تایم‌اوت ۳۰ ثانیه
+
+        if uid != g.god_id:
+            return
+
+
         if (datetime.now() - g.adding_scenario_last).total_seconds() > 45:
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
@@ -3078,6 +3094,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
             await ctx.bot.send_message(chat_id, f"✅ سناریوی «{name}» با موفقیت ذخیره شد.")
             return
+
 
 
 
