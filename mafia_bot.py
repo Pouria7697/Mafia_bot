@@ -1032,31 +1032,32 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         pass
 
 
-    async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
-        g.current_vote_target = target_seat
-        g.vote_collecting = True
+async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+    g.current_vote_target = target_seat
+    g.vote_collecting = True
 
-        # فقط برای همین صندلی
-        g.votes_cast.setdefault(target_seat, set())
-        store.save()
+    # فقط برای همین صندلی
+    g.votes_cast.setdefault(target_seat, set())
+    store.save()
 
-        await ctx.bot.send_message(
-            chat_id,
-            f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
-            parse_mode="HTML"
-        )
+    await ctx.bot.send_message(
+        chat_id,
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        parse_mode="HTML"
+    )
 
-        await asyncio.sleep(5)
+    await asyncio.sleep(5)
 
-        g.vote_collecting = False
-        await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
+    g.vote_collecting = False
+    await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
 
-        if not hasattr(g, "voted_targets"):
-            g.voted_targets = set()
-        g.voted_targets.add(target_seat)
+    if not hasattr(g, "voted_targets"):
+        g.voted_targets = set()
+    g.voted_targets.add(target_seat)
 
-        await update_vote_buttons(ctx, chat_id, g)
-        store.save()
+    await update_vote_buttons(ctx, chat_id, g)
+    store.save()
+
 
 
 import jdatetime
