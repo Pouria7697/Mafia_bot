@@ -1032,31 +1032,31 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         pass
 
 
-async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
-    g.current_vote_target = target_seat
-    g.votes_cast = {}      # ← ریست رأی‌ها
-    g.vote_collecting = True
+    async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+        g.current_vote_target = target_seat
+        g.vote_collecting = True
 
-    await ctx.bot.send_message(
-        chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> شروع شد (۵ ثانیه)",
-        parse_mode="HTML"
-    )
+        # فقط برای همین صندلی
+        g.votes_cast.setdefault(target_seat, set())
+        store.save()
 
-    # ۵ ثانیه فرصت
-    await asyncio.sleep(5)
+        await ctx.bot.send_message(
+            chat_id,
+            f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+            parse_mode="HTML"
+        )
 
-    g.vote_collecting = False
-    await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
+        await asyncio.sleep(5)
 
-    # علامت‌گذاری صندلی که رأی‌گیریش تموم شد
-    if not hasattr(g, "voted_targets"):
-        g.voted_targets = set()
-    g.voted_targets.add(target_seat)
+        g.vote_collecting = False
+        await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
 
-    # برو به مرحله بعد (تیک خوردن دکمه‌ها)
-    await update_vote_buttons(ctx, chat_id, g)
-    store.save()
+        if not hasattr(g, "voted_targets"):
+            g.voted_targets = set()
+        g.voted_targets.add(target_seat)
+
+        await update_vote_buttons(ctx, chat_id, g)
+        store.save()
 
 
 import jdatetime
@@ -1909,6 +1909,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
+        if g.last_vote_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
+            except:
+                pass
+            # print("Trying to delete vote message:", g.last_vote_msg_id)  # ✅ اینجا بذار
+            g.last_vote_msg_id = None
+
+        await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
         results = ["📊 نتیجه رأی‌گیری:"]
         for seat, voters in g.votes_cast.items():
             name = g.seats[seat][1]
