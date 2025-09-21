@@ -1033,8 +1033,10 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+    g.votes_cast = {}
+    g.vote_logs = {}
+ 
     g.current_vote_target = target_seat
-
     # ⏱ بازه‌ی رأی‌گیری از همین الان
     start_time = datetime.now().timestamp()
     end_time = start_time + 5
@@ -1043,8 +1045,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     # ✅ آماده‌سازی ساختار شمارش و لاگ
     g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
-    if not hasattr(g, "vote_logs"):
-        g.vote_logs = {}
     g.vote_logs.setdefault(target_seat, [])
 
     store.save()
@@ -1052,7 +1052,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     # 📢 پیام شروع رأی‌گیری
     await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> (۵ ثانیه)",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
         parse_mode="HTML"
     )
 
@@ -1933,18 +1933,20 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         results.append(header)
         results.append("-" * 70)
 
-        for seat, voters in g.votes_cast.items():
-            if not voters:
-                continue
-            name = g.seats[seat][1]
-            vote_details = [
-                f"{g.user_names.get(uid, str(uid))}({rel_time:.2f}s)"
-                for uid, rel_time in sorted(g.vote_logs.get(seat, []), key=lambda x: x[1])
-            ]
-            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9} | {', '.join(vote_details)}")
+        for seat, (uid_seat, name) in g.seats.items():
+            voters = g.votes_cast.get(seat, set())
+            logs = g.vote_logs.get(seat, [])
 
-        if len(results) == 2:  # یعنی فقط هدر هست و هیچ رأیی نیومده
-            results.append("هیچ رأیی ثبت نشد.")
+            if voters:
+                vote_details = [
+                    f"{g.user_names.get(uid, str(uid))}({rel_time:.2f}s)"
+                    for uid, rel_time in sorted(logs, key=lambda x: x[1])
+                ]
+                details_str = ", ".join(vote_details)
+            else:
+                details_str = "بدون رأی"
+
+            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9} | {details_str}")
 
         await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
 
