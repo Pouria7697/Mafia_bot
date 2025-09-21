@@ -2085,8 +2085,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "init_vote_classic" and uid == g.god_id:
-        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+        g.votes_cast = {}
+        g.vote_logs = {}
+        g.current_vote_target = None
         g.voted_targets = set()
+        store.save()
+
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
         await start_vote(ctx, chat, g, "initial_vote")
         return
 
@@ -2133,11 +2138,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!")
             return
-
-        g.vote_type = "awaiting_defense"
-        g.voted_targets = set()  # 🧹 پاک‌سازی لیست تیک‌ها برای رأی‌گیری نهایی
+        g.votes_cast = {}
+        g.vote_logs = {}
+        g.current_vote_target = None
+        g.voted_targets = set()
         store.save()
 
+        g.vote_type = "awaiting_defense"
         msg = await ctx.bot.send_message(
             chat,
             "📢 صندلی‌های دفاع را وارد کنید (مثال: 1 3 5):",
