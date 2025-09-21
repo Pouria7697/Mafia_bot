@@ -1033,17 +1033,20 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 
 
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
-    g.votes_cast = {}
-    g.vote_logs = {}
- 
     g.current_vote_target = target_seat
+
     # ⏱ بازه‌ی رأی‌گیری از همین الان
     start_time = datetime.now().timestamp()
     end_time = start_time + 5
     g.vote_window = (start_time, end_time, target_seat)
 
-    # ✅ آماده‌سازی ساختار شمارش و لاگ
+    # ✅ آماده‌سازی ساختار شمارش و لاگ (بدون پاک کردن بقیه)
     g.vote_collecting = True
+    if not hasattr(g, "votes_cast"):
+        g.votes_cast = {}
+    if not hasattr(g, "vote_logs"):
+        g.vote_logs = {}
+
     g.votes_cast.setdefault(target_seat, set())
     g.vote_logs.setdefault(target_seat, [])
 
@@ -1052,7 +1055,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     # 📢 پیام شروع رأی‌گیری
     await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> ",
         parse_mode="HTML"
     )
 
@@ -1067,6 +1070,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
+
 
 
 import jdatetime
