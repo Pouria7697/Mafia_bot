@@ -1934,13 +1934,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
-        if g.last_vote_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id=chat, message_id=g.last_vote_msg_id)
-            except:
-                pass
-            g.last_vote_msg_id = None
-
+ 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
 
         results = ["📊 نتیجه رأی‌گیری:\n"]
@@ -1957,10 +1951,16 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
+        g.vote_has_ended = True   # 📌 علامت‌گذاری که رأی‌گیری تموم شده
         store.save()
         return
 
     if data == "clear_vote" and uid == g.god_id:
+        # اول چک کن که رأی‌گیری واقعاً تموم شده باشه
+        if not getattr(g, "vote_has_ended", False):
+            await ctx.bot.send_message(chat, "⚠️ ابتدا باید رأی‌گیری پایان یابد.")
+            return
+
         if hasattr(g, "vote_cleanup_ids"):
             for mid in g.vote_cleanup_ids:
                 try:
@@ -1968,9 +1968,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
             g.vote_cleanup_ids = []
+            g.vote_has_ended = False   # دوباره ریست کن
             store.save()
-            await ctx.bot.send_message(chat, "🧹 همه پیام‌های رأی‌گیری پاک شدند.")
+            await ctx.bot.send_message(chat, "نتایج رای‌گیری پاک شد.")
         return
+
 
     # ────────────────────────────────────────────────────────────
     #  کارت
@@ -2996,6 +2998,9 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             g.vote_logs.setdefault(target, [])
             rel_time = now - start  # زمان از شروع بازه
             g.vote_logs[target].append((uid, rel_time))
+            if not hasattr(g, "vote_cleanup_ids"):
+                g.vote_cleanup_ids = []
+            g.vote_cleanup_ids.append(msg.message_id)
 
 
     # -------------- defense seats by God ------------------
