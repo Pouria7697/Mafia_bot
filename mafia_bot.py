@@ -999,6 +999,8 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
             label = f"{s}. {name}"
         btns.append([InlineKeyboardButton(label, callback_data=f"vote_{s}")])
 
+    btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote")])
+
     btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done")])
 
     back_code = "back_vote_init" if stage == "initial_vote" else "back_vote_final"
@@ -1010,6 +1012,9 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.last_vote_msg_id = msg.message_id  # 🧹 ذخیره پیام رأی‌گیری
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
+    g.vote_cleanup_ids.append(msg.message_id)  # ذخیره پیام
     store.save()
 
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
@@ -1019,6 +1024,7 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         label = f"✅ {s}. {name}" if hasattr(g, "voted_targets") and s in g.voted_targets else f"{s}. {name}"
         btns.append([InlineKeyboardButton(label, callback_data=f"vote_{s}")])
 
+    btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote")])
     btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done")])
     btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_init")])
 
@@ -1037,7 +1043,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     # ⏱ بازه‌ی رأی‌گیری از همین الان
     start_time = datetime.now().timestamp()
-    end_time = start_time + 5
+    end_time = start_time + 4
     g.vote_window = (start_time, end_time, target_seat)
 
     # ✅ آماده‌سازی ساختار شمارش و لاگ (بدون پاک کردن بقیه)
@@ -1046,6 +1052,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         g.votes_cast = {}
     if not hasattr(g, "vote_logs"):
         g.vote_logs = {}
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
 
     g.votes_cast.setdefault(target_seat, set())
     g.vote_logs.setdefault(target_seat, [])
@@ -1053,16 +1061,19 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     store.save()
 
     # 📢 پیام شروع رأی‌گیری
-    await ctx.bot.send_message(
+    msg = await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> ",
         parse_mode="HTML"
     )
-
-    await asyncio.sleep(5)
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
+    g.vote_cleanup_ids.append(msg.message_id)  # ذخیره پیام
+    await asyncio.sleep(4)
 
     g.vote_collecting = False
-    await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
+    end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
+    g.vote_cleanup_ids.append(end_msg.message_id)  # ذخیره پیام
 
     if not hasattr(g, "voted_targets"):
         g.voted_targets = set()
@@ -1933,24 +1944,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
 
         results = ["📊 نتیجه رأی‌گیری:\n"]
-        header = f"{'صندلی':<6} | {'نام':<12} | {'تعداد رأی':<9} | رأی‌دهنده‌ها"
+        header = f"{'صندلی':<6} | {'نام':<12} | {'تعداد رأی':<9}"
         results.append(header)
         results.append("-" * 70)
 
         for seat, (uid_seat, name) in g.seats.items():
             voters = g.votes_cast.get(seat, set())
-            logs = g.vote_logs.get(seat, [])
-
-            if voters:
-                vote_details = [
-                    f"{g.user_names.get(uid, str(uid))}({rel_time:.2f}s)"
-                    for uid, rel_time in sorted(logs, key=lambda x: x[1])
-                ]
-                details_str = ", ".join(vote_details)
-            else:
-                details_str = "بدون رأی"
-
-            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9} | {details_str}")
+            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9}")
 
         await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
 
@@ -1958,6 +1958,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.vote_logs = {}
         g.current_vote_target = None
         store.save()
+        return
+
+    if data == "clear_vote" and uid == g.god_id:
+        if hasattr(g, "vote_cleanup_ids"):
+            for mid in g.vote_cleanup_ids:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                except:
+                    pass
+            g.vote_cleanup_ids = []
+            store.save()
+            await ctx.bot.send_message(chat, "🧹 همه پیام‌های رأی‌گیری پاک شدند.")
         return
 
     # ────────────────────────────────────────────────────────────
@@ -2104,13 +2116,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         poll_msg = await ctx.bot.send_poll(
             chat_id=chat,
-            question="🗳 رأی‌گیری اولیه (پل - ۵ ثانیه)",
+            question="🗳 رأی‌گیری اولیه (پل - 4 ثانیه)",
             options=options,
             is_anonymous=False,
             allows_multiple_answers=True
         )
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(4)
         try:
             await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
         except Exception as e:
