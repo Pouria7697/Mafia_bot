@@ -1934,7 +1934,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "vote_done" and uid == g.god_id:
-
+ 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
 
         results = ["📊 نتیجه رأی‌گیری:\n"]
@@ -1942,11 +1942,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         results.append(header)
         results.append("-" * 70)
 
-        # 📌 فقط صندلی‌هایی که واقعا رأی‌گیری شدند
-        for seat in getattr(g, "voted_targets", []):
-            if seat not in g.seats:
-                continue
-            name = g.seats[seat][1]
+        for seat, (uid_seat, name) in g.seats.items():
             voters = g.votes_cast.get(seat, set())
             results.append(f"{seat:<6} | {name:<12} | {len(voters):<9}")
 
@@ -1958,7 +1954,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.vote_has_ended = True   # 📌 علامت‌گذاری که رأی‌گیری تموم شده
         store.save()
         return
-
 
     if data == "clear_vote" and uid == g.god_id:
         # اول چک کن که رأی‌گیری واقعاً تموم شده باشه
