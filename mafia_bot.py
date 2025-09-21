@@ -1927,17 +1927,23 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.last_vote_msg_id = None
 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
-        results = ["📊 نتیجه رأی‌گیری:"]
+
+        results = ["📊 نتیجه رأی‌گیری:\n"]
+        header = f"{'صندلی':<6} | {'نام':<12} | {'تعداد رأی':<9} | رأی‌دهنده‌ها"
+        results.append(header)
+        results.append("-" * 70)
+
         for seat, voters in g.votes_cast.items():
+            if not voters:
+                continue
             name = g.seats[seat][1]
-            results.append(f"{seat}. {name} → {len(voters)} رأی")
+            vote_details = [
+                f"{g.user_names.get(uid, str(uid))}({rel_time:.2f}s)"
+                for uid, rel_time in sorted(g.vote_logs.get(seat, []), key=lambda x: x[1])
+            ]
+            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9} | {', '.join(vote_details)}")
 
-            # 🕒 نمایش جزئیات رأی‌ها
-            for uid, rel_time in g.vote_logs.get(seat, []):
-                voter_name = g.user_names.get(uid, str(uid))
-                results.append(f"   - {voter_name} در {rel_time:.2f} ثانیه")
-
-        if len(results) == 1:
+        if len(results) == 2:  # یعنی فقط هدر هست و هیچ رأیی نیومده
             results.append("هیچ رأیی ثبت نشد.")
 
         await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
@@ -1947,7 +1953,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.current_vote_target = None
         store.save()
         return
-
 
     # ────────────────────────────────────────────────────────────
     #  کارت
