@@ -1011,8 +1011,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
             "🗳 رأی‌گیری نهایی – انتخاب حذف:"
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
-    g.last_vote_msg_id = msg.message_id
-    g.first_vote_msg_id = msg.message_id   # 📌 ذخیره شروع بازه
+    g.first_vote_msg_id = msg.message_id
     store.save()
 
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
@@ -1039,40 +1038,48 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
 
-    # ⏱ بازه‌ی رأی‌گیری
+    # ⏱ بازه‌ی رأی‌گیری از همین الان
     start_time = datetime.now().timestamp()
     end_time = start_time + 4.3
     g.vote_window = (start_time, end_time, target_seat)
 
+    # ✅ آماده‌سازی ساختار شمارش و لاگ (بدون پاک کردن بقیه)
     g.vote_collecting = True
     if not hasattr(g, "votes_cast"):
         g.votes_cast = {}
     if not hasattr(g, "vote_logs"):
         g.vote_logs = {}
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
 
     g.votes_cast.setdefault(target_seat, set())
     g.vote_logs.setdefault(target_seat, [])
 
+    # 📌 ذخیره ترتیب رأی‌گیری
+    if not hasattr(g, "vote_order"):
+        g.vote_order = []
+    g.vote_order.append(target_seat)
+
     store.save()
 
+    # 📢 پیام شروع رأی‌گیری
     msg = await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> ",
         parse_mode="HTML"
     )
-
+    g.vote_cleanup_ids.append(msg.message_id)  
     await asyncio.sleep(4)
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
-    g.last_vote_msg_id = end_msg.message_id   # 📌 ذخیره پایان بازه
-    store.save()
+    g.last_vote_msg_id = end_msg.message_id
 
     if not hasattr(g, "voted_targets"):
         g.voted_targets = set()
     g.voted_targets.add(target_seat)
 
-
+    await update_vote_buttons(ctx, chat_id, g)
     store.save()
 
 
