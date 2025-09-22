@@ -1072,7 +1072,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         g.voted_targets = set()
     g.voted_targets.add(target_seat)
 
-    await update_vote_buttons(ctx, chat_id, g)
+
     store.save()
 
 
