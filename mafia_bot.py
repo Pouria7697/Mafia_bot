@@ -1011,10 +1011,8 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
             "🗳 رأی‌گیری نهایی – انتخاب حذف:"
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
-    g.last_vote_msg_id = msg.message_id  # 🧹 ذخیره پیام رأی‌گیری
-    if not hasattr(g, "vote_cleanup_ids"):
-        g.vote_cleanup_ids = []
-    g.vote_cleanup_ids.append(msg.message_id)  # ذخیره پیام
+    g.last_vote_msg_id = msg.message_id
+    g.first_vote_msg_id = msg.message_id   # 📌 ذخیره شروع بازه
     store.save()
 
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
@@ -1041,39 +1039,34 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
 
-    # ⏱ بازه‌ی رأی‌گیری از همین الان
+    # ⏱ بازه‌ی رأی‌گیری
     start_time = datetime.now().timestamp()
-    end_time = start_time + 4
+    end_time = start_time + 4.3
     g.vote_window = (start_time, end_time, target_seat)
 
-    # ✅ آماده‌سازی ساختار شمارش و لاگ (بدون پاک کردن بقیه)
     g.vote_collecting = True
     if not hasattr(g, "votes_cast"):
         g.votes_cast = {}
     if not hasattr(g, "vote_logs"):
         g.vote_logs = {}
-    if not hasattr(g, "vote_cleanup_ids"):
-        g.vote_cleanup_ids = []
 
     g.votes_cast.setdefault(target_seat, set())
     g.vote_logs.setdefault(target_seat, [])
 
     store.save()
 
-    # 📢 پیام شروع رأی‌گیری
     msg = await ctx.bot.send_message(
         chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b> ",
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
         parse_mode="HTML"
     )
-    if not hasattr(g, "vote_cleanup_ids"):
-        g.vote_cleanup_ids = []
-    g.vote_cleanup_ids.append(msg.message_id)  # ذخیره پیام
+
     await asyncio.sleep(4)
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
-    g.vote_cleanup_ids.append(end_msg.message_id)  # ذخیره پیام
+    g.last_vote_msg_id = end_msg.message_id   # 📌 ذخیره پایان بازه
+    store.save()
 
     if not hasattr(g, "voted_targets"):
         g.voted_targets = set()
@@ -1932,47 +1925,34 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
         return
-
     if data == "vote_done" and uid == g.god_id:
- 
         await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
-
-        results = ["📊 نتیجه رأی‌گیری:\n"]
-        header = f"{'صندلی':<6} | {'نام':<12} | {'تعداد رأی':<9}"
-        results.append(header)
-        results.append("-" * 70)
-
-        for seat, (uid_seat, name) in g.seats.items():
-            voters = g.votes_cast.get(seat, set())
-            results.append(f"{seat:<6} | {name:<12} | {len(voters):<9}")
-
-        await ctx.bot.send_message(chat, "\n".join(results), parse_mode="HTML")
-
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
-        g.vote_has_ended = True   # 📌 علامت‌گذاری که رأی‌گیری تموم شده
+        g.vote_has_ended = True
+        g.vote_order = []
         store.save()
         return
 
     if data == "clear_vote" and uid == g.god_id:
-        # اول چک کن که رأی‌گیری واقعاً تموم شده باشه
         if not getattr(g, "vote_has_ended", False):
             await ctx.bot.send_message(chat, "⚠️ ابتدا باید رأی‌گیری پایان یابد.")
             return
 
-        if hasattr(g, "vote_cleanup_ids"):
-            for mid in g.vote_cleanup_ids:
+        if hasattr(g, "first_vote_msg_id") and hasattr(g, "last_vote_msg_id"):
+            for mid in range(g.first_vote_msg_id, g.last_vote_msg_id + 1):
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=mid)
                 except:
                     pass
-            g.vote_cleanup_ids = []
-            g.vote_has_ended = False   # دوباره ریست کن
-            store.save()
-            await ctx.bot.send_message(chat, "نتایج رای‌گیری پاک شد.")
-        return
 
+        g.vote_has_ended = False
+        g.first_vote_msg_id = None
+        g.last_vote_msg_id = None
+        store.save()
+        await ctx.bot.send_message(chat, "🧹  رأی‌گیری پاک شد.")
+        return
 
     # ────────────────────────────────────────────────────────────
     #  کارت
