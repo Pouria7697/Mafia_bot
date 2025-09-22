@@ -1004,11 +1004,16 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     title = "🗳 رأی‌گیری اولیه – انتخاب هدف:" if stage == "initial_vote" else "🗳 رأی‌گیری نهایی – انتخاب حذف:"
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
 
-    g.vote_msg_id = msg.message_id   # 📌 پیام دکمه‌های اصلی
-    g.first_vote_msg_id = msg.message_id 
-    g.vote_cleanup_ids = [msg.message_id]  # برای پاکسازی کل رأی‌گیری
-    store.save()
+    g.vote_msg_id = msg.message_id
 
+    if stage == "initial_vote":
+        g.first_vote_msg_id_initial = msg.message_id
+        g.last_vote_msg_id_initial = msg.message_id
+    elif stage == "final":
+        g.first_vote_msg_id_final = msg.message_id
+        g.last_vote_msg_id_final = msg.message_id
+
+    store.save()
 
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
     btns = []
@@ -1055,8 +1060,12 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
-    g.vote_cleanup_ids.append(end_msg.message_id)
-    g.last_vote_msg_id = end_msg.message_id 
+
+    if g.vote_stage == "initial_vote":
+        g.last_vote_msg_id_initial = end_msg.message_id
+    elif g.vote_stage == "final":
+        g.last_vote_msg_id_final = end_msg.message_id
+
     g.voted_targets.add(target_seat)
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
@@ -1926,20 +1935,24 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "⚠️ ابتدا باید رأی‌گیری پایان یابد.")
             return
 
-        if hasattr(g, "first_vote_msg_id") and hasattr(g, "last_vote_msg_id"):
-            for mid in range(g.first_vote_msg_id, g.last_vote_msg_id + 1):
+        if g.vote_stage == "initial_vote":
+            first_id = getattr(g, "first_vote_msg_id_initial", None)
+            last_id = getattr(g, "last_vote_msg_id_initial", None)
+        elif g.vote_stage == "final":
+            first_id = getattr(g, "first_vote_msg_id_final", None)
+            last_id = getattr(g, "last_vote_msg_id_final", None)
+        else:
+            first_id = last_id = None
+
+        if first_id and last_id:
+            for mid in range(first_id, last_id + 1):
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=mid)
                 except:
                     pass
 
-        g.vote_has_ended = False
-        g.first_vote_msg_id = None
-        g.last_vote_msg_id = None
-        store.save()
-        await ctx.bot.send_message(chat, "🧹  رأی‌گیری پاک شد.")
+        await ctx.bot.send_message(chat, "🧹 رأی‌گیری پاک شد.")
         return
-
     # ────────────────────────────────────────────────────────────
     #  کارت
     # ────────────────────────────────────────────────────────────
