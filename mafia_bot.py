@@ -1061,9 +1061,16 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         g.vote_order = []
     g.vote_order.append(target_seat)
 
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
+
     store.save()
 
-    msg = await ctx.bot.send_message(chat_id, f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>", parse_mode="HTML")
+    msg = await ctx.bot.send_message(
+        chat_id,
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        parse_mode="HTML"
+    )
     g.vote_cleanup_ids.append(msg.message_id)
 
     await asyncio.sleep(4)
