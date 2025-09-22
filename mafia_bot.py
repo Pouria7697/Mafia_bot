@@ -995,8 +995,12 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
         label = f"✅ {s}. {name}" if s in getattr(g, "voted_targets", set()) else f"{s}. {name}"
         btns.append([InlineKeyboardButton(label, callback_data=f"vote_{s}")])
 
-    btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote")])
-    btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done")])
+    if stage == "initial_vote":
+        btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_initial")])
+        btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_initial")])
+    else:  # final
+        btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_final")])
+        btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_final")])
 
     back_code = "back_vote_init" if stage == "initial_vote" else "back_vote_final"
     btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data=back_code)])
@@ -1015,6 +1019,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
     store.save()
 
+
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
     btns = []
     for s in g.vote_candidates:
@@ -1022,9 +1027,14 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         label = f"✅ {s}. {name}" if s in getattr(g, "voted_targets", set()) else f"{s}. {name}"
         btns.append([InlineKeyboardButton(label, callback_data=f"vote_{s}")])
 
-    btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote")])
-    btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done")])
-    btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_init")])
+    if g.vote_stage == "initial_vote":
+        btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_initial")])
+        btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_initial")])
+        btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_init")])
+    elif g.vote_stage == "final":
+        btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_final")])
+        btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_final")])
+        btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_final")])
 
     try:
         await ctx.bot.edit_message_reply_markup(
@@ -1920,38 +1930,54 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
         return
-    if data == "vote_done" and uid == g.god_id:
-        await ctx.bot.send_message(chat, "✅ رأی‌گیری تمام شد.")
+    if data == "vote_done_initial" and uid == g.god_id:
+        await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
-        g.vote_has_ended = True
+        g.vote_has_ended_initial = True
         g.vote_order = []
         store.save()
         return
 
-    if data == "clear_vote" and uid == g.god_id:
-        if not getattr(g, "vote_has_ended", False):
+    if data == "vote_done_final" and uid == g.god_id:
+        await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
+        g.votes_cast = {}
+        g.vote_logs = {}
+        g.current_vote_target = None
+        g.vote_has_ended_final = True
+        g.vote_order = []
+        store.save()
+        return
+
+
+    if data == "clear_vote_initial" and uid == g.god_id:
+        if not getattr(g, "vote_has_ended_initial", False):
             await ctx.bot.send_message(chat, "⚠️ ابتدا باید رأی‌گیری پایان یابد.")
             return
-
-        if g.vote_stage == "initial_vote":
-            first_id = getattr(g, "first_vote_msg_id_initial", None)
-            last_id = getattr(g, "last_vote_msg_id_initial", None)
-        elif g.vote_stage == "final":
-            first_id = getattr(g, "first_vote_msg_id_final", None)
-            last_id = getattr(g, "last_vote_msg_id_final", None)
-        else:
-            first_id = last_id = None
-
+        first_id = getattr(g, "first_vote_msg_id_initial", None)
+        last_id  = getattr(g, "last_vote_msg_id_initial", None)
         if first_id and last_id:
             for mid in range(first_id, last_id + 1):
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=mid)
                 except:
                     pass
-
-        await ctx.bot.send_message(chat, "🧹 رأی‌گیری پاک شد.")
+        await ctx.bot.send_message(chat, "🧹 رأی‌گیری اولیه پاک شد.")
+        return
+    if data == "clear_vote_final" and uid == g.god_id:
+        if not getattr(g, "vote_has_ended_final", False):
+            await ctx.bot.send_message(chat, "⚠️ ابتدا باید رأی‌گیری پایان یابد.")
+            return
+        first_id = getattr(g, "first_vote_msg_id_final", None)
+        last_id  = getattr(g, "last_vote_msg_id_final", None)
+        if first_id and last_id:
+            for mid in range(first_id, last_id + 1):
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                except:
+                    pass
+        await ctx.bot.send_message(chat, "🧹 رأی‌گیری نهایی پاک شد.")
         return
     # ────────────────────────────────────────────────────────────
     #  کارت
