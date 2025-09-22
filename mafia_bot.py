@@ -1012,6 +1012,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
     msg = await ctx.bot.send_message(chat_id, title, reply_markup=InlineKeyboardMarkup(btns))
     g.first_vote_msg_id = msg.message_id
+    g.last_vote_msg_id = msg.message_id  
     store.save()
 
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
@@ -1073,7 +1074,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
-    g.last_vote_msg_id = end_msg.message_id
 
     if not hasattr(g, "voted_targets"):
         g.voted_targets = set()
