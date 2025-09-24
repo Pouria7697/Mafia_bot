@@ -2130,13 +2130,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         poll_msg = await ctx.bot.send_poll(
             chat_id=chat,
-            question="🗳 رأی‌گیری اولیه (پل - 4 ثانیه)",
+            question="🗳 رأی‌گیری اولیه (پل - 10 ثانیه)",
             options=options,
             is_anonymous=False,
             allows_multiple_answers=True
         )
 
-        await asyncio.sleep(4)
+        await asyncio.sleep(11)
         try:
             await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
         except Exception as e:
@@ -3523,6 +3523,63 @@ async def list_indep_roles(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = f"♦️ نقش‌های مستقل سناریو {scn}:\n" + "\n".join([f"- {r}" for r in roles])
     await update.message.reply_text(msg)
 
+async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    g = gs(chat_id)
+
+
+    if update.effective_user.id != g.god_id:
+        await update.message.reply_text("⚠️ فقط راوی می‌تواند جایگزین کند.")
+        return
+
+
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        await update.message.reply_text("⚠️ لطفاً روی پیام بازیکن جدید ریپلای کنید.")
+        return
+
+    new_uid = update.message.reply_to_message.from_user.id
+    new_name = g.user_names.get(new_uid, "ناشناس")
+
+
+    parts = update.message.text.strip().split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await update.message.reply_text("⚠️ فرمت درست: /sub <شماره صندلی>")
+        return
+
+    seat_no = int(parts[1])
+    if seat_no not in g.seats:
+        await update.message.reply_text(f"⚠️ صندلی {seat_no} وجود ندارد.")
+        return
+
+
+    role = g.assigned_roles.get(seat_no)
+
+    g.seats[seat_no] = (new_uid, new_name)
+    store.save()
+    await publish_seating(ctx, chat_id, g, mode=CTRL)
+
+
+    stickers = load_stickers()
+    if role in stickers:
+        try:
+            await ctx.bot.send_sticker(new_uid, stickers[role])
+        except:
+            pass
+    try:
+        await ctx.bot.send_message(new_uid, f"🎭 نقش شما: {role}")
+    except telegram.error.Forbidden:
+        await update.message.reply_text("⚠️ نتونستم نقش رو به پیوی بفرستم (پی‌وی بسته است).")
+
+
+    if new_name == "ناشناس":
+        g.waiting_name[new_uid] = seat_no
+        store.save()
+        await ctx.bot.send_message(
+            chat_id,
+            f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
+        )
+
+    await update.message.reply_text(f"✅ بازیکن جدید جایگزین صندلی {seat_no} شد.")
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -3552,6 +3609,7 @@ async def main():
     app.add_handler(CommandHandler("listindep", list_indep_roles))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("sub", sub_cmd, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
     app.add_handler(CommandHandler("addsticker", add_sticker_cmd, filters=filters.ChatType.PRIVATE))
     # ⏱ تایمر پویا مثل /3s
