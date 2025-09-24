@@ -2585,7 +2585,9 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     break
 
         store.save()
-        await publish_seating(ctx, chat_id, g)
+        mode = CTRL if g.phase != "idle" else REG
+        await publish_seating(ctx, chat_id, g, mode=mode)
+ 
 
         # پیام تأیید
         if changed_seat:
