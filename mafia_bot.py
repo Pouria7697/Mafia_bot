@@ -2130,13 +2130,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         poll_msg = await ctx.bot.send_poll(
             chat_id=chat,
-            question="🗳 رأی‌گیری اولیه (پل - 10 ثانیه)",
+            question="🗳 رأی‌گیری اولیه",
             options=options,
             is_anonymous=False,
             allows_multiple_answers=True
         )
 
-        await asyncio.sleep(11)
+        await asyncio.sleep(9)
         try:
             await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
         except Exception as e:
