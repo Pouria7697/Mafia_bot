@@ -3609,7 +3609,7 @@ async def main():
     app.add_handler(CommandHandler("listindep", list_indep_roles))
     app.add_handler(CommandHandler("add", add_seat_cmd, filters=group_filter))
     app.add_handler(CommandHandler("god", transfer_god_cmd, filters=group_filter))
-    app.add_handler(CommandHandler("sub", sub_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("sub", sub_command, filters=group_filter))
     app.add_handler(CommandHandler("setevent", set_event_cmd, filters=group_filter))
     app.add_handler(CommandHandler("addsticker", add_sticker_cmd, filters=filters.ChatType.PRIVATE))
     # ⏱ تایمر پویا مثل /3s
