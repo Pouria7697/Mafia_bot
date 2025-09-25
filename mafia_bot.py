@@ -1458,11 +1458,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "medal_confirm" and uid == g.god_id:
-        await set_hint_and_kb(ctx, chat, g, "✅ مدال‌ها ذخیره شدند.", control_keyboard(g), mode=CTRL)
+        await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     if data == "medal_back" and uid == g.god_id:
-        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+        await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
