@@ -137,6 +137,7 @@ class GameState:
     pending_warnings: dict[int, int] | None = None
     remaining_cards: dict[str, list[str]] = None
     medals: dict[str, set[int]] = None
+    pending_medals: dict[str, set[int]] = None
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -178,7 +179,8 @@ class GameState:
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
         self.medals = self.medals or {"gold": set(), "silver": set(), "bronze": set()}
-       
+        self.pending_medals = self.pending_medals or {"gold": set(), "silver": set(), "bronze": set()}
+  
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -728,7 +730,36 @@ async def _retry(coro):
         await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.1)
         return await coro
 
+def medal_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    rows = []
+    seats = sorted(g.seats.keys())
 
+    # مدال طلا
+    gold_row = []
+    for s in seats:
+        label = f"🥇{s}" if s not in g.pending_medals["gold"] else f"🥇{s} ✅"
+        gold_row.append(InlineKeyboardButton(label, callback_data=f"medal_gold_{s}"))
+    rows.append(gold_row)
+
+    # مدال نقره
+    silver_row = []
+    for s in seats:
+        label = f"🥈{s}" if s not in g.pending_medals["silver"] else f"🥈{s} ✅"
+        silver_row.append(InlineKeyboardButton(label, callback_data=f"medal_silver_{s}"))
+    rows.append(silver_row)
+
+    # مدال برنز
+    bronze_row = []
+    for s in seats:
+        label = f"🥉{s}" if s not in g.pending_medals["bronze"] else f"🥉{s} ✅"
+        bronze_row.append(InlineKeyboardButton(label, callback_data=f"medal_bronze_{s}"))
+    rows.append(bronze_row)
+
+    # کنترل‌ها
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="medal_confirm")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="medal_back")])
+
+    return InlineKeyboardMarkup(rows)
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
 async def publish_seating(
@@ -1098,36 +1129,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 import jdatetime
 
 
-def medal_button_markup(g: GameState) -> InlineKeyboardMarkup:
-    rows = []
-    seats = sorted(g.seats.keys())
 
-    # مدال طلا
-    gold_row = []
-    for s in seats:
-        label = f"🥇{s}" if s not in g.medals["gold"] else f"🥇{s} ✅"
-        gold_row.append(InlineKeyboardButton(label, callback_data=f"medal_gold_{s}"))
-    rows.append(gold_row)
 
-    # مدال نقره
-    silver_row = []
-    for s in seats:
-        label = f"🥈{s}" if s not in g.medals["silver"] else f"🥈{s} ✅"
-        silver_row.append(InlineKeyboardButton(label, callback_data=f"medal_silver_{s}"))
-    rows.append(silver_row)
-
-    # مدال برنز
-    bronze_row = []
-    for s in seats:
-        label = f"🥉{s}" if s not in g.medals["bronze"] else f"🥉{s} ✅"
-        bronze_row.append(InlineKeyboardButton(label, callback_data=f"medal_bronze_{s}"))
-    rows.append(bronze_row)
-
-    # کنترل‌ها
-    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="medal_confirm")])
-    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="medal_back")])
-
-    return InlineKeyboardMarkup(rows)
 
 
 
@@ -1443,6 +1446,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # ─── مدال‌ها ─────────────────────────────────────────────
     if data == "medal_menu" and uid == g.god_id:
+        # کپی فعلی مدال‌ها → پنـدینگ
+        g.pending_medals = {
+            "gold": set(g.medals["gold"]),
+            "silver": set(g.medals["silver"]),
+            "bronze": set(g.medals["bronze"]),
+        }
         await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
         return
 
@@ -1450,25 +1459,29 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _, medal, seat_str = data.split("_")
         seat = int(seat_str)
 
-        if medal in g.medals:
-            if seat in g.medals[medal]:
-                g.medals[medal].remove(seat)
+        if medal in g.pending_medals:
+            if seat in g.pending_medals[medal]:
+                g.pending_medals[medal].remove(seat)
             else:
-                g.medals[medal].add(seat)
-            store.save()
+                g.pending_medals[medal].add(seat)
 
         await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
         return
 
     if data == "medal_confirm" and uid == g.god_id:
+        g.medals = {
+            "gold": set(g.pending_medals["gold"]),
+            "silver": set(g.pending_medals["silver"]),
+            "bronze": set(g.pending_medals["bronze"]),
+        }
         g.ui_hint = None
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     if data == "medal_back" and uid == g.god_id:
+        g.pending_medals = {"gold": set(), "silver": set(), "bronze": set()}  
         g.ui_hint = None
-        store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
