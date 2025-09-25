@@ -136,6 +136,7 @@ class GameState:
     warning_mode: bool = False
     pending_warnings: dict[int, int] | None = None
     remaining_cards: dict[str, list[str]] = None
+    medals: dict[str, set[int]] | None = None
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -176,6 +177,8 @@ class GameState:
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
+        self.medals = self.medals or {"gold": set(), "silver": set(), "bronze": set()}
+       
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -565,7 +568,8 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
-        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
+        [InlineKeyboardButton("🏅 مدال", callback_data="medal_menu")],
+        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
     ])
 
     return InlineKeyboardMarkup(rows)
@@ -1092,6 +1096,36 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 import jdatetime
 
 
+def medal_keyboard(g: GameState) -> InlineKeyboardMarkup:
+    rows = []
+    seats = sorted(g.seats.keys())
+
+    # مدال طلا
+    gold_row = []
+    for s in seats:
+        label = f"🥇{s}" if s not in g.medals["gold"] else f"🥇{s} ✅"
+        gold_row.append(InlineKeyboardButton(label, callback_data=f"medal_gold_{s}"))
+    rows.append(gold_row)
+
+    # مدال نقره
+    silver_row = []
+    for s in seats:
+        label = f"🥈{s}" if s not in g.medals["silver"] else f"🥈{s} ✅"
+        silver_row.append(InlineKeyboardButton(label, callback_data=f"medal_silver_{s}"))
+    rows.append(silver_row)
+
+    # مدال برنز
+    bronze_row = []
+    for s in seats:
+        label = f"🥉{s}" if s not in g.medals["bronze"] else f"🥉{s} ✅"
+        bronze_row.append(InlineKeyboardButton(label, callback_data=f"medal_bronze_{s}"))
+    rows.append(bronze_row)
+
+    # کنترل‌ها
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="medal_confirm")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="medal_back")])
+
+    return InlineKeyboardMarkup(rows)
 
 
 async def announce_winner(ctx, update, g: GameState):
@@ -1146,8 +1180,18 @@ async def announce_winner(ctx, update, g: GameState):
             role_display = role
 
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
+
+        medal_icon = ""
+        if seat in g.medals["gold"]:
+            medal_icon = " 🥇"
+        elif seat in g.medals["silver"]:
+            medal_icon = " 🥈"
+        elif seat in g.medals["bronze"]:
+            medal_icon = " 🥉"
+
+
         lines.append(
-            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
+            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}{medal_icon}"
         )
 
     lines.append("")
@@ -1393,6 +1437,32 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "🕒 ساعت شروع را بنویس (مثال: 22:30):",
             reply_markup=ForceReply(selective=True)
         )
+        return
+    # ─── مدال‌ها ─────────────────────────────────────────────
+    if data == "medal_menu" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_keyboard(g), mode=CTRL)
+        return
+
+    if data.startswith("medal_") and uid == g.god_id:
+        _, medal, seat_str = data.split("_")
+        seat = int(seat_str)
+
+        if medal in g.medals:
+            if seat in g.medals[medal]:
+                g.medals[medal].remove(seat)
+            else:
+                g.medals[medal].add(seat)
+            store.save()
+
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_keyboard(g), mode=CTRL)
+        return
+
+    if data == "medal_confirm" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, "✅ مدال‌ها ذخیره شدند.", control_keyboard(g), mode=CTRL)
+        return
+
+    if data == "medal_back" and uid == g.god_id:
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
         return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
@@ -2136,7 +2206,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             allows_multiple_answers=True
         )
 
-        await asyncio.sleep(9)
+        await asyncio.sleep(11)
         try:
             await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
         except Exception as e:
@@ -2404,14 +2474,15 @@ async def shuffle_and_assign(
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
         role = g.assigned_roles[seat]
-        log.append(f"{seat:>2}. {name} → {role}")
+        log.append(f"{seat:>2}. <a href='tg://user?id={uid}'>{name}</a> → {role}")
+
 
     if g.god_id:
         text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
         if unreachable:
             text += "\n⚠️ نشد برای این افراد پیام بفرستم: " + ", ".join(unreachable)
         try:
-            await ctx.bot.send_message(g.god_id, text)
+            await ctx.bot.send_message(g.god_id, text, parse_mode="HTML")
         except:
             pass
 
