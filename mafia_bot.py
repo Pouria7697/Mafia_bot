@@ -1482,7 +1482,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "medal_back" and uid == g.god_id:
         g.pending_medals = {"gold": set(), "silver": set(), "bronze": set()}  
         g.ui_hint = None
-        await publish_seating(ctx, chat, g, mode=CTRL)
+        store.save()
+        await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
         return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
