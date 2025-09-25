@@ -136,7 +136,7 @@ class GameState:
     warning_mode: bool = False
     pending_warnings: dict[int, int] | None = None
     remaining_cards: dict[str, list[str]] = None
-    medals: dict[str, set[int]] | None = None
+    medals: dict[str, set[int]] = None
 
     def __post_init__(self):
         self.seats = self.seats or {}
@@ -845,6 +845,8 @@ async def publish_seating(
                 kb = delete_button_markup(g)
             elif mode == "warn":
                 kb = warn_button_markup_plusminus(g)
+            elif mode == "medal":
+                kb = medal_button_markup(g)
             else:
                 kb = control_keyboard(g)
 
@@ -1096,7 +1098,7 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 import jdatetime
 
 
-def medal_keyboard(g: GameState) -> InlineKeyboardMarkup:
+def medal_button_markup(g: GameState) -> InlineKeyboardMarkup:
     rows = []
     seats = sorted(g.seats.keys())
 
@@ -1126,6 +1128,7 @@ def medal_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="medal_back")])
 
     return InlineKeyboardMarkup(rows)
+
 
 
 async def announce_winner(ctx, update, g: GameState):
@@ -1440,7 +1443,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # ─── مدال‌ها ─────────────────────────────────────────────
     if data == "medal_menu" and uid == g.god_id:
-        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_keyboard(g), mode=CTRL)
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
         return
 
     if data.startswith("medal_") and uid == g.god_id:
@@ -1454,19 +1457,19 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 g.medals[medal].add(seat)
             store.save()
 
-        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_keyboard(g), mode=CTRL)
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
         return
 
     if data == "medal_confirm" and uid == g.god_id:
         g.ui_hint = None
         store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL, custom_kb=None)
+        await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     if data == "medal_back" and uid == g.god_id:
         g.ui_hint = None
         store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL, custom_kb=None)
+        await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
