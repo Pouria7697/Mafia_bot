@@ -1460,13 +1460,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "medal_confirm" and uid == g.god_id:
         g.ui_hint = None
         store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL)
+        await publish_seating(ctx, chat, g, mode=CTRL, custom_kb=None)
         return
 
     if data == "medal_back" and uid == g.god_id:
         g.ui_hint = None
         store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL)
+        await publish_seating(ctx, chat, g, mode=CTRL, custom_kb=None)
         return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
