@@ -876,7 +876,7 @@ async def publish_seating(
                 kb = delete_button_markup(g)
             elif mode == "warn":
                 kb = warn_button_markup_plusminus(g)
-            elif mode == "medal":
+            elif mode == "medal" or getattr(g, "medal_mode", False):
                 kb = medal_button_markup(g)
             else:
                 kb = control_keyboard(g)
@@ -1444,47 +1444,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=ForceReply(selective=True)
         )
         return
-    # ─── مدال‌ها ─────────────────────────────────────────────
-    if data == "medal_menu" and uid == g.god_id:
-        # کپی فعلی مدال‌ها → پنـدینگ
-        g.pending_medals = {
-            "gold": set(g.medals["gold"]),
-            "silver": set(g.medals["silver"]),
-            "bronze": set(g.medals["bronze"]),
-        }
-        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
-        return
 
-    if data.startswith("medal_") and uid == g.god_id:
-        _, medal, seat_str = data.split("_")
-        seat = int(seat_str)
-
-        if medal in g.pending_medals:
-            if seat in g.pending_medals[medal]:
-                g.pending_medals[medal].remove(seat)
-            else:
-                g.pending_medals[medal].add(seat)
-
-        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
-        return
-
-    if data == "medal_confirm" and uid == g.god_id:
-        g.medals = {
-            "gold": set(g.pending_medals["gold"]),
-            "silver": set(g.pending_medals["silver"]),
-            "bronze": set(g.pending_medals["bronze"]),
-        }
-        g.ui_hint = None
-        store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL)
-        return
-
-    if data == "medal_back" and uid == g.god_id:
-        g.pending_medals = {"gold": set(), "silver": set(), "bronze": set()}  
-        g.ui_hint = None
-        store.save()
-        await publish_seating(ctx, chat, g, mode=CTRL)
-        return
 
     # ─── شروع بازی (انتخاب سناریو) ─────────────────────────────
     if data == "startgame":
@@ -2023,7 +1983,51 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # ─── مدال‌ها ─────────────────────────────────────────────
+    if data == "medal_menu" and uid == g.god_id:
+        # کپی فعلی مدال‌ها → پنـدینگ
+        g.pending_medals = {
+            "gold": set(g.medals["gold"]),
+            "silver": set(g.medals["silver"]),
+            "bronze": set(g.medals["bronze"]),
+        }
+        g.medal_mode = True 
+        store.save()
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
+        return
 
+    if data.startswith("medal_") and uid == g.god_id:
+        _, medal, seat_str = data.split("_")
+        seat = int(seat_str)
+
+        if medal in g.pending_medals:
+            if seat in g.pending_medals[medal]:
+                g.pending_medals[medal].remove(seat)
+            else:
+                g.pending_medals[medal].add(seat)
+
+        await set_hint_and_kb(ctx, chat, g, "مدال‌ها را انتخاب کنید:", medal_button_markup(g), mode="medal")
+        return
+
+    if data == "medal_confirm" and uid == g.god_id:
+        g.medals = {
+            "gold": set(g.pending_medals["gold"]),
+            "silver": set(g.pending_medals["silver"]),
+            "bronze": set(g.pending_medals["bronze"]),
+        }
+        g.ui_hint = None
+        g.medal_mode = False 
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
+    if data == "medal_back" and uid == g.god_id:
+        g.pending_medals = {"gold": set(), "silver": set(), "bronze": set()}  
+        g.ui_hint = None
+        g.medal_mode = False 
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
 
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
