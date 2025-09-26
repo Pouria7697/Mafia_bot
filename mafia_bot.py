@@ -1768,17 +1768,19 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 g.medals[medal].add(seat)
         store.save()
-        await set_hint_and_kb(ctx, chat, g, "بازیکنان مدال‌دار را انتخاب کنید:", kb_medals(g))
+        await publish_seating(ctx, chat, g, mode="medals")
         return
 
     if data == "medal_confirm" and uid == g.god_id:
         g.phase = "playing"
+        g.ui_hint = None
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     if data == "medal_back" and uid == g.god_id:
         g.phase = "playing"
+        g.ui_hint = None
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
