@@ -1779,6 +1779,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "medal_back" and uid == g.god_id:
+        print("✅ medal_back called")  
         g.phase = "playing"
         g.ui_hint = None
         store.save()
