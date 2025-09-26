@@ -882,6 +882,8 @@ async def publish_seating(
                 kb = delete_button_markup(g)
             elif mode == "warn":
                 kb = warn_button_markup_plusminus(g)
+            elif mode == "medals":
+                kb = kb_medals(g)
             else:
                 kb = control_keyboard(g)
 
@@ -1754,7 +1756,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not hasattr(g, "medals"):
             g.medals = {"gold": set(), "silver": set(), "bronze": set()}
         store.save()
-        await set_hint_and_kb(ctx, chat, g, "بازیکنان مدال‌دار را انتخاب کنید:", kb_medals(g))
+        await publish_seating(ctx, chat, g, mode="medals")
         return
 
     if data.startswith("medal_") and uid == g.god_id:
