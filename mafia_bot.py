@@ -848,6 +848,15 @@ async def publish_seating(
             else:
                 kb = control_keyboard(g)
 
+        # --- ذخیره اسنپ‌شات آخرین لیست برای بازیابی با /lists ---
+        try:
+            g.last_snapshot = {
+                "text": text,
+                "kb": kb.to_dict(),  # کیبورد رو به dict ذخیره می‌کنیم
+            }
+            store.save()
+        except Exception as e:
+            print("⚠️ snapshot save error:", e)
         # پیام لیست
         try:
             if g.last_seating_msg_id:
@@ -2136,22 +2145,42 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         alive = [s for s in sorted(g.seats) if s not in g.striked]
         options = [f"{s}. {g.seats[s][1]}" for s in alive]
-        options.append("📊 دیدن نتایج")
+        max_per_poll = 9  # حداکثر بازیکن در هر poll (۱۰مین گزینه برای "دیدن نتایج")
 
-        poll_msg = await ctx.bot.send_poll(
-            chat_id=chat,
-            question="🗳 رأی‌گیری اولیه",
-            options=options,
-            is_anonymous=False,
-            allows_multiple_answers=True
-        )
+        # تقسیم گزینه‌ها به چند poll هر 9 نفر
+        chunks = [options[i:i + max_per_poll] for i in range(0, len(options), max_per_poll)]
 
-        await asyncio.sleep(11)
-        try:
-            await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
-        except Exception as e:
-            print("⚠️ stop_poll error:", e)
+        total_polls = len(chunks)
+        if total_polls == 0:
+            await ctx.bot.send_message(chat, "⚠️ هیچ بازیکنی برای رأی‌گیری وجود ندارد.")
+            return
 
+        for idx, chunk in enumerate(chunks, start=1):
+            # افزودن گزینه‌ی نتایج برای هر poll
+            chunk.append(f"📊 دیدن نتایج ({idx}/{total_polls})")
+
+            try:
+                poll_msg = await ctx.bot.send_poll(
+                    chat_id=chat,
+                    question=f"🗳 رأی‌گیری اولیه – بخش {idx}/{total_polls}",
+                    options=chunk,
+                    is_anonymous=False,
+                    allows_multiple_answers=True
+                )
+                g.last_poll_ids = getattr(g, "last_poll_ids", []) + [poll_msg.message_id]
+                store.save()
+
+                await asyncio.sleep(11)  # بزار مردم رأی بدن
+
+                try:
+                    await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
+                except Exception as e:
+                    print(f"⚠️ stop_poll error (part {idx}):", e)
+
+            except Exception as e:
+                print(f"❌ poll send error (part {idx}):", e)
+
+        await ctx.bot.send_message(chat, f"✅ {total_polls} رای‌گیری بسته شد.")
         return
 
     if data == "back_to_controls" and uid == g.god_id:
@@ -3594,6 +3623,37 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ بازیکن جدید جایگزین صندلی {seat_no} شد.")
 
+async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    uid = update.effective_user.id
+    g = gs(chat.id)
+
+    # فقط ادمین‌های گروه اجازه داشته باشن
+    try:
+        member = await ctx.bot.get_chat_member(chat.id, uid)
+        if member.status not in ("administrator", "creator"):
+            await ctx.bot.send_message(chat.id, "⚠️ فقط ادمین‌ها می‌توانند این دستور را بزنند.")
+            return
+    except Exception:
+        pass
+
+    if not hasattr(g, "last_snapshot"):
+        await ctx.bot.send_message(chat.id, "❌ لیست قبلی ذخیره نشده است.")
+        return
+
+    try:
+        kb = InlineKeyboardMarkup.de_json(g.last_snapshot["kb"], ctx.bot)
+    except Exception:
+        kb = None
+
+    await ctx.bot.send_message(
+        chat.id,
+        g.last_snapshot["text"],
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
@@ -3616,6 +3676,7 @@ async def main():
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
     app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
+F
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("listcard", list_cards))
     app.add_handler(CommandHandler("addindep", add_indep_role))
