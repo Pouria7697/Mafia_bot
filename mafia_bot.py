@@ -3628,7 +3628,7 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     g = gs(chat.id)
 
-    # فقط ادمین‌های گروه اجازه داشته باشن
+    # فقط ادمین‌ها
     try:
         member = await ctx.bot.get_chat_member(chat.id, uid)
         if member.status not in ("administrator", "creator"):
@@ -3646,12 +3646,16 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         kb = None
 
-    await ctx.bot.send_message(
+    msg = await ctx.bot.send_message(
         chat.id,
         g.last_snapshot["text"],
         parse_mode="HTML",
         reply_markup=kb
     )
+
+    # ✅ آیدی پیام جدید را به عنوان لیست فعال ذخیره کن
+    g.last_seating_msg_id = msg.message_id
+    store.save()
 
 
 async def main():
@@ -3671,11 +3675,7 @@ async def main():
         )
     )
     app.add_handler(CommandHandler("resetgame", resetgame_cmd, filters=group_filter))
-    app.add_handler(CommandHandler("addscenario", addscenario, filters=group_filter))
-    app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=group_filter))
-    app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
-    app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
-    app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
+    app.add_handler(CommandHandler("addcdtmafia", cmd_listmafia, filters=group_filter))
     app.add_handler(CommandHandler("list", cmd_lists, filters=group_filter))
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("listcard", list_cards))
