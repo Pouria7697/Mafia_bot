@@ -2112,7 +2112,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.adding_scenario_data = {}
         g.adding_scenario_last = datetime.now()
         store.save()
-        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۴۰ ثانیه فرصت دارید).")
+        await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۵ دقیقه فرصت دارید).")
         return
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
@@ -3100,7 +3100,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             return
 
 
-        if (datetime.now() - g.adding_scenario_last).total_seconds() > 45:
+        if (datetime.now() - g.adding_scenario_last).total_seconds() > 300:
             g.adding_scenario_step = None
             g.adding_scenario_data = {}
             store.save()
@@ -3628,7 +3628,7 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     g = gs(chat.id)
 
-    # فقط ادمین‌ها
+    # فقط ادمین‌های گروه اجازه داشته باشن
     try:
         member = await ctx.bot.get_chat_member(chat.id, uid)
         if member.status not in ("administrator", "creator"):
@@ -3646,6 +3646,7 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         kb = None
 
+    # 📜 ارسال لیست بازیابی‌شده
     msg = await ctx.bot.send_message(
         chat.id,
         g.last_snapshot["text"],
@@ -3653,9 +3654,20 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb
     )
 
-    # ✅ آیدی پیام جدید را به عنوان لیست فعال ذخیره کن
+    # ✅ به‌روزرسانی آیدی پیام فعال
     g.last_seating_msg_id = msg.message_id
     store.save()
+
+    # 📌 پین کردن پیام (اختیاری ولی پیشنهاد می‌شود)
+    try:
+        await ctx.bot.pin_chat_message(
+            chat_id=chat.id,
+            message_id=msg.message_id,
+            disable_notification=True
+        )
+    except Exception as e:
+        print(f"⚠️ خطا در پین کردن لیست بازیابی‌شده: {e}")
+
 
 
 async def main():
