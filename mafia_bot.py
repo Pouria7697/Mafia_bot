@@ -3676,7 +3676,7 @@ async def main():
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
     app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
-F
+    app.add_handler(CommandHandler("list", cmd_lists, filters=group_filter))
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("listcard", list_cards))
     app.add_handler(CommandHandler("addindep", add_indep_role))
