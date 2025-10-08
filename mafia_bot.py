@@ -814,9 +814,9 @@ async def publish_seating(
                 if i in g.striked:
                     txt += " ❌☠️"
 
-                line = f"♚{emoji_num}  {txt}"
+                line = f"♚{i}  {txt}"
             else:
-                line = f"♚{emoji_num} ⬜ /{i}"
+                line = f"♚{i} ⬜ /{i}"
             lines.append(line)
 
         # استعلام وضعیت
