@@ -2270,6 +2270,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # رفتن به مرحله رأی‌گیری نهایی (به‌ترتیب انتخاب گاد)
         await start_vote(ctx, chat, g, "final")
+        await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
     # ─── بازگشت از انتخاب دفاع ───────────────────────────────────────────
