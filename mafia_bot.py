@@ -2381,22 +2381,23 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
-
     if data == "back_vote_final" and uid == g.god_id:
-        # 🔹 حذف دکمه‌های فعلی از پیام
+        # 🔹 حذف دکمه‌های فعلی از پیام رأی‌گیری نهایی
         try:
-            await ctx.bot.edit_message_reply_markup(
-                chat_id=chat,
-                message_id=g.last_seating_msg_id_final,
-                reply_markup=None
-            )
-        except Exception:
-            pass
+            if hasattr(g, "last_vote_msg_id_final") and g.last_vote_msg_id_final:
+                await ctx.bot.edit_message_reply_markup(
+                    chat_id=chat,
+                    message_id=g.last_vote_msg_id_final,
+                    reply_markup=None
+                )
+                g.last_vote_msg_id_final = None
+        except Exception as e:
+            print(f"⚠️ error clearing final vote buttons: {e}")
 
         # 🔹 ارسال پیام ساده برای اطلاع
         await ctx.bot.send_message(
             chat,
-            " راوی می‌تواند دوباره صندلی‌های دفاع را انتخاب کند."
+            "↩️ دکمه‌های رأی‌گیری نهایی حذف شدند. راوی می‌تواند دوباره صندلی‌های دفاع را انتخاب کند."
         )
 
         # 🔹 پاک کردن حالت رأی‌گیری از حافظه
