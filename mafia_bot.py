@@ -627,6 +627,19 @@ def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
 
 
 
+def kb_pick_defense(g: GameState) -> InlineKeyboardMarkup:
+
+    rows = []
+    for s in sorted(g.seats.keys()):
+        label = str(s)
+        if s in g.defense_selection:
+            order = g.defense_selection.index(s) + 1
+            label = f"{s} ({order}) ✅"
+        rows.append([InlineKeyboardButton(label, callback_data=f"def_pick_{s}")])
+
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="def_confirm")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="def_back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_purchase_yesno() -> InlineKeyboardMarkup:
@@ -2199,25 +2212,74 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # ─── رأی‌گیری نهایی: انتخاب دفاع با دکمه ─────────────────────────────
     if data == "final_vote" and uid == g.god_id:
-        if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند رأی‌گیری نهایی را شروع کند!")
-            return
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
         g.voted_targets = set()
         store.save()
 
+        # آماده‌سازی مرحله انتخاب دفاع
         g.vote_type = "awaiting_defense"
-        msg = await ctx.bot.send_message(
-            chat,
-            "📢 صندلی‌های دفاع را وارد کنید (مثال: 1 3 5):",
-            reply_markup=ForceReply(selective=True)
-        )
-        g.defense_prompt_msg_id = msg.message_id
+        g.defense_selection = []  # ترتیب انتخاب ذخیره میشه
         store.save()
+
+        await set_hint_and_kb(
+            ctx, chat, g,
+            "🧍 صندلی‌های دفاع را انتخاب کنید و سپس «تأیید» را بزنید:",
+            kb_pick_defense(g)
+        )
         return
+
+    # ─── انتخاب صندلی دفاع ────────────────────────────────────────────────
+    if data.startswith("def_pick_") and uid == g.god_id and g.vote_type == "awaiting_defense":
+        try:
+            seat = int(data.split("_")[2])
+        except Exception:
+            return
+
+        # انتخاب/حذف صندلی با حفظ ترتیب
+        if seat in g.defense_selection:
+            g.defense_selection.remove(seat)
+        else:
+            g.defense_selection.append(seat)
+
+        store.save()
+        await set_hint_and_kb(
+            ctx, chat, g,
+            "🧍 صندلی‌های دفاع را انتخاب کنید و سپس «تأیید» را بزنید:",
+            kb_pick_defense(g)
+        )
+        return
+
+    # ─── تأیید انتخاب صندلی‌های دفاع ─────────────────────────────────────
+    if data == "def_confirm" and uid == g.god_id and g.vote_type == "awaiting_defense":
+        if not g.defense_selection:
+            await safe_q_answer(q, "حداقل یک صندلی را انتخاب کن!", show_alert=True)
+            return
+
+        g.defense_seats = list(g.defense_selection)
+        g.vote_type = "defense_selected"
+        store.save()
+
+        await ctx.bot.send_message(
+            chat,
+            f"🛡 صندلی‌های دفاع: {'، '.join(map(str, g.defense_seats))}"
+        )
+
+        # رفتن به مرحله رأی‌گیری نهایی (به‌ترتیب انتخاب گاد)
+        await start_vote(ctx, chat, g, "final")
+        return
+
+    # ─── بازگشت از انتخاب دفاع ───────────────────────────────────────────
+    if data == "def_back" and uid == g.god_id and g.vote_type == "awaiting_defense":
+        g.vote_type = None
+        g.defense_selection = []
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
 
     if data == "status_query" and uid == g.god_id:
         g.status_mode = True
