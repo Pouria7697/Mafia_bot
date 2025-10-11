@@ -2383,20 +2383,28 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
     if data == "back_vote_final" and uid == g.god_id:
-        g.phase = "defense_selection"
-        g.vote_type = "awaiting_defense"
-        g.voted_targets = set()  # 🧹 پاک‌سازی لیست تیک‌ها هنگام برگشت
-        store.save()
+        # 🔹 حذف دکمه‌های فعلی از پیام
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=chat,
+                message_id=g.last_seating_msg_id_final,
+                reply_markup=None
+            )
+        except Exception:
+            pass
 
-        msg = await ctx.bot.send_message(
+        # 🔹 ارسال پیام ساده برای اطلاع
+        await ctx.bot.send_message(
             chat,
-            "↩️ دوباره صندلی‌های دفاع را وارد کنید:",
-            reply_markup=ForceReply(selective=True)
+            " راوی می‌تواند دوباره صندلی‌های دفاع را انتخاب کند."
         )
-        g.defense_prompt_msg_id = msg.message_id
+
+        # 🔹 پاک کردن حالت رأی‌گیری از حافظه
+        g.phase = "defense_selection"
+        g.vote_type = None
+        g.voted_targets = set()
         store.save()
         return
-
     if data.startswith("vote_"):
         if uid != g.god_id:
             await ctx.bot.send_message(chat,"⛔ فقط راوی می‌تواند رأی بدهد!")
