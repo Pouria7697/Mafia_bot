@@ -2633,25 +2633,39 @@ async def shuffle_and_assign(
 
 async def find_free_mafia_room(ctx):
     """
-    یکی از گروه‌های مافیای خالی را پیدا می‌کند که فقط خودِ بات داخلش است.
+    از Gist می‌خونه و اولین گروهی که فقط خودِ بات داخلشه رو برمی‌گردونه.
     """
     try:
-        updates = await ctx.bot.get_updates()
-        for update in updates:
-            chat = update.message.chat if update.message else None
-            if not chat:
-                continue
-            if chat.type in ("supergroup", "group"):
-                try:
-                    admins = await ctx.bot.get_chat_administrators(chat.id)
-                    ids = [a.user.id for a in admins]
-                    if len(ids) == 1 and ctx.bot.id in ids:
-                        return chat
-                except:
+        group_ids = load_active_groups()
+        if not group_ids:
+            print("⚠️ هیچ گروه فعالی در Gist یافت نشد.")
+            return None
+
+        for gid in group_ids:
+            try:
+                chat = await ctx.bot.get_chat(gid)
+                if chat.type not in ("supergroup", "group"):
                     continue
+
+                # تعداد اعضای گروه
+                member_count = await ctx.bot.get_chat_member_count(gid)
+
+                # اگر فقط 1 نفر داخل گروه است
+                if member_count == 1:
+                    me = await ctx.bot.get_chat_member(gid, ctx.bot.id)
+                    if me and me.status in ("administrator", "member"):
+                        return chat
+
+            except Exception as e:
+
+                continue
+
+
+        return None
+
     except Exception as e:
-        print("⚠️ find_free_mafia_room error:", e)
-    return None
+        print("❌ find_free_mafia_room error:", e)
+        return None
 
 
 # ────────────────────────────────────────────────
@@ -2659,7 +2673,6 @@ async def find_free_mafia_room(ctx):
 # ────────────────────────────────────────────────
 async def create_mafia_group_and_prompt(ctx, g: GameState):
     try:
-        # مرحله ۲: پیدا کردن یکی از گروه‌های آماده
         room = await find_free_mafia_room(ctx)
         if not room:
             await ctx.bot.send_message(
@@ -2714,6 +2727,7 @@ async def cleanup_mafia_room(ctx, g: GameState):
         return
 
     try:
+        # پاک کردن اعضای انسانی
         async for member in ctx.bot.get_chat_administrators(g.mafia_chat_id):
             if not member.user.is_bot:
                 try:
@@ -2737,6 +2751,7 @@ async def cleanup_mafia_room(ctx, g: GameState):
 
     except Exception as e:
         print("❌ cleanup_mafia_room error:", e)
+
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
