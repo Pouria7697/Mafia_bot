@@ -181,7 +181,10 @@ class GameState:
         self.votes_cast = self.votes_cast or {}
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
-
+        self.mafia_chat_id = getattr(self, "mafia_chat_id", None)
+        self.mafia_invite_link = getattr(self, "mafia_invite_link", None)
+        self.mafia_link_msg_id = getattr(self, "mafia_link_msg_id", None)
+        self.selected_mafias = getattr(self, "selected_mafias", set())
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -1320,7 +1323,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 break
 
         
-        if not (g and data and (data.startswith("purchase_") or data.startswith("mafia_link_"))):
+        if not (g and data and (data.startswith("purchase_") or data.startswith("mafia_link_") or data == "mafia_link_confirm")):
+    
             return
     else:
         # 🟢 در گروه‌ها (غیر پی‌وی)
@@ -2009,6 +2013,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
 
         await announce_winner(ctx, update, g)
+        await cleanup_mafia_room(ctx, g)
         await reset_game(update=update)
         return
 
@@ -2626,15 +2631,49 @@ async def shuffle_and_assign(
     await create_mafia_group_and_prompt(ctx, g)
     return uid_to_role
 
+async def find_free_mafia_room(ctx):
+    """
+    یکی از گروه‌های مافیای خالی را پیدا می‌کند که فقط خودِ بات داخلش است.
+    """
+    try:
+        updates = await ctx.bot.get_updates()
+        for update in updates:
+            chat = update.message.chat if update.message else None
+            if not chat:
+                continue
+            if chat.type in ("supergroup", "group"):
+                try:
+                    admins = await ctx.bot.get_chat_administrators(chat.id)
+                    ids = [a.user.id for a in admins]
+                    if len(ids) == 1 and ctx.bot.id in ids:
+                        return chat
+                except:
+                    continue
+    except Exception as e:
+        print("⚠️ find_free_mafia_room error:", e)
+    return None
 
+
+# ────────────────────────────────────────────────
+# 🔹 ساخت لینک و ارسال آن به پی‌وی گاد
+# ────────────────────────────────────────────────
 async def create_mafia_group_and_prompt(ctx, g: GameState):
     try:
-        # ساخت گروه جدید
-        title = f"مافیاشو #{random.randint(1000,9999)}"
-        mafia_chat = await ctx.bot.create_chat(title, [g.god_id])
-        invite = await ctx.bot.create_chat_invite_link(mafia_chat.id)
+        # مرحله ۲: پیدا کردن یکی از گروه‌های آماده
+        room = await find_free_mafia_room(ctx)
+        if not room:
+            await ctx.bot.send_message(
+                g.god_id,
+                "⚠️ هیچ اتاق مافیای خالی پیدا نشد! لطفاً یکی بساز و بات را ادمین کن."
+            )
+            return
 
-        g.mafia_chat_id = mafia_chat.id
+        # ساخت لینک جدید
+        invite = await ctx.bot.create_chat_invite_link(
+            room.id,
+            name=f"Mafia Game {random.randint(1000,9999)}"
+        )
+        g.mafia_chat_id = room.id
         g.mafia_invite_link = invite.invite_link
         store.save()
 
@@ -2655,7 +2694,8 @@ async def create_mafia_group_and_prompt(ctx, g: GameState):
 
         msg = await ctx.bot.send_message(
             g.god_id,
-            "🔗 لینک گروه ساخته شد!\nبرای کدام صندلی‌ها ارسال شود؟",
+            f"🔗 لینک گروه مافیا ساخته شد:\n{invite.invite_link}\n"
+            "برای کدام صندلی‌ها ارسال شود؟",
             reply_markup=kb
         )
         g.mafia_link_msg_id = msg.message_id
@@ -2665,6 +2705,38 @@ async def create_mafia_group_and_prompt(ctx, g: GameState):
     except Exception as e:
         print("❌ create_mafia_group_and_prompt error:", e)
 
+
+# ────────────────────────────────────────────────
+# 🔹 پاک‌سازی کامل گروه مافیا پس از پایان بازی
+# ────────────────────────────────────────────────
+async def cleanup_mafia_room(ctx, g: GameState):
+    if not getattr(g, "mafia_chat_id", None):
+        return
+
+    try:
+        async for member in ctx.bot.get_chat_administrators(g.mafia_chat_id):
+            if not member.user.is_bot:
+                try:
+                    await ctx.bot.ban_chat_member(g.mafia_chat_id, member.user.id)
+                    await ctx.bot.unban_chat_member(g.mafia_chat_id, member.user.id)
+                except Exception as e:
+                    print("⚠️ cleanup error:", e)
+
+        # ریست لینک دعوت
+        if getattr(g, "mafia_invite_link", None):
+            try:
+                await ctx.bot.revoke_chat_invite_link(g.mafia_chat_id, g.mafia_invite_link)
+            except Exception:
+                pass
+
+        # پاک‌سازی اطلاعات
+        g.mafia_chat_id = None
+        g.mafia_invite_link = None
+        store.save()
+        print("✅ اتاق مافیا پاک‌سازی شد")
+
+    except Exception as e:
+        print("❌ cleanup_mafia_room error:", e)
 
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
