@@ -136,6 +136,8 @@ class GameState:
     warning_mode: bool = False
     pending_warnings: dict[int, int] | None = None
     remaining_cards: dict[str, list[str]] = None
+    purchased_player: int | None = None
+    purchase_pm_msg_id: int | None = None
 
 
     def __post_init__(self):
@@ -177,9 +179,9 @@ class GameState:
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
+        self.purchased_player = getattr(self, "purchased_player", None)
+        self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
 
-
-  
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -569,6 +571,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
+        [InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu")],
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
     ])
 
@@ -649,6 +652,14 @@ def kb_purchase_yesno() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")]
     ])
 
+def kb_pick_purchase(alive_seats, selected=None):
+    rows = []
+    for s in alive_seats:
+        label = f"{s} ✅" if selected == s else str(s)
+        rows.append([InlineKeyboardButton(label, callback_data=f"purchase_pick_{s}")])
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="purchase_confirm")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="purchase_back")])
+    return InlineKeyboardMarkup(rows)
 
 def kb_pick_single_seat(alive_seats: list[int], selected: int | None,
                         confirm_cb: str, back_cb: str, title: str = "انتخاب صندلی") -> InlineKeyboardMarkup:
@@ -1160,7 +1171,7 @@ async def announce_winner(ctx, update, g: GameState):
         role = g.assigned_roles.get(seat, "—")
 
         # انتخاب مارکر بر اساس نقش
-        if getattr(g, "purchased_seat", None) == seat:
+        if getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
             role_display = f"{role} / مافیا"
             marker = "◾️"  # خریداری شده → مافیا
         elif role in mafia_roles:
@@ -1727,6 +1738,95 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
  
 
 
+    # ─── خریداری – شروع در پی‌وی گاد ─────────────────────────────
+    if data == "purchase_menu" and uid == g.god_id:
+        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        g.purchased_player = None
+        store.save()
+
+        kb = kb_pick_purchase(alive, None)
+
+        try:
+            msg = await ctx.bot.send_message(
+                g.god_id,
+                "🛍 بازیکنی را که خریداری شده انتخاب کن:",
+                reply_markup=kb
+            )
+            g.purchase_pm_msg_id = msg.message_id
+            store.save()
+        except Exception:
+            await ctx.bot.send_message(
+                chat,
+                "⚠️ بات نمی‌تواند به پی‌وی راوی پیام بفرستد. ابتدا بات را استارت کن."
+            )
+        return
+    # ─── انتخاب بازیکن خریداری‌شده (در پی‌وی گاد) ───────────────
+    if data.startswith("purchase_pick_") and uid == g.god_id:
+        try:
+            s = int(data.split("_")[2])
+        except:
+            return
+
+        alive = [x for x in sorted(g.seats) if x not in g.striked]
+        if s not in alive:
+            await ctx.bot.send_message(uid, "⚠️ بازیکن انتخاب‌شده زنده نیست.")
+            return
+
+        g.purchased_player = s
+        store.save()
+
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=uid,
+                message_id=g.purchase_pm_msg_id,
+                reply_markup=kb_pick_purchase(alive, s)
+            )
+        except Exception:
+            pass
+        return
+
+    # ─── تأیید خریداری ─────────────────────────────────────────
+    if data == "purchase_confirm" and uid == g.god_id:
+        if not g.purchased_player:
+            await ctx.bot.send_message(uid, "⚠️ هنوز بازیکنی انتخاب نشده است.")
+            return
+
+        seat = g.purchased_player
+        uid_target, name_target = g.seats[seat]
+
+        try:
+            await ctx.bot.send_message(uid_target, "💰 شما خریداری شده‌اید!")
+            await ctx.bot.send_message(uid, f"✅ {seat}. {name_target} خریداری شد.")
+        except Exception:
+            await ctx.bot.send_message(
+                uid,
+                f"⚠️ {seat}. {name_target} هنوز بات را استارت نکرده یا پیام دریافت نمی‌کند."
+            )
+
+        # پاک کردن پیام انتخاب در پی‌وی گاد
+        try:
+            if g.purchase_pm_msg_id:
+                await ctx.bot.delete_message(uid, g.purchase_pm_msg_id)
+                g.purchase_pm_msg_id = None
+        except Exception:
+            pass
+
+        store.save()
+        return
+
+    # ─── بازگشت از خریداری ─────────────────────────────────────
+    if data == "purchase_back" and uid == g.god_id:
+        try:
+            if g.purchase_pm_msg_id:
+                await ctx.bot.delete_message(uid, g.purchase_pm_msg_id)
+                g.purchase_pm_msg_id = None
+        except Exception:
+            pass
+
+        g.purchased_player = None
+        store.save()
+        await ctx.bot.send_message(uid, "↩️ عملیات خریداری لغو شد.")
+        return
 
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
     if data == "end_game" and uid == g.god_id:
@@ -1756,7 +1856,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
 
-
     if data in {
         "winner_city", "winner_mafia", "clean_city", "clean_mafia",
         "winner_city_chaos", "winner_mafia_chaos", "winner_indep"   # 🔹 مستقل اضافه شد
@@ -1784,107 +1883,22 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
                 [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
             ])
-            await set_hint_and_kb(ctx, chat, g, "نتیجه را بررسی کنید و «تأیید» را بزنید.", kb)
-            return
-
-        # شهر/مافیا (معمولی یا کی‌آس) → اول بپرس «خریداری؟»
-        await set_hint_and_kb(ctx, chat, g, "آیا بازیکنی خریداری شده است؟", kb_purchase_yesno())
-        return
-
-
-
-
-
-    if data == "purchased_yes" and g.awaiting_winner:
-        g.awaiting_purchase_number = True
-        alive = [s for s in sorted(g.seats) if s not in g.striked]
-        kb = kb_pick_single_seat(alive_seats=alive,
-                                 selected=g.purchased_seat,
-                                 confirm_cb="purchased_confirm",
-                                 back_cb="back_to_winner_select")
-        await set_hint_and_kb(ctx, chat, g,"شماره صندلی بازیکنِ خریداری‌شده را انتخاب کنید و سپس «تأیید» را بزنید.", kb)
-        return
-
-    if data == "purchased_no" and g.awaiting_winner:
-        g.purchased_seat = None
-        store.save()
-
-        if not g.chaos_mode:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
-                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
-            ])
             await set_hint_and_kb(
                 ctx, chat, g,
-                "🔒 برنده مشخص شد. اگر مطمئن هستید «تأیید» را بزنید.",
+                "نتیجه را بررسی کنید و «تأیید» را بزنید.",
                 kb
             )
             return
 
-        # کی‌آس → انتخاب ۳ نفر زنده
-        alive = [s for s in sorted(g.seats) if s not in g.striked]
-        g.chaos_selected = set()
-        kb = kb_pick_multi_seats(
-            alive, g.chaos_selected, 3,
-            confirm_cb="chaos_confirm",
-            back_cb="back_to_winner_select"
-        )
+
+    if not g.chaos_mode:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+            [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+        ])
         await set_hint_and_kb(
             ctx, chat, g,
-            "🌀 حالت کی‌آس: ۳ نفر از بازیکنان زنده را انتخاب کنید و سپس «تأیید» را بزنید.",
-            kb
-        )
-        return
-
-
-    if data.startswith("pick_single_") and g.awaiting_winner:
-        try:
-            s = int(data.split("_")[2])
-        except:
-            return
-
-        if s in g.seats and s not in g.striked:
-            g.purchased_seat = s
-            store.save()
-
-        alive = [x for x in sorted(g.seats) if x not in g.striked]
-        kb = kb_pick_single_seat(
-            alive, g.purchased_seat,
-            confirm_cb="purchased_confirm",
-            back_cb="back_to_winner_select"
-        )
-        await set_hint_and_kb(
-            ctx, chat, g,
-            "🛒 صندلی خریداری‌شده را انتخاب کنید و سپس «تأیید» را بزنید.",
-            kb
-        )
-        return
-
-
-    if data == "purchased_confirm" and g.awaiting_winner:
-        if not g.chaos_mode:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
-                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
-            ])
-            await set_hint_and_kb(
-                ctx, chat, g,
-                "🔒 برنده و صندلی خریداری‌شده ثبت شد. برای نهایی‌سازی «تأیید» را بزنید.",
-                kb
-            )
-            return
-
-        # کی‌آس بعد از خریداری
-        alive = [s for s in sorted(g.seats) if s not in g.striked]
-        g.chaos_selected = set()
-        kb = kb_pick_multi_seats(
-            alive, g.chaos_selected, 3,
-            confirm_cb="chaos_confirm",
-            back_cb="back_to_winner_select"
-        )
-        await set_hint_and_kb(
-            ctx, chat, g,
-            "🌀 حالت کی‌آس: ۳ نفر از بازیکنان زنده را انتخاب کنید و سپس «تأیید» را بزنید.",
+            "🔒 برنده مشخص شد. اگر مطمئن هستید «تأیید» را بزنید.",
             kb
         )
         return
