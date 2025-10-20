@@ -1308,19 +1308,29 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         q = update.callback_query
         data = q.data if q else None
-        chat = update.effective_chat.id
+        uid = q.from_user.id
+
+        # 🟢 پیدا کردن گیمی که راوی‌اش همین uid است
+        g = None
+        chat = None
+        for chat_id, game in store.games.items():
+            if game.god_id == uid and game.phase in ("playing", "awaiting_winner"):
+                g = game
+                chat = chat_id
+                break
+
+        # ❌ اگر بازی پیدا نشد یا دکمه مربوط به خریداری نیست → خروج
+        if not (g and data and data.startswith("purchase_")):
+            return
+    else:
+        # 🟢 در گروه‌ها (غیر پی‌وی)
+        q = update.callback_query
+        data = q.data
+        chat = q.message.chat.id
+        uid = q.from_user.id
         g = gs(chat)
 
-        # فقط اجازه بده اگر گاد خودش در حال خریداری است
-        if not (g and g.god_id == q.from_user.id and data and data.startswith("purchase_")):
-            return
-
-    q = update.callback_query
     await safe_q_answer(q)
-    data = q.data
-    chat = q.message.chat.id
-    uid = q.from_user.id
-    g = gs(chat)
 
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
