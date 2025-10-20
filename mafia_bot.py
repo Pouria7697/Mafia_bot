@@ -1304,15 +1304,23 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
 # ─────────────────────────────────────────────────────────────
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
     if update.effective_chat.type == "private":
-        return
+        q = update.callback_query
+        data = q.data if q else None
+        chat = update.effective_chat.id
+        g = gs(chat)
+
+        # فقط اجازه بده اگر گاد خودش در حال خریداری است
+        if not (g and g.god_id == q.from_user.id and data and data.startswith("purchase_")):
+            return
+
     q = update.callback_query
     await safe_q_answer(q)
     data = q.data
     chat = q.message.chat.id
     uid = q.from_user.id
     g = gs(chat)
-
 
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
@@ -1855,10 +1863,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
-
     if data in {
         "winner_city", "winner_mafia", "clean_city", "clean_mafia",
-        "winner_city_chaos", "winner_mafia_chaos", "winner_indep"   # 🔹 مستقل اضافه شد
+        "winner_city_chaos", "winner_mafia_chaos", "winner_indep"
     } and g.awaiting_winner:
         g.temp_winner = data
         g.chaos_mode = data.endswith("_chaos")
@@ -1890,6 +1897,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # حالت معمولی (بدون chaos)
         if not g.chaos_mode:
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
@@ -1901,6 +1909,24 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 kb
             )
             return
+
+        # ────────────────────────────────────────────────
+        # 🔹 حالت کی‌آس: انتخاب ۳ بازیکن زنده
+        # ────────────────────────────────────────────────
+        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        g.chaos_selected = set()
+        kb = kb_pick_multi_seats(
+            alive, g.chaos_selected, 3,
+            confirm_cb="chaos_confirm",
+            back_cb="back_to_winner_select"
+        )
+        await set_hint_and_kb(
+            ctx, chat, g,
+            "🌀 حالت کی‌آس: ۳ نفر از بازیکنان زنده را انتخاب کنید و سپس «تأیید» را بزنید.",
+            kb
+        )
+        return
+
 
     if data.startswith("toggle_multi_") and g.awaiting_winner and g.chaos_mode:
         try:
