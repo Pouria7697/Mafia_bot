@@ -2631,15 +2631,18 @@ async def shuffle_and_assign(
     await create_mafia_group_and_prompt(ctx, g)
     return uid_to_role
 
-async def find_free_mafia_room(ctx):
+async def find_free_mafia_room(ctx, g: GameState):
     """
-    از Gist می‌خونه و اولین گروهی که فقط خودِ بات داخلشه رو برمی‌گردونه.
+    از Gist می‌خونه و اولین گروهی که فقط خود بات داخلشه رو برمی‌گردونه.
+    پیام وضعیت هم برای گاد ارسال میشه.
     """
     try:
         group_ids = load_active_groups()
         if not group_ids:
-            print("⚠️ هیچ گروه فعالی در Gist یافت نشد.")
+            await ctx.bot.send_message(g.god_id, "⚠️ هیچ گروه فعالی در Gist یافت نشد.")
             return None
+
+        await ctx.bot.send_message(g.god_id, f"🔍 بررسی {len(group_ids)} گروه برای یافتن اتاق خالی...")
 
         for gid in group_ids:
             try:
@@ -2647,24 +2650,33 @@ async def find_free_mafia_room(ctx):
                 if chat.type not in ("supergroup", "group"):
                     continue
 
-                # تعداد اعضای گروه
-                member_count = await ctx.bot.get_chat_member_count(gid)
+                # بررسی اعضا
+                count = await ctx.bot.get_chat_member_count(gid)
+                me = await ctx.bot.get_chat_member(gid, ctx.bot.id)
 
-                # اگر فقط 1 نفر داخل گروه است
-                if member_count == 1:
-                    me = await ctx.bot.get_chat_member(gid, ctx.bot.id)
-                    if me and me.status in ("administrator", "member"):
-                        return chat
+                if count == 1 and me and me.status in ("administrator", "member"):
+                    await ctx.bot.send_message(
+                        g.god_id,
+                        f"✅ گروه خالی پیدا شد: <code>{gid}</code>\nنام گروه: {chat.title}",
+                        parse_mode="HTML"
+                    )
+                    return chat
+                else:
+                    await ctx.bot.send_message(
+                        g.god_id,
+                        f"🚫 گروه <b>{chat.title}</b> ({gid}) خالی نیست — {count} عضو دارد.",
+                        parse_mode="HTML"
+                    )
 
             except Exception as e:
-
+                await ctx.bot.send_message(g.god_id, f"⚠️ خطا در بررسی گروه {gid}: {e}")
                 continue
 
-
+        await ctx.bot.send_message(g.god_id, "⚠️ هیچ گروه مافیای خالی پیدا نشد.")
         return None
 
     except Exception as e:
-        print("❌ find_free_mafia_room error:", e)
+        await ctx.bot.send_message(g.god_id, f"❌ find_free_mafia_room error: {e}")
         return None
 
 
@@ -2673,7 +2685,7 @@ async def find_free_mafia_room(ctx):
 # ────────────────────────────────────────────────
 async def create_mafia_group_and_prompt(ctx, g: GameState):
     try:
-        room = await find_free_mafia_room(ctx)
+        room = await find_free_mafia_room(ctx, g)
         if not room:
             await ctx.bot.send_message(
                 g.god_id,
