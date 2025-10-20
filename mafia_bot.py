@@ -1890,19 +1890,17 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-
-    if not g.chaos_mode:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
-            [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
-        ])
-        await set_hint_and_kb(
-            ctx, chat, g,
-            "🔒 برنده مشخص شد. اگر مطمئن هستید «تأیید» را بزنید.",
-            kb
-        )
-        return
-
+        if not g.chaos_mode:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+            await set_hint_and_kb(
+                ctx, chat, g,
+                "🔒 برنده مشخص شد. اگر مطمئن هستید «تأیید» را بزنید.",
+                kb
+            )
+            return
 
     if data.startswith("toggle_multi_") and g.awaiting_winner and g.chaos_mode:
         try:
