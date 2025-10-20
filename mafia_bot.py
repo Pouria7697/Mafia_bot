@@ -1319,8 +1319,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 chat = chat_id
                 break
 
-        # ❌ اگر بازی پیدا نشد یا دکمه مربوط به خریداری نیست → خروج
-        if not (g and data and data.startswith("purchase_")):
+        
+        if not (g and data and (data.startswith("purchase_") or data.startswith("mafia_link_"))):
             return
     else:
         # 🟢 در گروه‌ها (غیر پی‌وی)
@@ -2013,6 +2013,50 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    if data.startswith("mafia_link_") and uid == g.god_id:
+        try:
+            s = int(data.split("_")[2])
+        except:
+            return
+        if s in g.selected_mafias:
+            g.selected_mafias.remove(s)
+        else:
+            g.selected_mafias.add(s)
+        store.save()
+
+        mafia_roles = load_mafia_roles()
+        mafia_seats = [(x, g.assigned_roles[x]) for x in g.seats if g.assigned_roles[x] in mafia_roles]
+        rows = []
+        for seat, role in mafia_seats:
+            label = f"{seat}. {role} ✅" if seat in g.selected_mafias else f"{seat}. {role}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"mafia_link_{seat}")])
+        rows.append([InlineKeyboardButton("✅ تأیید ارسال لینک", callback_data="mafia_link_confirm")])
+        await ctx.bot.edit_message_reply_markup(
+            chat_id=uid, message_id=g.mafia_link_msg_id, reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return
+
+    if data == "mafia_link_confirm" and uid == g.god_id:
+        failed = []
+        for seat in g.selected_mafias:
+            uid_target, name_target = g.seats[seat]
+            try:
+                await ctx.bot.send_message(uid_target, f"🔗 لینک گروه مافیا:\n{g.mafia_invite_link}")
+            except:
+                failed.append(f"{seat}. {name_target}")
+
+        try:
+            await ctx.bot.delete_message(uid, g.mafia_link_msg_id)
+        except:
+            pass
+
+        if failed:
+            await ctx.bot.send_message(uid, "⚠️ ارسال نشد برای:\n" + "\n".join(failed))
+        else:
+            await ctx.bot.send_message(uid, "✅ لینک با موفقیت ارسال شد!")
+        g.selected_mafias = set()
+        store.save()
+        return
 
     # ─── اگر بازی پایان یافته، دیگر ادامه نده ────────────────────
     if g.phase == "ended":
@@ -2579,10 +2623,47 @@ async def shuffle_and_assign(
     g.phase = "playing"
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
-
+    await create_mafia_group_and_prompt(ctx, g)
     return uid_to_role
 
 
+async def create_mafia_group_and_prompt(ctx, g: GameState):
+    try:
+        # ساخت گروه جدید
+        title = f"مافیاشو #{random.randint(1000,9999)}"
+        mafia_chat = await ctx.bot.create_chat(title, [g.god_id])
+        invite = await ctx.bot.create_chat_invite_link(mafia_chat.id)
+
+        g.mafia_chat_id = mafia_chat.id
+        g.mafia_invite_link = invite.invite_link
+        store.save()
+
+        # پیدا کردن صندلی‌های مافیا
+        mafia_roles = load_mafia_roles()
+        mafia_seats = [
+            (s, g.assigned_roles[s], g.seats[s])
+            for s in g.seats
+            if g.assigned_roles[s] in mafia_roles
+        ]
+
+        # ساخت دکمه‌ها
+        rows = []
+        for s, role, (uid, name) in mafia_seats:
+            rows.append([InlineKeyboardButton(f"{s}. {role}", callback_data=f"mafia_link_{s}")])
+        rows.append([InlineKeyboardButton("✅ تأیید ارسال لینک", callback_data="mafia_link_confirm")])
+        kb = InlineKeyboardMarkup(rows)
+
+        msg = await ctx.bot.send_message(
+            g.god_id,
+            "🔗 لینک گروه ساخته شد!\nبرای کدام صندلی‌ها ارسال شود؟",
+            reply_markup=kb
+        )
+        g.mafia_link_msg_id = msg.message_id
+        g.selected_mafias = set()
+        store.save()
+
+    except Exception as e:
+        print("❌ create_mafia_group_and_prompt error:", e)
 
 
 
