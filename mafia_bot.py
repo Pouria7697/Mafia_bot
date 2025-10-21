@@ -2739,32 +2739,62 @@ async def cleanup_mafia_room(ctx, g: GameState):
         return
 
     try:
-        # پاک کردن اعضای انسانی
-        async for member in ctx.bot.get_chat_administrators(g.mafia_chat_id):
+        chat_id = g.mafia_chat_id
+
+        # ✅ گرفتن همه اعضا (نه فقط ادمین‌ها)
+        members = await ctx.bot.get_chat_administrators(chat_id)
+        for member in members:
             if not member.user.is_bot:
                 try:
-                    await ctx.bot.ban_chat_member(g.mafia_chat_id, member.user.id)
-                    await ctx.bot.unban_chat_member(g.mafia_chat_id, member.user.id)
+                    await ctx.bot.ban_chat_member(chat_id, member.user.id)
+                    await ctx.bot.unban_chat_member(chat_id, member.user.id)
                 except Exception as e:
                     print("⚠️ cleanup error:", e)
 
-        # ریست لینک دعوت
+        # ✅ پاک‌کردن پیام‌ها به‌صورت ۲۰تایی و async در پس‌زمینه
+        async def _delete_messages():
+            try:
+                # پیمایش آخرین ~1000 پیام (یا هرچقدر موجود است)
+                offset = 0
+                limit = 100
+                while True:
+                    msgs = await ctx.bot.get_chat_history(chat_id, offset_id=offset, limit=limit)
+                    if not msgs:
+                        break
+
+                    # حذف دسته‌ای (batch of 20)
+                    for i in range(0, len(msgs), 20):
+                        batch = msgs[i:i + 20]
+                        ids = [m.message_id for m in batch]
+                        try:
+                            await ctx.bot.delete_messages(chat_id, ids)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.3)
+
+                    offset = msgs[-1].message_id
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"⚠️ cleanup messages error: {e}")
+
+        # 🧵 اجرا در پس‌زمینه بدون بلاک کردن عملکرد اصلی بات
+        asyncio.create_task(_delete_messages())
+
+        # 🔁 ریست لینک دعوت
         if getattr(g, "mafia_invite_link", None):
             try:
-                await ctx.bot.revoke_chat_invite_link(g.mafia_chat_id, g.mafia_invite_link)
+                await ctx.bot.revoke_chat_invite_link(chat_id, g.mafia_invite_link)
             except Exception:
                 pass
 
-        # پاک‌سازی اطلاعات
+        # 🧹 پاک‌سازی اطلاعات
         g.mafia_chat_id = None
         g.mafia_invite_link = None
         store.save()
-        print("✅ اتاق مافیا پاک‌سازی شد")
+        print("✅ اتاق مافیا پاک‌سازی شد (در حال حذف پیام‌ها در پس‌زمینه)")
 
     except Exception as e:
         print("❌ cleanup_mafia_room error:", e)
-
-
 
 async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
