@@ -181,7 +181,6 @@ class GameState:
         self.votes_cast = self.votes_cast or {}
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
-        self.allow_publish = False
 
 
 class Store:
@@ -767,29 +766,6 @@ async def publish_seating(
     async with lock:
         await asyncio.sleep(DEBOUNCE_EDIT_SEC)
 
-        if not getattr(g, "allow_publish", False):
-            print(f"[!] unauthorized publish_seating prevented in chat {chat_id}")
-            try:
-                await _retry(ctx.bot.send_message(
-                    chat_id,
-                    "⚠️ بات سعی کرد لیست جدید بسازد اما این کار مجاز نیست. احتمالاً به خاطر هنگ یا اجرای همزمان است."
-                ))
-            except Exception:
-                pass
-            return
-
-        # 🚨 اگر صندلی‌ها خالی هستند یعنی حالت غیرعادی یا هنگ
-        if not g.seats:
-            print(f"[!] Empty seat list detected in publish_seating for chat {chat_id}")
-            try:
-                await _retry(ctx.bot.send_message(
-                    chat_id,
-                    "⚠️ خطا: لیست بازیکنان خالی است (احتمالاً هنگ موقت). لطفاً /list یا /newgame را بزنید."
-                ))
-            except Exception:
-                pass
-            return
-
         if not g.max_seats or g.max_seats <= 0:
             await _retry(ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند."))
             return
@@ -1147,6 +1123,12 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.voted_targets.add(target_seat)
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
+
+
+
+
+
+
 
 
 
@@ -2594,9 +2576,7 @@ async def shuffle_and_assign(
     # 7) به‌روزرسانی فاز و UI
     g.phase = "playing"
     store.save()
-    g.allow_publish = True
     await publish_seating(ctx, chat_id, g, mode=CTRL)
-    g.allow_publish = False
 
     return uid_to_role
 
@@ -2867,10 +2847,7 @@ async def newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     store.save()
 
     # انتشار لیست اولیه
-
-    g.allow_publish = True
     await publish_seating(ctx, chat, g, mode=REG)
-    g.allow_publish = False
     # اگر سناریو پیدا نشد، انتخاب سناریو را باز کن
     if g.awaiting_scenario:
         g.from_startgame = True
