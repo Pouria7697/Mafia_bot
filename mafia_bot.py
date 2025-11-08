@@ -631,19 +631,27 @@ def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
 
 
 def kb_pick_defense(g: GameState) -> InlineKeyboardMarkup:
-
     rows = []
-    for s in sorted(g.seats.keys()):
-        label = str(s)
+
+    # فقط بازیکنان زنده (یعنی کسانی که در g.striked نیستن)
+    alive_seats = [s for s in sorted(g.seats.keys()) if s not in g.striked]
+
+    for s in alive_seats:
+        uid, name = g.seats[s]
+        label = f"{s}. {name}"  # شماره + نام بازیکن
+
+        # اگر بازیکن انتخاب شده، ترتیب انتخاب را هم نشان بده
         if s in g.defense_selection:
             order = g.defense_selection.index(s) + 1
-            label = f"{s} ({order}) ✅"
+            label = f"{s}. {name} ({order}) ✅"
+
         rows.append([InlineKeyboardButton(label, callback_data=f"def_pick_{s}")])
 
+    # دکمه‌های پایانی
     rows.append([InlineKeyboardButton("✅ تأیید", callback_data="def_confirm")])
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="def_back")])
-    return InlineKeyboardMarkup(rows)
 
+    return InlineKeyboardMarkup(rows)
 
 def kb_purchase_yesno() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -2214,6 +2222,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "⚠️ هیچ بازیکنی برای رأی‌گیری وجود ندارد.")
             return
 
+        poll_ids = []
+
+        # --- مرحله ۱: ارسال همه pollها پشت‌سر‌هم ---
         for idx, chunk in enumerate(chunks, start=1):
             # افزودن گزینه‌ی نتایج برای هر poll
             chunk.append(f"📊 دیدن نتایج ({idx}/{total_polls})")
@@ -2226,21 +2237,25 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     is_anonymous=False,
                     allows_multiple_answers=True
                 )
+                poll_ids.append(poll_msg.message_id)
                 g.last_poll_ids = getattr(g, "last_poll_ids", []) + [poll_msg.message_id]
                 store.save()
-
-                await asyncio.sleep(11)  # بزار مردم رأی بدن
-
-                try:
-                    await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
-                except Exception as e:
-                    print(f"⚠️ stop_poll error (part {idx}):", e)
 
             except Exception as e:
                 print(f"❌ poll send error (part {idx}):", e)
 
-        await ctx.bot.send_message(chat, f"✅ {total_polls} رای‌گیری بسته شد.")
+        # --- مرحله ۲: مکث برای رأی دادن، سپس بستن همه pollها ---
+        await asyncio.sleep(10)
+
+        for idx, poll_id in enumerate(poll_ids, start=1):
+            try:
+                await ctx.bot.stop_poll(chat_id=chat, message_id=poll_id)
+            except Exception as e:
+                print(f"⚠️ stop_poll error (part {idx}):", e)
+
+        await ctx.bot.send_message(chat, f"✅ {total_polls} رأی‌گیری بسته شد.")
         return
+
 
     if data == "back_to_controls" and uid == g.god_id:
         await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
