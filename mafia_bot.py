@@ -3030,7 +3030,23 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_scenarios_to_gist(store.scenarios)
         await update.message.reply_text(f"🗑️ سناریوی «{name}» با موفقیت حذف شد.")
 
- 
+async def play_alarm_sound(ctx, chat_id: int):
+    try:
+        msg = await ctx.bot.send_voice(
+            chat_id,
+            voice="https://files.catbox.moe/4f8tem.ogg"
+        )
+
+        await ctx.bot.send_message(
+            chat_id,
+            "▶️ پخش",
+            reply_to_message_id=msg.message_id
+        )
+
+    except Exception as e:
+        print("⚠️ play_alarm_sound error:", e)
+
+
 async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     uid = update.effective_user.id
@@ -3059,7 +3075,9 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def run_timer(ctx, chat: int, seconds: int):
     try:
         await asyncio.sleep(seconds)
-        await ctx.bot.send_message(chat, "⏰ تایم تمام")
+        await ctx.bot.send_message(chat, "⏰ تایم تمام شد")
+        await play_alarm_sound(ctx, chat)
+
     except Exception as e:
         print("⚠️ run_timer error:", e)
 
