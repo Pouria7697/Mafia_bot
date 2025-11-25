@@ -3039,7 +3039,7 @@ async def play_alarm_sound(ctx, chat_id: int):
 
         await ctx.bot.send_message(
             chat_id,
-            "▶️ پخش",
+            "پخش",
             reply_to_message_id=msg.message_id
         )
 
