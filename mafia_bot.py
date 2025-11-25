@@ -3076,7 +3076,7 @@ async def run_timer(ctx, chat: int, seconds: int):
     try:
         await asyncio.sleep(seconds)
         await ctx.bot.send_message(chat, "⏰ تایم تمام شد")
-        await play_alarm_sound(ctx, chat)
+#       await play_alarm_sound(ctx, chat)
 
     except Exception as e:
         print("⚠️ run_timer error:", e)
