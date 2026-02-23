@@ -3334,7 +3334,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         # await start_vote(ctx, chat_id, g, "final")
         # return
 
-    if g.phase == "idle" and text.strip() == "کنسل":
+    if g.phase == "idle" and (not getattr(g, "awaiting_shuffle_decision", False)) and text.strip() == "کنسل":
         for seat, (player_uid, _) in list(g.seats.items()):
             if player_uid == uid:
                 del g.seats[seat]
