@@ -1407,6 +1407,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── لغو ثبت‌نام توسط خودِ بازیکن ───────────────────────────
     if data == "cancel_self":
+        if getattr(g, "awaiting_shuffle_decision", False):
+            await ctx.bot.send_message(chat, "⛔ بازی در حال شروع است؛ لغو ثبت‌نام فعلاً غیرفعال است.")
+            return
         for seat, (player_uid, _) in g.seats.items():
             if player_uid == uid:
                 del g.seats[seat]
@@ -2810,7 +2813,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    if g.phase == "idle" and text.strip() == "کنسل":
+    if g.phase == "idle" and (not getattr(g, "awaiting_shuffle_decision", False)) and text.strip() == "کنسل":
         for seat, (player_uid, _) in list(g.seats.items()):
             if player_uid == uid:
                 del g.seats[seat]
