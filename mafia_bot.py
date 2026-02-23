@@ -567,15 +567,24 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
 
     # بعد بقیه دکمه‌ها
     rows.extend([
-        [InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode")],
-        [InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out")],
-        [InlineKeyboardButton("📊 استعلام وضعیت (اتومات)", callback_data="status_auto")],
-        [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
-        [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
-        [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
-        [InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu")],
+        [
+            InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode"),
+            InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out"),
+        ],
+        [
+            InlineKeyboardButton("📊 وضعیت (اتومات)", callback_data="status_auto"),
+            InlineKeyboardButton("📊 وضعیت (دستی)", callback_data="status_query"),
+        ],
+        [
+            InlineKeyboardButton("🗳 رأی اولیه", callback_data="init_vote"),
+            InlineKeyboardButton("🗳 رأی نهایی", callback_data="final_vote"),
+        ],
+        [
+            InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu"),
+            InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm"),
+        ],
+        # Keep "end game" alone (safer)
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
-        [InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm")]
     ])
 
     return InlineKeyboardMarkup(rows)
