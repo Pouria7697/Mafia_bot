@@ -136,8 +136,6 @@ class GameState:
     warning_mode: bool = False
     pending_warnings: dict[int, int] | None = None
     remaining_cards: dict[str, list[str]] = None
-    purchased_player: int | None = None
-    purchase_pm_msg_id: int | None = None
 
 
     def __post_init__(self):
@@ -179,11 +177,9 @@ class GameState:
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
-        self.purchased_player = getattr(self, "purchased_player", None)
-        self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
-        self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
-        self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
+
+  
 
 class Store:
     def __init__(self, path=PERSIST_FILE):
@@ -573,9 +569,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 استعلام وضعیت (دستی)", callback_data="status_query")],
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
-        [InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu")],
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
-        [InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm")]
     ])
 
     return InlineKeyboardMarkup(rows)
@@ -634,27 +628,19 @@ def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
 
 
 def kb_pick_defense(g: GameState) -> InlineKeyboardMarkup:
+
     rows = []
-
-    # فقط بازیکنان زنده (یعنی کسانی که در g.striked نیستن)
-    alive_seats = [s for s in sorted(g.seats.keys()) if s not in g.striked]
-
-    for s in alive_seats:
-        uid, name = g.seats[s]
-        label = f"{s}. {name}"  # شماره + نام بازیکن
-
-        # اگر بازیکن انتخاب شده، ترتیب انتخاب را هم نشان بده
+    for s in sorted(g.seats.keys()):
+        label = str(s)
         if s in g.defense_selection:
             order = g.defense_selection.index(s) + 1
-            label = f"{s}. {name} ({order}) ✅"
-
+            label = f"{s} ({order}) ✅"
         rows.append([InlineKeyboardButton(label, callback_data=f"def_pick_{s}")])
 
-    # دکمه‌های پایانی
     rows.append([InlineKeyboardButton("✅ تأیید", callback_data="def_confirm")])
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="def_back")])
-
     return InlineKeyboardMarkup(rows)
+
 
 def kb_purchase_yesno() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -663,14 +649,6 @@ def kb_purchase_yesno() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")]
     ])
 
-def kb_pick_purchase(alive_seats, selected=None):
-    rows = []
-    for s in alive_seats:
-        label = f"{s} ✅" if selected == s else str(s)
-        rows.append([InlineKeyboardButton(label, callback_data=f"purchase_pick_{s}")])
-    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="purchase_confirm")])
-    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="purchase_back")])
-    return InlineKeyboardMarkup(rows)
 
 def kb_pick_single_seat(alive_seats: list[int], selected: int | None,
                         confirm_cb: str, back_cb: str, title: str = "انتخاب صندلی") -> InlineKeyboardMarkup:
@@ -708,17 +686,6 @@ def delete_button_markup(g: GameState) -> InlineKeyboardMarkup:
 # ─────── بالای فایل (یا کنار بقیهٔ ثوابت) ──────────────────
 REG   = "register"   # نمایش دکمه‌های ثبت‌نامی
 CTRL  = "controls"   # فقط دکمه‌های کنترلی
-
-async def _delete_rerandom_prompt_after(ctx, chat_id: int, g: GameState, msg_id: int, seconds: int = 30):
-    await asyncio.sleep(seconds)
-    if getattr(g, "awaiting_rerandom_decision", False) and getattr(g, "rerandom_prompt_msg_id", None) == msg_id:
-        try:
-            await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
 
 async def safe_q_answer(q, text=None, show_alert=False):
     try:
@@ -1148,6 +1115,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
 
 
+import jdatetime
+
 
 
 
@@ -1191,7 +1160,7 @@ async def announce_winner(ctx, update, g: GameState):
         role = g.assigned_roles.get(seat, "—")
 
         # انتخاب مارکر بر اساس نقش
-        if getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
+        if getattr(g, "purchased_seat", None) == seat:
             role_display = f"{role} / مافیا"
             marker = "◾️"  # خریداری شده → مافیا
         elif role in mafia_roles:
@@ -1324,33 +1293,15 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
 # ─────────────────────────────────────────────────────────────
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
     if update.effective_chat.type == "private":
-        q = update.callback_query
-        data = q.data if q else None
-        uid = q.from_user.id
-
-        # 🟢 پیدا کردن گیمی که راوی‌اش همین uid است
-        g = None
-        chat = None
-        for chat_id, game in store.games.items():
-            if game.god_id == uid and game.phase in ("playing", "awaiting_winner"):
-                g = game
-                chat = chat_id
-                break
-
-        # ❌ اگر بازی پیدا نشد یا دکمه مربوط به خریداری نیست → خروج
-        if not (g and data and data.startswith("purchase_")):
-            return
-    else:
-        # 🟢 در گروه‌ها (غیر پی‌وی)
-        q = update.callback_query
-        data = q.data
-        chat = q.message.chat.id
-        uid = q.from_user.id
-        g = gs(chat)
-
+        return
+    q = update.callback_query
     await safe_q_answer(q)
+    data = q.data
+    chat = q.message.chat.id
+    uid = q.from_user.id
+    g = gs(chat)
+
 
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
@@ -1776,95 +1727,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
  
 
 
-    # ─── خریداری – شروع در پی‌وی گاد ─────────────────────────────
-    if data == "purchase_menu" and uid == g.god_id:
-        alive = [s for s in sorted(g.seats) if s not in g.striked]
-        g.purchased_player = None
-        store.save()
-
-        kb = kb_pick_purchase(alive, None)
-
-        try:
-            msg = await ctx.bot.send_message(
-                g.god_id,
-                "🛍 بازیکنی را که خریداری شده انتخاب کن:",
-                reply_markup=kb
-            )
-            g.purchase_pm_msg_id = msg.message_id
-            store.save()
-        except Exception:
-            await ctx.bot.send_message(
-                chat,
-                "⚠️ بات نمی‌تواند به پی‌وی راوی پیام بفرستد. ابتدا بات را استارت کن."
-            )
-        return
-    # ─── انتخاب بازیکن خریداری‌شده (در پی‌وی گاد) ───────────────
-    if data.startswith("purchase_pick_") and uid == g.god_id:
-        try:
-            s = int(data.split("_")[2])
-        except:
-            return
-
-        alive = [x for x in sorted(g.seats) if x not in g.striked]
-        if s not in alive:
-            await ctx.bot.send_message(uid, "⚠️ بازیکن انتخاب‌شده زنده نیست.")
-            return
-
-        g.purchased_player = s
-        store.save()
-
-        try:
-            await ctx.bot.edit_message_reply_markup(
-                chat_id=uid,
-                message_id=g.purchase_pm_msg_id,
-                reply_markup=kb_pick_purchase(alive, s)
-            )
-        except Exception:
-            pass
-        return
-
-    # ─── تأیید خریداری ─────────────────────────────────────────
-    if data == "purchase_confirm" and uid == g.god_id:
-        if not g.purchased_player:
-            await ctx.bot.send_message(uid, "⚠️ هنوز بازیکنی انتخاب نشده است.")
-            return
-
-        seat = g.purchased_player
-        uid_target, name_target = g.seats[seat]
-
-        try:
-            await ctx.bot.send_message(uid_target, "💰 شما خریداری شده‌اید!")
-            await ctx.bot.send_message(uid, f"✅ {seat}. {name_target} خریداری شد.")
-        except Exception:
-            await ctx.bot.send_message(
-                uid,
-                f"⚠️ {seat}. {name_target} هنوز بات را استارت نکرده یا پیام دریافت نمی‌کند."
-            )
-
-        # پاک کردن پیام انتخاب در پی‌وی گاد
-        try:
-            if g.purchase_pm_msg_id:
-                await ctx.bot.delete_message(uid, g.purchase_pm_msg_id)
-                g.purchase_pm_msg_id = None
-        except Exception:
-            pass
-
-        store.save()
-        return
-
-    # ─── بازگشت از خریداری ─────────────────────────────────────
-    if data == "purchase_back" and uid == g.god_id:
-        try:
-            if g.purchase_pm_msg_id:
-                await ctx.bot.delete_message(uid, g.purchase_pm_msg_id)
-                g.purchase_pm_msg_id = None
-        except Exception:
-            pass
-
-        g.purchased_player = None
-        store.save()
-        await ctx.bot.send_message(uid, "↩️ عملیات خریداری لغو شد.")
-        return
 
     # ─── پایان بازی و انتخاب برنده ──────────────────────────────
     if data == "end_game" and uid == g.god_id:
@@ -1893,9 +1755,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
         return
+
+
     if data in {
         "winner_city", "winner_mafia", "clean_city", "clean_mafia",
-        "winner_city_chaos", "winner_mafia_chaos", "winner_indep"
+        "winner_city_chaos", "winner_mafia_chaos", "winner_indep"   # 🔹 مستقل اضافه شد
     } and g.awaiting_winner:
         g.temp_winner = data
         g.chaos_mode = data.endswith("_chaos")
@@ -1920,14 +1784,31 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
                 [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
             ])
-            await set_hint_and_kb(
-                ctx, chat, g,
-                "نتیجه را بررسی کنید و «تأیید» را بزنید.",
-                kb
-            )
+            await set_hint_and_kb(ctx, chat, g, "نتیجه را بررسی کنید و «تأیید» را بزنید.", kb)
             return
 
-        # حالت معمولی (بدون chaos)
+        # شهر/مافیا (معمولی یا کی‌آس) → اول بپرس «خریداری؟»
+        await set_hint_and_kb(ctx, chat, g, "آیا بازیکنی خریداری شده است؟", kb_purchase_yesno())
+        return
+
+
+
+
+
+    if data == "purchased_yes" and g.awaiting_winner:
+        g.awaiting_purchase_number = True
+        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        kb = kb_pick_single_seat(alive_seats=alive,
+                                 selected=g.purchased_seat,
+                                 confirm_cb="purchased_confirm",
+                                 back_cb="back_to_winner_select")
+        await set_hint_and_kb(ctx, chat, g,"شماره صندلی بازیکنِ خریداری‌شده را انتخاب کنید و سپس «تأیید» را بزنید.", kb)
+        return
+
+    if data == "purchased_no" and g.awaiting_winner:
+        g.purchased_seat = None
+        store.save()
+
         if not g.chaos_mode:
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
@@ -1940,9 +1821,60 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ────────────────────────────────────────────────
-        # 🔹 حالت کی‌آس: انتخاب ۳ بازیکن زنده
-        # ────────────────────────────────────────────────
+        # کی‌آس → انتخاب ۳ نفر زنده
+        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        g.chaos_selected = set()
+        kb = kb_pick_multi_seats(
+            alive, g.chaos_selected, 3,
+            confirm_cb="chaos_confirm",
+            back_cb="back_to_winner_select"
+        )
+        await set_hint_and_kb(
+            ctx, chat, g,
+            "🌀 حالت کی‌آس: ۳ نفر از بازیکنان زنده را انتخاب کنید و سپس «تأیید» را بزنید.",
+            kb
+        )
+        return
+
+
+    if data.startswith("pick_single_") and g.awaiting_winner:
+        try:
+            s = int(data.split("_")[2])
+        except:
+            return
+
+        if s in g.seats and s not in g.striked:
+            g.purchased_seat = s
+            store.save()
+
+        alive = [x for x in sorted(g.seats) if x not in g.striked]
+        kb = kb_pick_single_seat(
+            alive, g.purchased_seat,
+            confirm_cb="purchased_confirm",
+            back_cb="back_to_winner_select"
+        )
+        await set_hint_and_kb(
+            ctx, chat, g,
+            "🛒 صندلی خریداری‌شده را انتخاب کنید و سپس «تأیید» را بزنید.",
+            kb
+        )
+        return
+
+
+    if data == "purchased_confirm" and g.awaiting_winner:
+        if not g.chaos_mode:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+            await set_hint_and_kb(
+                ctx, chat, g,
+                "🔒 برنده و صندلی خریداری‌شده ثبت شد. برای نهایی‌سازی «تأیید» را بزنید.",
+                kb
+            )
+            return
+
+        # کی‌آس بعد از خریداری
         alive = [s for s in sorted(g.seats) if s not in g.striked]
         g.chaos_selected = set()
         kb = kb_pick_multi_seats(
@@ -2116,83 +2048,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if data == "rerandom_roles_confirm":
-        if uid != g.god_id:
-        #    await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند رندوم مجدد انجام دهد!")
-            return
 
-        #if not g.scenario or len(g.seats) != g.max_seats:
-        #    await ctx.bot.send_message(chat, "⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.")
-        #    return
 
-        # اگر وسط انتخاب برنده هستی، بهتره اجازه ندی (اختیاری ولی منطقیه)
-        if g.phase == "awaiting_winner":
-            await ctx.bot.send_message(chat, "⚠️ در حالت انتخاب برنده نمی‌شود رندوم مجدد کرد.")
-            return
-
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ بله", callback_data="rerandom_roles_yes"),
-            InlineKeyboardButton("❌ خیر", callback_data="rerandom_roles_no"),
-        ]])
-
-        msg = await ctx.bot.send_message(chat, "❓ آیا تمایل به رندوم مجدد دارید؟", reply_markup=kb)
-
-        g.awaiting_rerandom_decision = True
-        g.rerandom_prompt_msg_id = msg.message_id
-        store.save()
-
-        asyncio.create_task(_delete_rerandom_prompt_after(ctx, chat, g, msg.message_id, 30))
-        return
-    if data == "rerandom_roles_no":
-        if uid != g.god_id:
-            return
-        if not getattr(g, "awaiting_rerandom_decision", False):
-            return
-
-        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
-        if prompt_id:
-            try:
-                await ctx.bot.delete_message(chat, prompt_id)
-            except Exception:
-                pass
-
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
-        return
-    
-    if data == "rerandom_roles_yes":
-        if uid != g.god_id:
-            return
-        if not getattr(g, "awaiting_rerandom_decision", False):
-            return
-
-        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
-        if prompt_id:
-            try:
-                await ctx.bot.delete_message(chat, prompt_id)
-            except Exception:
-                pass
-
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
-
-        # ✅ رندوم مجدد نقش‌ها بدون شافل صندلی‌ها
-        await shuffle_and_assign(
-            ctx,
-            chat,
-            g,
-            shuffle_seats=False,
-            uid_to_role=None,
-            notify_players=True,
-            preview_mode=False,
-            role_shuffle_repeats=5,
-        )
-
-        # برای اینکه UI هم آپدیت بماند (اختیاری ولی بهتر):
-        await publish_seating(ctx, chat, g, mode=CTRL)
-        return
     # ────────────────────────────────────────────────────────────
     #  بخش‌های قدیمی (seat_ / cancel_ / strike_out / …)
     # ────────────────────────────────────────────────────────────
@@ -2311,9 +2168,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "⚠️ هیچ بازیکنی برای رأی‌گیری وجود ندارد.")
             return
 
-        poll_ids = []
-
-        # --- مرحله ۱: ارسال همه pollها پشت‌سر‌هم ---
         for idx, chunk in enumerate(chunks, start=1):
             # افزودن گزینه‌ی نتایج برای هر poll
             chunk.append(f"📊 دیدن نتایج ({idx}/{total_polls})")
@@ -2326,25 +2180,21 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     is_anonymous=False,
                     allows_multiple_answers=True
                 )
-                poll_ids.append(poll_msg.message_id)
                 g.last_poll_ids = getattr(g, "last_poll_ids", []) + [poll_msg.message_id]
                 store.save()
+
+                await asyncio.sleep(11)  # بزار مردم رأی بدن
+
+                try:
+                    await ctx.bot.stop_poll(chat_id=chat, message_id=poll_msg.message_id)
+                except Exception as e:
+                    print(f"⚠️ stop_poll error (part {idx}):", e)
 
             except Exception as e:
                 print(f"❌ poll send error (part {idx}):", e)
 
-        # --- مرحله ۲: مکث برای رأی دادن، سپس بستن همه pollها ---
-        await asyncio.sleep(10)
-
-        for idx, poll_id in enumerate(poll_ids, start=1):
-            try:
-                await ctx.bot.stop_poll(chat_id=chat, message_id=poll_id)
-            except Exception as e:
-                print(f"⚠️ stop_poll error (part {idx}):", e)
-
-        await ctx.bot.send_message(chat, f"✅ {total_polls} رأی‌گیری بسته شد.")
+        await ctx.bot.send_message(chat, f"✅ {total_polls} رای‌گیری بسته شد.")
         return
-
 
     if data == "back_to_controls" and uid == g.god_id:
         await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
@@ -3119,23 +2969,7 @@ async def remove_scenario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_scenarios_to_gist(store.scenarios)
         await update.message.reply_text(f"🗑️ سناریوی «{name}» با موفقیت حذف شد.")
 
-async def play_alarm_sound(ctx, chat_id: int):
-    try:
-        msg = await ctx.bot.send_voice(
-            chat_id,
-            voice="https://files.catbox.moe/4f8tem.ogg"
-        )
-
-        await ctx.bot.send_message(
-            chat_id,
-            "پخش",
-            reply_to_message_id=msg.message_id
-        )
-
-    except Exception as e:
-        print("⚠️ play_alarm_sound error:", e)
-
-
+ 
 async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     uid = update.effective_user.id
@@ -3164,9 +2998,7 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def run_timer(ctx, chat: int, seconds: int):
     try:
         await asyncio.sleep(seconds)
-        await ctx.bot.send_message(chat, "⏰ تایم تمام شد")
-#       await play_alarm_sound(ctx, chat)
-
+        await ctx.bot.send_message(chat, "⏰ تایم تمام")
     except Exception as e:
         print("⚠️ run_timer error:", e)
 
@@ -3298,29 +3130,29 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
     # -------------- defense seats by God ------------------
-    # if g.vote_type == "awaiting_defense" and uid == g.god_id:
-     #    nums = [int(n) for n in text.split() if n.isdigit() and int(n) in g.seats]
+    if g.vote_type == "awaiting_defense" and uid == g.god_id:
+        nums = [int(n) for n in text.split() if n.isdigit() and int(n) in g.seats]
 
         # اگر ورودی معتبر نبود، پیام خطا بده و برگرد
-       #  if not nums:
-       #      await ctx.bot.send_message(chat_id, "❌ شماره صندلی معتبر وارد نشد. دوباره تلاش کنید (مثال: 1 3 5).")
-           #  return
+        if not nums:
+            await ctx.bot.send_message(chat_id, "❌ شماره صندلی معتبر وارد نشد. دوباره تلاش کنید (مثال: 1 3 5).")
+            return
 
-       #  g.defense_seats = nums
-       #  g.vote_type = None  # ✅ غیرفعال کردن حالت وارد کردن صندلی دفاع
+        g.defense_seats = nums
+        g.vote_type = None  # ✅ غیرفعال کردن حالت وارد کردن صندلی دفاع
 
         # 🧹 حذف پیام درخواست صندلی‌های دفاع
-       #  if g.defense_prompt_msg_id:
-          #   try:
-          #       await ctx.bot.delete_message(chat_id=chat_id, message_id=g.defense_prompt_msg_id)
-          #   except:
-          #       pass
-          #   g.defense_prompt_msg_id = None
+        if g.defense_prompt_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=g.defense_prompt_msg_id)
+            except:
+                pass
+            g.defense_prompt_msg_id = None
 
-        # store.save()
-         #await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
-        # await start_vote(ctx, chat_id, g, "final")
-        # return
+        store.save()
+        await ctx.bot.send_message(chat_id, f"✅ صندلی‌های دفاع: {', '.join(map(str, nums))}")
+        await start_vote(ctx, chat_id, g, "final")
+        return
 
     if g.phase == "idle" and text.strip() == "کنسل":
         for seat, (player_uid, _) in list(g.seats.items()):
@@ -3927,11 +3759,7 @@ async def main():
         )
     )
     app.add_handler(CommandHandler("resetgame", resetgame_cmd, filters=group_filter))
-    app.add_handler(CommandHandler("addscenario", addscenario, filters=group_filter))
-    app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=group_filter))
-    app.add_handler(CommandHandler("removescenario", remove_scenario, filters=group_filter))
-    app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=group_filter))
-    app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=group_filter))
+    app.add_handler(CommandHandler("addcdtmafia", cmd_listmafia, filters=group_filter))
     app.add_handler(CommandHandler("list", cmd_lists, filters=group_filter))
     app.add_handler(CommandHandler("addcard", add_card))
     app.add_handler(CommandHandler("listcard", list_cards))
