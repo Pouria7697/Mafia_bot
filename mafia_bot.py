@@ -2515,6 +2515,55 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         asyncio.create_task(_delete_rerandom_prompt_after(ctx, chat, g, msg.message_id, 30))
         return
+    if data == "rerandom_roles_no":
+        if uid != g.god_id:
+            return
+        if not getattr(g, "awaiting_rerandom_decision", False):
+            return
+
+        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
+        if prompt_id:
+            try:
+                await ctx.bot.delete_message(chat, prompt_id)
+            except Exception:
+                pass
+
+        g.awaiting_rerandom_decision = False
+        g.rerandom_prompt_msg_id = None
+        store.save()
+        return
+    if data == "rerandom_roles_yes":
+        if uid != g.god_id:
+            return
+        if not getattr(g, "awaiting_rerandom_decision", False):
+            return
+
+        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
+        if prompt_id:
+            try:
+                await ctx.bot.delete_message(chat, prompt_id)
+            except Exception:
+                pass
+
+        g.awaiting_rerandom_decision = False
+        g.rerandom_prompt_msg_id = None
+        store.save()
+
+        # ✅ رندوم مجدد نقش‌ها بدون شافل صندلی‌ها
+        await shuffle_and_assign(
+            ctx,
+            chat,
+            g,
+            shuffle_seats=False,
+            uid_to_role=None,
+            notify_players=True,
+            preview_mode=False,
+            role_shuffle_repeats=5,
+        )
+
+        # برای اینکه UI هم آپدیت بماند (اختیاری ولی بهتر):
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
 
 def status_button_markup(g: GameState) -> InlineKeyboardMarkup:
     c = g.status_counts.get("citizen", 0)
