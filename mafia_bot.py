@@ -181,8 +181,6 @@ class GameState:
         self.votes_cast = self.votes_cast or {}
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
-        self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
-        self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
 
 class Store:
@@ -575,7 +573,6 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
         [InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu")],
         [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
-        [InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm")]
     ])
 
     return InlineKeyboardMarkup(rows)
@@ -708,17 +705,6 @@ def delete_button_markup(g: GameState) -> InlineKeyboardMarkup:
 # ─────── بالای فایل (یا کنار بقیهٔ ثوابت) ──────────────────
 REG   = "register"   # نمایش دکمه‌های ثبت‌نامی
 CTRL  = "controls"   # فقط دکمه‌های کنترلی
-
-async def _delete_rerandom_prompt_after(ctx, chat_id: int, g: GameState, msg_id: int, seconds: int = 30):
-    await asyncio.sleep(seconds)
-    if getattr(g, "awaiting_rerandom_decision", False) and getattr(g, "rerandom_prompt_msg_id", None) == msg_id:
-        try:
-            await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
 
 async def safe_q_answer(q, text=None, show_alert=False):
     try:
@@ -2116,83 +2102,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if data == "rerandom_roles_confirm":
-        if uid != g.god_id:
-        #    await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند رندوم مجدد انجام دهد!")
-            return
 
-        #if not g.scenario or len(g.seats) != g.max_seats:
-        #    await ctx.bot.send_message(chat, "⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.")
-        #    return
 
-        # اگر وسط انتخاب برنده هستی، بهتره اجازه ندی (اختیاری ولی منطقیه)
-        if g.phase == "awaiting_winner":
-            await ctx.bot.send_message(chat, "⚠️ در حالت انتخاب برنده نمی‌شود رندوم مجدد کرد.")
-            return
-
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ بله", callback_data="rerandom_roles_yes"),
-            InlineKeyboardButton("❌ خیر", callback_data="rerandom_roles_no"),
-        ]])
-
-        msg = await ctx.bot.send_message(chat, "❓ آیا تمایل به رندوم مجدد دارید؟", reply_markup=kb)
-
-        g.awaiting_rerandom_decision = True
-        g.rerandom_prompt_msg_id = msg.message_id
-        store.save()
-
-        asyncio.create_task(_delete_rerandom_prompt_after(ctx, chat, g, msg.message_id, 30))
-        return
-    if data == "rerandom_roles_no":
-        if uid != g.god_id:
-            return
-        if not getattr(g, "awaiting_rerandom_decision", False):
-            return
-
-        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
-        if prompt_id:
-            try:
-                await ctx.bot.delete_message(chat, prompt_id)
-            except Exception:
-                pass
-
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
-        return
-    
-    if data == "rerandom_roles_yes":
-        if uid != g.god_id:
-            return
-        if not getattr(g, "awaiting_rerandom_decision", False):
-            return
-
-        prompt_id = getattr(g, "rerandom_prompt_msg_id", None)
-        if prompt_id:
-            try:
-                await ctx.bot.delete_message(chat, prompt_id)
-            except Exception:
-                pass
-
-        g.awaiting_rerandom_decision = False
-        g.rerandom_prompt_msg_id = None
-        store.save()
-
-        # ✅ رندوم مجدد نقش‌ها بدون شافل صندلی‌ها
-        await shuffle_and_assign(
-            ctx,
-            chat,
-            g,
-            shuffle_seats=False,
-            uid_to_role=None,
-            notify_players=True,
-            preview_mode=False,
-            role_shuffle_repeats=5,
-        )
-
-        # برای اینکه UI هم آپدیت بماند (اختیاری ولی بهتر):
-        await publish_seating(ctx, chat, g, mode=CTRL)
-        return
     # ────────────────────────────────────────────────────────────
     #  بخش‌های قدیمی (seat_ / cancel_ / strike_out / …)
     # ────────────────────────────────────────────────────────────
