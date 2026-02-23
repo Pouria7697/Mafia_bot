@@ -181,6 +181,8 @@ class GameState:
         self.votes_cast = self.votes_cast or {}
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
+        self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
+        self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
 
 class Store:
@@ -572,12 +574,22 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗳 رأی‌گیری اولیه", callback_data="init_vote")],
         [InlineKeyboardButton("🗳 رأی‌گیری نهایی", callback_data="final_vote")],
         [InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu")],
-        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")]
+        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
+        [InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm")]
     ])
 
     return InlineKeyboardMarkup(rows)
 
-
+async def _delete_rerandom_prompt_after(ctx, chat_id: int, g: GameState, msg_id: int, seconds: int = 30):
+    await asyncio.sleep(seconds)
+    if getattr(g, "awaiting_rerandom_decision", False) and getattr(g, "rerandom_prompt_msg_id", None) == msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+        g.awaiting_rerandom_decision = False
+        g.rerandom_prompt_msg_id = None
+        store.save()
 
 def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
     # از dict بودن مطمئن شو
@@ -2474,6 +2486,34 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         seat_str = data.split("_")[1]
         if seat_str.isdigit():
             await handle_vote(ctx, chat, g, int(seat_str))
+        return
+    
+    if data == "rerandom_roles_confirm":
+        if uid != g.god_id:
+        #    await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند رندوم مجدد انجام دهد!")
+            return
+
+        #if not g.scenario or len(g.seats) != g.max_seats:
+        #    await ctx.bot.send_message(chat, "⚠️ ابتدا سناریو انتخاب و همه صندلی‌ها پُر شوند.")
+        #    return
+
+        # اگر وسط انتخاب برنده هستی، بهتره اجازه ندی (اختیاری ولی منطقیه)
+        if g.phase == "awaiting_winner":
+            await ctx.bot.send_message(chat, "⚠️ در حالت انتخاب برنده نمی‌شود رندوم مجدد کرد.")
+            return
+
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ بله", callback_data="rerandom_roles_yes"),
+            InlineKeyboardButton("❌ خیر", callback_data="rerandom_roles_no"),
+        ]])
+
+        msg = await ctx.bot.send_message(chat, "❓ آیا تمایل به رندوم مجدد دارید؟", reply_markup=kb)
+
+        g.awaiting_rerandom_decision = True
+        g.rerandom_prompt_msg_id = msg.message_id
+        store.save()
+
+        asyncio.create_task(_delete_rerandom_prompt_after(ctx, chat, g, msg.message_id, 30))
         return
 
 def status_button_markup(g: GameState) -> InlineKeyboardMarkup:
