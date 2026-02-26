@@ -2269,7 +2269,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 print(f"❌ poll send error (part {idx}):", e)
 
         # --- مرحله ۲: مکث برای رأی دادن، سپس بستن همه pollها ---
-        await asyncio.sleep(10)
+        await asyncio.sleep(15)
 
         for idx, poll_id in enumerate(poll_ids, start=1):
             try:
