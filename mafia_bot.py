@@ -1160,18 +1160,18 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
-    g.vote_cleanup_ids.append(countdown_msg_id)
-
-    # جایگزین کردن تایمر با پیام رأی‌گیری
+    # حذف پیام تایمر و ارسال پیام رأی‌گیری
     try:
-        await ctx.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=countdown_msg_id,
-            text=f"⏳ رأی‌گیری برای <b>{target_seat}. {player_name}</b>",
-            parse_mode="HTML"
-        )
+        await ctx.bot.delete_message(chat_id=chat_id, message_id=countdown_msg_id)
     except Exception:
         pass
+
+    vote_msg = await ctx.bot.send_message(
+        chat_id,
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {player_name}</b>",
+        parse_mode="HTML"
+    )
+    g.vote_cleanup_ids.append(vote_msg.message_id)
 
     store.save()
 
