@@ -1112,11 +1112,39 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         pass
 
 
+async def animated_countdown(ctx, chat_id: int, label: str) -> int:
+    """انیمیشن شمارش معکوس ۵ تا ۱ — پیام را هر ثانیه ویرایش می‌کند."""
+    frames = [
+        f"🗳 <b>{label}</b>\n\n3️⃣  ▓▓▓",
+        f"🗳 <b>{label}</b>\n\n2️⃣  ▓▓░",
+        f"🗳 <b>{label}</b>\n\n1️⃣  ▓░░",
+    ]
+    msg = await ctx.bot.send_message(chat_id, frames[0], parse_mode="HTML")
+    for frame in frames[1:]:
+        await asyncio.sleep(1)
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                text=frame,
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    return msg.message_id
+
+
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+    player_name = g.seats[target_seat][1]
+
+    # ── شمارش معکوس ۵ تا ۱ قبل از شروع رأی‌گیری ──
+    countdown_msg_id = await animated_countdown(ctx, chat_id, f"{target_seat}. {player_name}")
+
+    # ── حالا پنجره رأی‌گیری باز می‌شود ──
     g.current_vote_target = target_seat
 
     start_time = datetime.now().timestamp()
-    end_time = start_time + 4.3
+    end_time = start_time + 5.3
     g.vote_window = (start_time, end_time, target_seat)
 
     g.vote_collecting = True
@@ -1129,17 +1157,22 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
+    g.vote_cleanup_ids.append(countdown_msg_id)
+
+    # جایگزین کردن تایمر با پیام رأی‌گیری
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=countdown_msg_id,
+            text=f"⏳ رأی‌گیری برای <b>{target_seat}. {player_name}</b>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
     store.save()
 
-    msg = await ctx.bot.send_message(
-        chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
-        parse_mode="HTML"
-    )
-    g.vote_cleanup_ids.append(msg.message_id)
-
-    await asyncio.sleep(4)
+    await asyncio.sleep(5)
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
