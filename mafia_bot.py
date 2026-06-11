@@ -1131,6 +1131,7 @@ async def animated_countdown(ctx, chat_id: int, label: str) -> int:
             )
         except Exception:
             pass
+    await asyncio.sleep(1)  # فاصله قبل از ادیت بعدی تا ریت‌لیمیت نخوریم
     return msg.message_id
 
 
@@ -1149,6 +1150,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
+    if not hasattr(g, "vote_logs"):
+        g.vote_logs = {}
     g.vote_logs.setdefault(target_seat, [])
 
     if not hasattr(g, "vote_order"):
