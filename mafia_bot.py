@@ -954,6 +954,8 @@ async def publish_seating(
                         ))
                     except Exception:
                         pass
+        except (TimedOut, RetryAfter):
+            pass  # خطای گذرا – پیام جدید نفرست
         except Exception:
             old_msg_id = g.last_seating_msg_id
             msg = await _retry(ctx.bot.send_message(
@@ -1373,14 +1375,27 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         data = q.data if q else None
         uid = q.from_user.id
 
-        # 🟢 پیدا کردن گیمی که راوی‌اش همین uid است
+        # 🟢 پیدا کردن بازی مرتبط
         g = None
         chat = None
-        for chat_id, game in store.games.items():
-            if game.god_id == uid and game.phase in ("playing", "awaiting_winner"):
-                g = game
-                chat = chat_id
-                break
+
+        # برای purchase_pick_: بر اساس شناسه پیام PM بازی درست را پیدا کن
+        # (اگر گاد در چند گروه فعال باشد این روش بازی صحیح را برمی‌گرداند)
+        if data and data.startswith("purchase_pick_") and q and q.message:
+            target_msg_id = q.message.message_id
+            for chat_id, game in store.games.items():
+                if getattr(game, "purchase_pm_msg_id", None) == target_msg_id:
+                    g = game
+                    chat = chat_id
+                    break
+
+        # برای بقیه purchase_ callbackها یا اگر بالا پیدا نشد → جستجو بر اساس god_id
+        if not g:
+            for chat_id, game in store.games.items():
+                if game.god_id == uid and game.phase in ("playing", "awaiting_winner"):
+                    g = game
+                    chat = chat_id
+                    break
 
         # ❌ اگر بازی پیدا نشد یا دکمه مربوط به خریداری نیست → خروج
         if not (g and data and data.startswith("purchase_")):
@@ -1824,7 +1839,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── خریداری – شروع در پی‌وی گاد ─────────────────────────────
     if data == "purchase_menu" and uid == g.god_id:
-        alive = [s for s in sorted(g.seats) if s not in g.striked]
+        # حذف کیبورد قدیمی از پی‌وی گاد تا کلیک روی لیست قدیمی ممکن نباشد
+        if getattr(g, "purchase_pm_msg_id", None):
+            try:
+                await ctx.bot.delete_message(chat_id=g.god_id, message_id=g.purchase_pm_msg_id)
+            except Exception:
+                pass
+            g.purchase_pm_msg_id = None
+
+        alive = [s for s in sorted(g.seats) if s not in (g.striked or set())]
         g.purchased_player = None
         store.save()
 
@@ -1851,7 +1874,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except:
             return
 
-        alive = [x for x in sorted(g.seats) if x not in g.striked]
+        alive = [x for x in sorted(g.seats) if x not in (g.striked or set())]
         if s not in alive:
             await ctx.bot.send_message(uid, "⚠️ بازیکن انتخاب‌شده زنده نیست.")
             return
@@ -3250,6 +3273,15 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if g.god_id == target.id:
         await update.message.reply_text("ℹ️ همین حالا هم گاد هست.")
         return
+
+    # بازیکن زنده نمی‌تواند گاد شود — فقط بازیکن حذف‌شده یا کسی خارج از لیست
+    alive_uids = {g.seats[s][0] for s in g.seats if s not in (g.striked or set())}
+    if target.id in alive_uids:
+        await update.message.reply_text(
+            "⛔ این بازیکن هنوز در بازی زنده است و نمی‌تواند گاد شود."            
+        )
+        return
+
     # نام ترجیحی: از gist اگر موجود، وگرنه نام تلگرام
     new_name = g.user_names.get(target.id, target.full_name)
 
