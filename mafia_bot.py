@@ -1051,6 +1051,7 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.tally = {}
     g.current_target = None
     g.collecting = False
+    g.vote_order = []  # ترتیب رأی‌گیری از نو شروع می‌شود
 
     candidates = g.defense_seats if stage == "final" else list(g.seats.keys())
     g.vote_candidates = [s for s in candidates if s not in g.striked]
