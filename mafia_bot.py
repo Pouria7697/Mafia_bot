@@ -1202,11 +1202,13 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     if g.vote_candidates and all(s in g.voted_targets for s in g.vote_candidates):
         title = "📊 <b>نتیجه رأی‌گیری اولیه</b>" if g.vote_stage == "initial_vote" else "📊 <b>نتیجه رأی‌گیری نهایی</b>"
         lines = [title, ""]
-        results = sorted(
-            g.vote_candidates,
-            key=lambda s: len(g.votes_cast.get(s, set())),
-            reverse=True
-        )
+        # به ترتیب انجام رأی‌گیری (نه بر اساس تعداد رأی)
+        seen = set()
+        results = []
+        for s in getattr(g, "vote_order", []):
+            if s in g.vote_candidates and s not in seen:
+                results.append(s)
+                seen.add(s)
         for s in results:
             name = g.seats[s][1]
             n = len(g.votes_cast.get(s, set()))
