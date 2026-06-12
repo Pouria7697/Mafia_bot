@@ -1137,6 +1137,13 @@ async def animated_countdown(ctx, chat_id: int, label: str) -> int:
     return msg.message_id
 
 
+VOTE_PATTERN = re.compile(r"^(?:\.\.|(?:👍[\U0001F3FB-\U0001F3FF]?️?){2})$")
+
+def is_valid_vote(text: str) -> bool:
+    """فقط «..» یا دقیقاً دو 👍 کنار هم (با هر رنگ پوست) رأی معتبر است."""
+    return bool(VOTE_PATTERN.fullmatch(text.strip()))
+
+
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     player_name = g.seats[target_seat][1]
 
@@ -1190,6 +1197,28 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.voted_targets.add(target_seat)
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
+
+    # ── اگر رأی‌گیری همه کاندیداها تمام شد → گزارش شمارش آرا ──
+    if g.vote_candidates and all(s in g.voted_targets for s in g.vote_candidates):
+        title = "📊 <b>نتیجه رأی‌گیری اولیه</b>" if g.vote_stage == "initial_vote" else "📊 <b>نتیجه رأی‌گیری نهایی</b>"
+        lines = [title, ""]
+        results = sorted(
+            g.vote_candidates,
+            key=lambda s: len(g.votes_cast.get(s, set())),
+            reverse=True
+        )
+        for s in results:
+            name = g.seats[s][1]
+            n = len(g.votes_cast.get(s, set()))
+            lines.append(f"🔹 {s}. {name} ⬅️ <b>{n}</b> رأی")
+        report_msg = await ctx.bot.send_message(
+            chat_id, "\n".join(lines), parse_mode="HTML"
+        )
+        if g.vote_stage == "initial_vote":
+            g.last_vote_msg_id_initial = report_msg.message_id
+        elif g.vote_stage == "final":
+            g.last_vote_msg_id_final = report_msg.message_id
+        store.save()
 
 
 
@@ -3361,7 +3390,13 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         now = datetime.now().timestamp()
         voter_seat = next((s for s,(u,_) in g.seats.items() if u == uid), None)
 
-        if voter_seat and voter_seat != target and start <= now <= end:
+        if (
+            voter_seat
+            and voter_seat != target                      # رأی به خود ممنوع
+            and voter_seat not in (g.striked or set())    # بازیکن مرده رأی ندارد
+            and start <= now <= end
+            and is_valid_vote(text)                       # فقط «..» یا 👍
+        ):
             # ثبت رأی یکتا
             g.votes_cast.setdefault(target, set())
             g.votes_cast[target].add(uid)
