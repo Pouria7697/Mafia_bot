@@ -310,6 +310,133 @@ def save_usernames_to_gist(usernames: dict[int, str]):
         print("❌ save_usernames error:", e)
 
 
+# ─── آمار بازیکنان (برد/باخت بر اساس ساید) ──────────────────────
+STATS_FILENAME = "player_stats.json"
+
+def load_player_stats() -> dict:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        response = httpx.get(url, headers=headers)
+        if response.status_code == 200:
+            gist_data = response.json()
+            content = gist_data["files"].get(STATS_FILENAME, {}).get("content", "{}")
+            return json.loads(content) or {}
+        else:
+            print("❌ player_stats gist fetch failed:", response.status_code)
+            return {}
+    except Exception as e:
+        print("❌ load_player_stats error:", e)
+        return {}
+
+def save_player_stats(stats: dict):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        data = {
+            "files": {
+                STATS_FILENAME: {
+                    "content": json.dumps(stats, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        httpx.patch(url, headers=headers, json=data)
+    except Exception as e:
+        print("❌ save_player_stats error:", e)
+
+
+def update_player_stats(g: GameState, mafia_roles, indep_for_this):
+    """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند."""
+    try:
+        stats = load_player_stats()
+        chaos = bool(getattr(g, "chaos_mode", False))
+        chaos_sel = getattr(g, "chaos_selected", set()) or set()
+
+        for seat in sorted(g.seats):
+            uid, name = g.seats[seat]
+            role = g.assigned_roles.get(seat, "—")
+
+            # تعیین ساید بازیکن (همان منطق announce_winner)
+            if getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
+                side = "مافیا"
+            elif role in mafia_roles:
+                side = "مافیا"
+            elif role in indep_for_this:
+                side = "مستقل"
+            else:
+                side = "شهر"
+
+            # برد: در حالت کی‌آس فقط ۳ نفر انتخاب‌شده برنده‌اند
+            if chaos:
+                won = seat in chaos_sel
+            else:
+                won = (side == g.winner_side)
+
+            key = str(uid)
+            p = stats.get(key, {
+                "name": name,
+                "games": 0, "wins": 0,
+                "citizen_games": 0, "citizen_wins": 0,
+                "mafia_games": 0, "mafia_wins": 0,
+                "indep_games": 0, "indep_wins": 0,
+            })
+            p["name"] = name  # نام را به‌روز نگه دار
+            p["games"] = p.get("games", 0) + 1
+            if won:
+                p["wins"] = p.get("wins", 0) + 1
+
+            if side == "مافیا":
+                p["mafia_games"] = p.get("mafia_games", 0) + 1
+                if won:
+                    p["mafia_wins"] = p.get("mafia_wins", 0) + 1
+            elif side == "مستقل":
+                p["indep_games"] = p.get("indep_games", 0) + 1
+                if won:
+                    p["indep_wins"] = p.get("indep_wins", 0) + 1
+            else:
+                p["citizen_games"] = p.get("citizen_games", 0) + 1
+                if won:
+                    p["citizen_wins"] = p.get("citizen_wins", 0) + 1
+
+            stats[key] = p
+
+        save_player_stats(stats)
+    except Exception as e:
+        print("❌ update_player_stats error:", e)
+
+
+def format_player_stats(p: dict) -> str:
+    """متن فارسی آمار یک بازیکن — بدون نمایش آیدی."""
+    def pct(w, n):
+        return f" ({round(w * 100 / n)}٪)" if n > 0 else ""
+
+    games = p.get("games", 0)
+    wins = p.get("wins", 0)
+    cg, cw = p.get("citizen_games", 0), p.get("citizen_wins", 0)
+    mg, mw = p.get("mafia_games", 0), p.get("mafia_wins", 0)
+    ig, iw = p.get("indep_games", 0), p.get("indep_wins", 0)
+
+    name = escape(p.get("name", "بازیکن"), quote=False)
+    lines = [
+        f"📊 <b>آمار {name}</b>",
+        "",
+        f"🎮 کل بازی‌ها: <b>{games}</b>",
+        f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
+        "",
+        f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
+        f"◾️ مافیا: {mg} بازی | {mw} برد{pct(mw, mg)}",
+    ]
+    if ig > 0:
+        lines.append(f"♦️ مستقل: {ig} بازی | {iw} برد{pct(iw, ig)}")
+    return "\n".join(lines)
+
+
 store = Store()
 store.scenarios = load_scenarios_from_gist()
 
@@ -1301,6 +1428,9 @@ async def announce_winner(ctx, update, g: GameState):
     ok = save_event_numbers(nums)
     if not ok:
         print(f"⚠️ save_event_numbers failed for chat {key}")
+
+    # 📊 ثبت آمار برد/باخت بازیکنان در Gist
+    update_player_stats(g, mafia_roles, indep_for_this)
 
     g.phase = "ended"
     store.save()
@@ -3351,6 +3481,16 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     uid = msg.from_user.id
     g = gs(chat_id)
     text = msg.text.strip()
+
+    # 📊 آمار من — هر بازیکنی در گروه فعال می‌تواند آمار خودش را ببیند
+    if text == "آمار من":
+        stats = load_player_stats()
+        p = stats.get(str(uid))
+        if not p or p.get("games", 0) == 0:
+            await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
+        else:
+            await msg.reply_text(format_player_stats(p), parse_mode="HTML")
+        return
 
     if g.vote_type == "awaiting_time" and uid == g.god_id:
         g.event_time = text
