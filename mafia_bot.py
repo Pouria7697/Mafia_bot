@@ -1178,7 +1178,6 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.tally = {}
     g.current_target = None
     g.collecting = False
-    g.vote_order = []  # ترتیب رأی‌گیری از نو شروع می‌شود
 
     candidates = g.defense_seats if stage == "final" else list(g.seats.keys())
     g.vote_candidates = [s for s in candidates if s not in g.striked]
@@ -1242,53 +1241,15 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         pass
 
 
-async def animated_countdown(ctx, chat_id: int, label: str) -> int:
-    """انیمیشن شمارش معکوس ۵ تا ۱ — پیام را هر ثانیه ویرایش می‌کند."""
-    frames = [
-        f"🗳 <b>{label}</b>\n\n3️⃣  ▓▓▓",
-        f"🗳 <b>{label}</b>\n\n2️⃣  ▓▓░",
-        f"🗳 <b>{label}</b>\n\n1️⃣  ▓░░",
-    ]
-    msg = await ctx.bot.send_message(chat_id, frames[0], parse_mode="HTML")
-    for frame in frames[1:]:
-        await asyncio.sleep(1)
-        try:
-            await ctx.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg.message_id,
-                text=frame,
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-    await asyncio.sleep(1)  # فاصله قبل از ادیت بعدی تا ریت‌لیمیت نخوریم
-    return msg.message_id
-
-
-VOTE_PATTERN = re.compile(r"^(?:\.\.|(?:👍[\U0001F3FB-\U0001F3FF]?️?){2})$")
-
-def is_valid_vote(text: str) -> bool:
-    """فقط «..» یا دقیقاً دو 👍 کنار هم (با هر رنگ پوست) رأی معتبر است."""
-    return bool(VOTE_PATTERN.fullmatch(text.strip()))
-
-
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
-    player_name = g.seats[target_seat][1]
-
-    # ── شمارش معکوس ۵ تا ۱ قبل از شروع رأی‌گیری ──
-    countdown_msg_id = await animated_countdown(ctx, chat_id, f"{target_seat}. {player_name}")
-
-    # ── حالا پنجره رأی‌گیری باز می‌شود ──
     g.current_vote_target = target_seat
 
     start_time = datetime.now().timestamp()
-    end_time = start_time + 5.3
+    end_time = start_time + 4.3
     g.vote_window = (start_time, end_time, target_seat)
 
     g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
-    if not hasattr(g, "vote_logs"):
-        g.vote_logs = {}
     g.vote_logs.setdefault(target_seat, [])
 
     if not hasattr(g, "vote_order"):
@@ -1297,22 +1258,17 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
-    # حذف پیام تایمر و ارسال پیام رأی‌گیری
-    try:
-        await ctx.bot.delete_message(chat_id=chat_id, message_id=countdown_msg_id)
-    except Exception:
-        pass
-
-    vote_msg = await ctx.bot.send_message(
-        chat_id,
-        f"⏳ رأی‌گیری برای <b>{target_seat}. {player_name}</b>",
-        parse_mode="HTML"
-    )
-    g.vote_cleanup_ids.append(vote_msg.message_id)
 
     store.save()
 
-    await asyncio.sleep(5)
+    msg = await ctx.bot.send_message(
+        chat_id,
+        f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
+        parse_mode="HTML"
+    )
+    g.vote_cleanup_ids.append(msg.message_id)
+
+    await asyncio.sleep(4)
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
@@ -1325,30 +1281,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.voted_targets.add(target_seat)
     await update_vote_buttons(ctx, chat_id, g)
     store.save()
-
-    # ── اگر رأی‌گیری همه کاندیداها تمام شد → گزارش شمارش آرا ──
-    if g.vote_candidates and all(s in g.voted_targets for s in g.vote_candidates):
-        title = "📊 <b>نتیجه رأی‌گیری اولیه</b>" if g.vote_stage == "initial_vote" else "📊 <b>نتیجه رأی‌گیری نهایی</b>"
-        lines = [title, ""]
-        # به ترتیب انجام رأی‌گیری (نه بر اساس تعداد رأی)
-        seen = set()
-        results = []
-        for s in getattr(g, "vote_order", []):
-            if s in g.vote_candidates and s not in seen:
-                results.append(s)
-                seen.add(s)
-        for s in results:
-            name = g.seats[s][1]
-            n = len(g.votes_cast.get(s, set()))
-            lines.append(f"🔹 {s}. {name} ⬅️ <b>{n}</b> رأی")
-        report_msg = await ctx.bot.send_message(
-            chat_id, "\n".join(lines), parse_mode="HTML"
-        )
-        if g.vote_stage == "initial_vote":
-            g.last_vote_msg_id_initial = report_msg.message_id
-        elif g.vote_stage == "final":
-            g.last_vote_msg_id_final = report_msg.message_id
-        store.save()
 
 
 
@@ -3436,13 +3368,15 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ همین حالا هم گاد هست.")
         return
 
-    # بازیکن زنده نمی‌تواند گاد شود — فقط بازیکن حذف‌شده یا کسی خارج از لیست
-    alive_uids = {g.seats[s][0] for s in g.seats if s not in (g.striked or set())}
-    if target.id in alive_uids:
-        await update.message.reply_text(
-            "⛔ این بازیکن هنوز در بازی زنده است و نمی‌تواند گاد شود."            
-        )
-        return
+    # بازیکن زنده نمی‌تواند گاد شود — فقط وقتی نقش‌ها پخش شده‌اند
+    # (قبل از پخش نقش‌ها هر کسی، حتی داخل لیست، می‌تواند گاد شود)
+    if getattr(g, "assigned_roles", None):
+        alive_uids = {g.seats[s][0] for s in g.seats if s not in (g.striked or set())}
+        if target.id in alive_uids:
+            await update.message.reply_text(
+                "⛔ این بازیکن هنوز در بازی زنده است و نمی‌تواند گاد شود."
+            )
+            return
 
     # نام ترجیحی: از gist اگر موجود، وگرنه نام تلگرام
     new_name = g.user_names.get(target.id, target.full_name)
@@ -3533,13 +3467,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         now = datetime.now().timestamp()
         voter_seat = next((s for s,(u,_) in g.seats.items() if u == uid), None)
 
-        if (
-            voter_seat
-            and voter_seat != target                      # رأی به خود ممنوع
-            and voter_seat not in (g.striked or set())    # بازیکن مرده رأی ندارد
-            and start <= now <= end
-            and is_valid_vote(text)                       # فقط «..» یا 👍
-        ):
+        if voter_seat and voter_seat != target and start <= now <= end:
             # ثبت رأی یکتا
             g.votes_cast.setdefault(target, set())
             g.votes_cast[target].add(uid)
