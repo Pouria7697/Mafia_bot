@@ -406,6 +406,21 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this):
 
             stats[key] = p
 
+        # 🎩 گاد این بازی — شمارش دفعات گرداندن بازی
+        if g.god_id:
+            god_key = str(g.god_id)
+            gp = stats.get(god_key, {
+                "name": g.god_name or "بازیکن",
+                "games": 0, "wins": 0,
+                "citizen_games": 0, "citizen_wins": 0,
+                "mafia_games": 0, "mafia_wins": 0,
+                "indep_games": 0, "indep_wins": 0,
+            })
+            if g.god_name:
+                gp["name"] = g.god_name
+            gp["god_games"] = gp.get("god_games", 0) + 1
+            stats[god_key] = gp
+
         save_player_stats(stats)
     except Exception as e:
         print("❌ update_player_stats error:", e)
@@ -434,6 +449,11 @@ def format_player_stats(p: dict) -> str:
     ]
     if ig > 0:
         lines.append(f"♦️ مستقل: {ig} بازی | {iw} برد{pct(iw, ig)}")
+
+    gg = p.get("god_games", 0)
+    if gg > 0:
+        lines.append("")
+        lines.append(f"🎩 گرداندن بازی (گاد): <b>{gg}</b> بار")
     return "\n".join(lines)
 
 
@@ -3420,7 +3440,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if text == "آمار من":
         stats = load_player_stats()
         p = stats.get(str(uid))
-        if not p or p.get("games", 0) == 0:
+        if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_player_stats(p), parse_mode="HTML")
