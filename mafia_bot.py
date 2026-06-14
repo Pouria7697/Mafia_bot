@@ -99,6 +99,7 @@ class GameState:
     phase: str = "idle"
 
     waiting_name: dict[int, int] | None = None
+    waiting_name_token: dict[int, float] | None = None
     waiting_name_proxy: dict[int, int] | None = None
     waiting_god: set[int] | None = None
     awaiting_scenario: bool = False
@@ -143,6 +144,7 @@ class GameState:
     def __post_init__(self):
         self.seats = self.seats or {}
         self.waiting_name = self.waiting_name or {}
+        self.waiting_name_token = self.waiting_name_token or {}
         self.waiting_name_proxy = self.waiting_name_proxy or {}
         self.waiting_god = self.waiting_god or set()
         self.assigned_roles = self.assigned_roles or {}
@@ -1310,6 +1312,45 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
 
 
+# ─── تایمر انقضای انتظار تغییر نام ──────────────────────────────
+async def _expire_name_prompt(ctx, chat_id: int, uid: int, seat_no: int,
+                              prompt_msg_id: int | None, token: float):
+    """اگر تا ۶۰ ثانیه نام جدید دریافت نشد، انتظار را لغو و پیام درخواست را پاک می‌کند."""
+    await asyncio.sleep(60)
+    g = gs(chat_id)
+    # فقط اگر هنوز منتظر همین درخواست هستیم لغو کن (کاربر دوباره کلیک نکرده باشد)
+    if g.waiting_name.get(uid) != seat_no:
+        return
+    if getattr(g, "waiting_name_token", {}).get(uid) != token:
+        return
+
+    g.waiting_name.pop(uid, None)
+    if isinstance(getattr(g, "waiting_name_token", None), dict):
+        g.waiting_name_token.pop(uid, None)
+    store.save()
+
+    if prompt_msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id=chat_id, message_id=prompt_msg_id)
+        except Exception:
+            pass
+
+
+def _start_name_wait(ctx, chat_id: int, g: GameState, uid: int,
+                     seat_no: int, prompt_msg):
+    """انتظار تغییر نام را با یک تایمر ۶۰ ثانیه‌ای ثبت می‌کند."""
+    g.waiting_name[uid] = seat_no
+    if not isinstance(getattr(g, "waiting_name_token", None), dict):
+        g.waiting_name_token = {}
+    token = datetime.now().timestamp()
+    g.waiting_name_token[uid] = token
+    store.save()
+    prompt_id = getattr(prompt_msg, "message_id", None)
+    asyncio.create_task(
+        _expire_name_prompt(ctx, chat_id, uid, seat_no, prompt_id, token)
+    )
+
+
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
@@ -1592,13 +1633,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         seat_no = [s for s in g.seats if g.seats[s][0] == uid][0]
-        g.waiting_name[uid] = seat_no
-        store.save()
 
-        await ctx.bot.send_message(
+        prompt = await ctx.bot.send_message(
             chat,
             f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
         )
+        _start_name_wait(ctx, chat, g, uid, seat_no, prompt)
         return
 
 
@@ -3014,6 +3054,8 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # ورودی معتبر شد → فلگ را پاک کن
         g.waiting_name.pop(uid, None)
+        if isinstance(getattr(g, "waiting_name_token", None), dict):
+            g.waiting_name_token.pop(uid, None)
 
         # ذخیره نام جدید در دفترچه
         g.user_names[uid] = text
@@ -4060,12 +4102,11 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
     if new_name == "ناشناس":
-        g.waiting_name[new_uid] = seat_no
-        store.save()
-        await ctx.bot.send_message(
+        prompt = await ctx.bot.send_message(
             chat_id,
             f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
         )
+        _start_name_wait(ctx, chat_id, g, new_uid, seat_no, prompt)
 
     await update.message.reply_text(f"✅ بازیکن جدید جایگزین صندلی {seat_no} شد.")
 
