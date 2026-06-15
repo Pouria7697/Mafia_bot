@@ -624,7 +624,13 @@ async def broadcast_weekly_stats(bot, force: bool = False):
     if text:
         for chat_id in list(store.active_groups):
             try:
-                await bot.send_message(chat_id, text, parse_mode="HTML")
+                msg = await bot.send_message(chat_id, text, parse_mode="HTML")
+                try:
+                    await bot.pin_chat_message(
+                        chat_id, msg.message_id, disable_notification=True
+                    )
+                except Exception as e:
+                    print(f"⚠️ weekly pin failed for {chat_id}:", e)
                 sent += 1
             except Exception as e:
                 print(f"⚠️ weekly send failed for {chat_id}:", e)
@@ -3996,6 +4002,55 @@ async def weekly_now_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ ارسال انجام نشد — به لاگ‌ها نگاه کن.")
 
 
+async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """ریپلای روی یک پیام در پی‌وی + /sendtoall → ارسال همان پیام به همهٔ گروه‌های فعال."""
+    if update.effective_user.id != 99347107:
+        return
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("⚠️ این دستور را فقط در پی‌وی بات بزن.")
+        return
+
+    replied = update.message.reply_to_message
+    if not replied:
+        await update.message.reply_text(
+            "❗ روی پیامی که می‌خواهی به همهٔ گروه‌ها بفرستی ریپلای کن و بعد /sendtoall را بزن."
+        )
+        return
+
+    if not store.active_groups:
+        await update.message.reply_text("⚠️ هیچ گروه فعالی وجود ندارد.")
+        return
+
+    sent = 0
+    failed = 0
+    pin = bool(ctx.args) and ctx.args[0].lower() in ("pin", "p", "سنجاق")
+    for chat_id in list(store.active_groups):
+        try:
+            msg = await ctx.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=update.effective_chat.id,
+                message_id=replied.message_id,
+            )
+            if pin:
+                try:
+                    await ctx.bot.pin_chat_message(
+                        chat_id, msg.message_id, disable_notification=True
+                    )
+                except Exception:
+                    pass
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"⚠️ sendtoall failed for {chat_id}:", e)
+
+    report = f"✅ پیام به {sent} گروه ارسال شد."
+    if pin:
+        report += " (سنجاق شد)"
+    if failed:
+        report += f"\n⚠️ {failed} گروه ناموفق بود."
+    await update.message.reply_text(report)
+
+
 async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != 99347107:
@@ -4398,6 +4453,7 @@ async def main():
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
+    app.add_handler(CommandHandler("sendtoall", sendtoall_cmd, filters=filters.ChatType.PRIVATE))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
