@@ -538,7 +538,8 @@ def _medal(i: int) -> str:
     return ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i + 1}."
 
 
-def build_weekly_leaderboard_text(current: dict, snapshot: dict) -> str | None:
+def build_weekly_leaderboard_text(current: dict, snapshot: dict,
+                                  require_weekly: bool = True) -> str | None:
     delta = _weekly_delta(current, snapshot)
 
     # ── این هفته ──
@@ -551,12 +552,19 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict) -> str | None:
         reverse=True,
     )[:2]
 
-    # اگر این هفته هیچ فعالیتی نبوده، چیزی نفرست
-    if not (w_overall or w_citizens or w_mafias or w_gods):
-        return None
-
     # ── کل دوران (تجمعی) ──
     c_overall = _rank_block(current, "wins", "games", 10)
+
+    weekly_active = bool(w_overall or w_citizens or w_mafias or w_gods)
+
+    if require_weekly:
+        # اجرای خودکار: اگر این هفته فعالیتی نبوده، چیزی نفرست
+        if not weekly_active:
+            return None
+    else:
+        # اجرای دستی (/weekly): اگر اصلاً هیچ آماری ثبت نشده، چیزی نفرست
+        if not weekly_active and not c_overall:
+            return None
 
     def pct(w, n):
         return f" ({round(w * 100 / n)}٪)" if n > 0 else ""
@@ -608,19 +616,27 @@ async def broadcast_weekly_stats(bot, force: bool = False):
         return
 
     if not force and (now - last_sent) < WEEKLY_PERIOD_SEC:
-        return
+        return {"sent": 0, "reason": "not_due"}
 
-    text = build_weekly_leaderboard_text(current, snapshot)
+    text = build_weekly_leaderboard_text(current, snapshot, require_weekly=not force)
 
+    sent = 0
     if text:
         for chat_id in list(store.active_groups):
             try:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
+                sent += 1
             except Exception as e:
                 print(f"⚠️ weekly send failed for {chat_id}:", e)
 
-    # خط مبنای هفتهٔ جدید
-    save_weekly_meta({"last_sent": now, "snapshot": current})
+    # در اجرای دستی (force) اسنپ‌شات هفته را صفر نکن تا تست بعدی هم کار کند
+    if not force:
+        save_weekly_meta({"last_sent": now, "snapshot": current})
+
+    if not text:
+        reason = "no_data" if not current else "no_activity"
+        return {"sent": 0, "reason": reason}
+    return {"sent": sent, "reason": "ok", "groups": len(store.active_groups)}
 
 
 async def weekly_scheduler(app):
@@ -3961,8 +3977,23 @@ async def weekly_now_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """ارسال فوری آمار هفتگی به همهٔ گروه‌های فعال (فقط مدیر اصلی)."""
     if update.effective_user.id != 99347107:
         return
-    await broadcast_weekly_stats(ctx.bot, force=True)
-    await update.message.reply_text("✅ آمار هفتگی به گروه‌های فعال ارسال شد.")
+    result = await broadcast_weekly_stats(ctx.bot, force=True) or {}
+    sent = result.get("sent", 0)
+    reason = result.get("reason")
+
+    if sent > 0:
+        await update.message.reply_text(f"✅ آمار هفتگی به {sent} گروه فعال ارسال شد.")
+    elif reason == "no_data":
+        await update.message.reply_text(
+            "📭 هنوز هیچ بازی تمام‌شده‌ای ثبت نشده، پس آماری برای ارسال وجود ندارد.\n"
+            "ابتدا یک بازی کامل تا اعلام برنده انجام بده."
+        )
+    elif reason == "no_activity":
+        await update.message.reply_text("ℹ️ آماری برای نمایش وجود دارد ولی ارسال نشد.")
+    elif not store.active_groups:
+        await update.message.reply_text("⚠️ هیچ گروه فعالی وجود ندارد (active_groups خالی است).")
+    else:
+        await update.message.reply_text("⚠️ ارسال انجام نشد — به لاگ‌ها نگاه کن.")
 
 
 async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
