@@ -1628,6 +1628,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "change_name":
+        # گاد هم می‌تواند نام خود را تغییر دهد (با صندلی نمادین ۰)
+        if uid == g.god_id:
+            prompt = await ctx.bot.send_message(
+                chat,
+                "✏️ این پیام را ریپلای کنید و نام جدید راوی (گاد) را به فارسی وارد کنید:"
+            )
+            _start_name_wait(ctx, chat, g, uid, 0, prompt)
+            return
+
         if uid not in [u for u, _ in g.seats.values()]:
             await ctx.bot.send_message(chat, "❗ شما هنوز ثبت‌نام نکرده‌اید.")
             return
@@ -3059,6 +3068,19 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # ذخیره نام جدید در دفترچه
         g.user_names[uid] = text
+
+        # ── تغییر نام گاد (صندلی نمادین ۰) ──
+        if target_seat == 0:
+            g.god_name = text
+            store.save()
+            mode = CTRL if g.phase != "idle" else REG
+            await publish_seating(ctx, chat_id, g, mode=mode)
+            await ctx.bot.send_message(chat_id, f"✅ نام راوی به «{text}» تغییر کرد.")
+            try:
+                save_usernames_to_gist(g.user_names)
+            except Exception:
+                pass
+            return
 
         # اگر هنوز روی همان صندلی است، همان را آپدیت کن
         if target_seat in g.seats and g.seats[target_seat][0] == uid:
