@@ -459,6 +459,180 @@ def format_player_stats(p: dict) -> str:
     return "\n".join(lines)
 
 
+# ─── آمار هفتگی (لیدربرد) ───────────────────────────────────────
+WEEKLY_META_FILENAME = "weekly_meta.json"   # {"last_sent": ts, "snapshot": {...}}
+WEEKLY_PERIOD_SEC = 7 * 24 * 3600           # هر ۷ روز
+
+def load_weekly_meta() -> dict:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        response = httpx.get(url, headers=headers)
+        if response.status_code == 200:
+            gist_data = response.json()
+            content = gist_data["files"].get(WEEKLY_META_FILENAME, {}).get("content", "{}")
+            return json.loads(content) or {}
+        return {}
+    except Exception as e:
+        print("❌ load_weekly_meta error:", e)
+        return {}
+
+def save_weekly_meta(meta: dict):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        data = {
+            "files": {
+                WEEKLY_META_FILENAME: {
+                    "content": json.dumps(meta, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        httpx.patch(url, headers=headers, json=data)
+    except Exception as e:
+        print("❌ save_weekly_meta error:", e)
+
+
+def _weekly_delta(current: dict, snapshot: dict) -> dict:
+    """تفاضل آمار هر بازیکن نسبت به اسنپ‌شات هفتهٔ قبل را برمی‌گرداند."""
+    fields = [
+        "games", "wins",
+        "citizen_games", "citizen_wins",
+        "mafia_games", "mafia_wins",
+        "indep_games", "indep_wins",
+        "god_games",
+    ]
+    delta = {}
+    for uid, cur in current.items():
+        old = snapshot.get(uid, {})
+        d = {f: cur.get(f, 0) - old.get(f, 0) for f in fields}
+        d["name"] = cur.get("name", "بازیکن")
+        delta[uid] = d
+    return delta
+
+
+def _rank_block(delta: dict, win_key: str, game_key: str, top_n: int):
+    """رتبه‌بندی بر اساس برد (تساوی → درصد برد)؛ فقط کسانی که حداقل ۱ برد دارند."""
+    rows = [
+        (uid, d) for uid, d in delta.items()
+        if d.get(win_key, 0) > 0
+    ]
+    def sort_key(item):
+        d = item[1]
+        w = d.get(win_key, 0)
+        n = d.get(game_key, 0)
+        rate = (w / n) if n > 0 else 0
+        score = w + rate * 2   # امتیاز ترکیبی: تعداد برد + وزن درصد برد
+        return (score, w)
+    rows.sort(key=sort_key, reverse=True)
+    return rows[:top_n]
+
+
+def _medal(i: int) -> str:
+    return ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i + 1}."
+
+
+def build_weekly_leaderboard_text(current: dict, snapshot: dict) -> str | None:
+    delta = _weekly_delta(current, snapshot)
+
+    # ── این هفته ──
+    w_overall = _rank_block(delta, "wins", "games", 10)
+    w_citizens = _rank_block(delta, "citizen_wins", "citizen_games", 3)
+    w_mafias = _rank_block(delta, "mafia_wins", "mafia_games", 3)
+    w_gods = sorted(
+        [(uid, d) for uid, d in delta.items() if d.get("god_games", 0) > 0],
+        key=lambda it: it[1].get("god_games", 0),
+        reverse=True,
+    )[:2]
+
+    # اگر این هفته هیچ فعالیتی نبوده، چیزی نفرست
+    if not (w_overall or w_citizens or w_mafias or w_gods):
+        return None
+
+    # ── کل دوران (تجمعی) ──
+    c_overall = _rank_block(current, "wins", "games", 10)
+
+    def pct(w, n):
+        return f" ({round(w * 100 / n)}٪)" if n > 0 else ""
+
+    def block(title, rows, win_key, game_key, unit="برد"):
+        out = [title]
+        if rows:
+            for i, (_uid, d) in enumerate(rows):
+                nm = escape(d["name"], quote=False)
+                # نام قابل‌کلیک → پروفایل بازیکن (بدون نمایش آیدی)
+                nm = f"<a href='tg://user?id={_uid}'>{nm}</a>"
+                w = d.get(win_key, 0)
+                n = d.get(game_key, 0)
+                suffix = pct(w, n) if unit == "برد" else ""
+                out.append(f"{_medal(i)} {nm} — {w} {unit}{suffix}")
+        else:
+            out.append("—")
+        out.append("")
+        return out
+
+    lines = ["🏆 <b>برترین‌های هفته مافیا</b> 🏆", ""]
+    lines += block("🏅 <b>۱۰ بازیکن برتر هفته</b>", w_overall, "wins", "games")
+    lines += block("◽️ <b>۳ شهروند برتر هفته</b>", w_citizens, "citizen_wins", "citizen_games")
+    lines += block("◾️ <b>۳ مافیای برتر هفته</b>", w_mafias, "mafia_wins", "mafia_games")
+    lines += block("🎩 <b>پرکارترین راوی‌های هفته (گاد)</b>", w_gods, "god_games", "god_games", unit="بازی")
+
+    lines.append("━━━━━━━━━━━━━")
+    lines += block("👑 <b>۱۰ بازیکن برتر کل دوران</b>", c_overall, "wins", "games")
+
+    # حذف خط خالی انتهایی
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    return "\n".join(lines)
+
+
+async def broadcast_weekly_stats(bot, force: bool = False):
+    """در صورت رسیدن موعد هفتگی، لیدربرد را به همهٔ گروه‌های فعال می‌فرستد."""
+    meta = load_weekly_meta()
+    now = datetime.now().timestamp()
+    last_sent = meta.get("last_sent", 0)
+    snapshot = meta.get("snapshot", {})
+
+    current = load_player_stats()
+
+    # اولین اجرا: فقط خط مبنا را ثبت کن و صبر کن تا هفتهٔ بعد
+    if not last_sent and not force:
+        save_weekly_meta({"last_sent": now, "snapshot": current})
+        return
+
+    if not force and (now - last_sent) < WEEKLY_PERIOD_SEC:
+        return
+
+    text = build_weekly_leaderboard_text(current, snapshot)
+
+    if text:
+        for chat_id in list(store.active_groups):
+            try:
+                await bot.send_message(chat_id, text, parse_mode="HTML")
+            except Exception as e:
+                print(f"⚠️ weekly send failed for {chat_id}:", e)
+
+    # خط مبنای هفتهٔ جدید
+    save_weekly_meta({"last_sent": now, "snapshot": current})
+
+
+async def weekly_scheduler(app):
+    """هر ساعت بررسی می‌کند که آیا موعد ارسال آمار هفتگی رسیده یا نه."""
+    while True:
+        try:
+            await broadcast_weekly_stats(app.bot)
+        except Exception as e:
+            print("⚠️ weekly_scheduler error:", e)
+        await asyncio.sleep(3600)
+
+
 store = Store()
 store.scenarios = load_scenarios_from_gist()
 
@@ -3783,6 +3957,14 @@ async def handle_stats_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
 
+async def weekly_now_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """ارسال فوری آمار هفتگی به همهٔ گروه‌های فعال (فقط مدیر اصلی)."""
+    if update.effective_user.id != 99347107:
+        return
+    await broadcast_weekly_stats(ctx.bot, force=True)
+    await update.message.reply_text("✅ آمار هفتگی به گروه‌های فعال ارسال شد.")
+
+
 async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != 99347107:
@@ -4184,6 +4366,7 @@ async def main():
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
+    app.add_handler(CommandHandler("weekly", weekly_now_cmd))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
@@ -4280,6 +4463,9 @@ async def main():
 
     # ▶️ اجرای اپلیکیشن
     await app.start()
+
+    # 📊 زمان‌بند آمار هفتگی
+    asyncio.create_task(weekly_scheduler(app))
 
     # ⏳ جلوگیری از خاموشی برنامه
     await asyncio.Event().wait()
