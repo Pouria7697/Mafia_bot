@@ -1514,21 +1514,24 @@ async def publish_seating(
                 pass
 
         # متن اصلی
+        # تاج ♚ فقط قبل از شروع بازی (مرحلهٔ ثبت‌نام) نمایش داده می‌شود
+        game_started = g.phase != "idle"
+        cr = "" if game_started else "♚"
+        event_num = int(get_event_numbers().get(str(chat_id), 1))
+
         lines = [
             f"{group_id_or_link}",
-            "🎭 <b>رویداد مافیا</b>",
-            f"📆 <b>تاریخ:</b> {today}",
-            f"🕰 <b>زمان:</b> {g.event_time or '---'}",
-            f"🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+            f"{cr}🎯 <b>شماره رویداد:</b> {event_num}",
+            f"{cr}🎭 <b>رویداد مافیا</b>",
+            f"{cr}📆 <b>تاریخ:</b> {today}",
+            f"{cr}🕰 <b>زمان:</b> {g.event_time or '---'}",
+            f"{cr}🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
         ]
 
-        event_num = int(get_event_numbers().get(str(chat_id), 1))
-        lines.insert(1, f"🎯 <b>شماره رویداد:</b> {event_num}")
-
         if g.scenario:
-            lines.append(f"📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
+            lines.append(f"{cr}📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
 
-        lines.append("\n\n📂 <b>بازیکنان:</b>\n")
+        lines.append(f"\n\n{cr}📂 <b>بازیکنان:</b>\n")
 
         # لیست صندلی‌ها
         for i in range(1, g.max_seats + 1):
@@ -1536,7 +1539,7 @@ async def publish_seating(
             if i in g.seats:
                 uid, name = g.seats[i]
                 safe_name = escape(name, quote=False)
-                txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
+                name_link = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
 
                 wn = 0
                 if isinstance(getattr(g, "warnings", None), dict):
@@ -1546,19 +1549,20 @@ async def publish_seating(
                 except Exception:
                     wn = 0
                 wn = max(0, wn)
-                if wn > 0:
-                    txt += " " + ("❗️" * wn)
+                warn_suffix = (" " + ("❗️" * wn)) if wn > 0 else ""
 
-                # زنده → دایرهٔ سبز | مرده → دایرهٔ قرمز و شمارهٔ خط‌خورده
-                if i in g.striked:
-                    circle = "🔴"
-                    seat_label = f"<s>{i}</s>"
+                if not game_started:
+                    # قبل از بازی: حالت اصلی با تاج
+                    line = f"♚{i}  {name_link}{warn_suffix}"
+                elif i in g.striked:
+                    # مرده: دایرهٔ قرمز، خط روی شماره و اسم، فونت عادی
+                    line = f"🔴<s>{i}  {name_link}</s>{warn_suffix}"
                 else:
-                    circle = "🟢"
-                    seat_label = f"{i}"
-                line = f"{circle}{seat_label}  {txt}"
+                    # زنده: دایرهٔ سبز، فونت بولد
+                    line = f"🟢<b>{i}  {name_link}</b>{warn_suffix}"
             else:
-                line = f"⬜{i} /{i}"
+                # صندلی خالی
+                line = f"⬜{i} /{i}" if game_started else f"♚{i} ⬜ /{i}"
             lines.append(line)
 
         # استعلام وضعیت
