@@ -1192,9 +1192,9 @@ async def publish_seating(
             if i in g.seats:
                 uid, name = g.seats[i]
                 safe_name = escape(name, quote=False)
-                # بازیکن مرده → اسمش هم کم‌رنگ (اسپویلر) هم خط‌خورده می‌شود
+                # بازیکن مرده → اسمش خط می‌خورد
                 if i in g.striked:
-                    safe_name = f"<s><tg-spoiler>{safe_name}</tg-spoiler></s>"
+                    safe_name = f"<s>{safe_name}</s>"
                 txt = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
 
                 wn = 0
@@ -1208,11 +1208,9 @@ async def publish_seating(
                 if wn > 0:
                     txt += " " + ("❗️" * wn)
 
-                # کنار اسم مرده، سنگ قبر بیاید (به‌جای ❌☠️)
-                if i in g.striked:
-                    txt += " ⚰️"
-
-                line = f"♚{i}  {txt}"
+                # برای بازیکن مرده، به‌جای شماره سنگ قبر نمایش داده می‌شود
+                seat_label = "⚰️" if i in g.striked else f"{i}"
+                line = f"♚{seat_label}  {txt}"
             else:
                 line = f"♚{i} ⬜ /{i}"
             lines.append(line)
