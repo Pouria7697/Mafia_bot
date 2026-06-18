@@ -641,6 +641,291 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
     return "\n".join(lines)
 
 
+# ─── لیست منتخب (دعوت ۱۰ نفر برتر هفته) ─────────────────────────
+SELECTED_FILENAME = "selected_list.json"
+SELECTED_DAYS = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
+ADMIN_ID = 99347107
+
+def load_selected_list() -> dict:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        response = httpx.get(url, headers=headers)
+        if response.status_code == 200:
+            gist_data = response.json()
+            content = gist_data["files"].get(SELECTED_FILENAME, {}).get("content", "{}")
+            return json.loads(content) or {}
+        return {}
+    except Exception as e:
+        print("❌ load_selected_list error:", e)
+        return {}
+
+def save_selected_list(data: dict):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+        payload = {
+            "files": {
+                SELECTED_FILENAME: {
+                    "content": json.dumps(data, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        httpx.patch(url, headers=headers, json=payload)
+    except Exception as e:
+        print("❌ save_selected_list error:", e)
+
+
+def kb_selected_days(selected_days) -> InlineKeyboardMarkup:
+    sel = set(selected_days or [])
+    rows = []
+    for idx, day in enumerate(SELECTED_DAYS):
+        label = f"✅ {day}" if day in sel else day
+        rows.append([InlineKeyboardButton(label, callback_data=f"selday_{idx}")])
+    rows.append([InlineKeyboardButton("📝 ثبت", callback_data="sel_submit")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def launch_selected_round(bot, candidates=None) -> int:
+    """دور جدید لیست منتخب: کاندیداها را ثبت و به همه پیام دعوت می‌فرستد."""
+    if candidates is None:
+        current = load_player_stats()
+        meta = load_weekly_meta()
+        snapshot = meta.get("snapshot", {})
+        delta = _weekly_delta(current, snapshot)
+        rows = _rank_block(delta, "wins", "games", 10)
+        if not rows:  # برای تست، اگر هفته خالی بود از کل دوران بگیر
+            rows = _rank_block(current, "wins", "games", 10)
+        candidates = [(uid, d.get("name", "بازیکن")) for uid, d in rows]
+
+    if not candidates:
+        return 0
+
+    data = {
+        "candidates": {str(uid): nm for uid, nm in candidates},
+        "responses": {},
+        "started_at": datetime.now().timestamp(),
+    }
+    save_selected_list(data)
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ بله", callback_data="sel_yes"),
+        InlineKeyboardButton("❌ خیر", callback_data="sel_no"),
+    ]])
+    sent = 0
+    failed = []
+    for uid, nm in candidates:
+        try:
+            await bot.send_message(
+                int(uid),
+                "🏆 تبریک! شما این هفته جزو ۱۰ نفر برتر شدید.\n\n"
+                "آیا تمایل دارید در «لیست منتخب» شرکت کنید؟",
+                reply_markup=kb,
+            )
+            sent += 1
+        except Exception as e:
+            failed.append(nm)
+            print(f"⚠️ selected invite failed for {uid}:", e)
+
+    # اطلاع به ادمین دربارهٔ کسانی که پیام به آن‌ها نرسید
+    if failed:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                "⚠️ بات نتوانست به این افراد پیام دعوت بدهد "
+                "(احتمالاً بات را استارت نکرده‌اند):\n"
+                + "\n".join(f"• {escape(n, quote=False)}" for n in failed),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    return sent
+
+
+def build_selected_report(sl: dict) -> str:
+    cand = sl.get("candidates", {})
+    responses = sl.get("responses", {})
+
+    yes = [(u, r) for u, r in responses.items() if r.get("participate")]
+    no = [r for u, r in responses.items() if not r.get("participate")]
+    pending = [u for u in cand if u not in responses]
+
+    lines = [
+        "📋 <b>گزارش لیست منتخب</b>",
+        f"کل کاندیداها: {len(cand)}",
+        f"✅ مایل: {len(yes)} | ❌ غیرمایل: {len(no)} | ⏳ بی‌پاسخ: {len(pending)}",
+        "",
+    ]
+    if yes:
+        lines.append("✅ <b>مایل به شرکت:</b>")
+        for _u, r in yes:
+            nm = escape(r.get("name", "بازیکن"), quote=False)
+            days = "، ".join(r.get("days", [])) or "—"
+            mark = "" if r.get("submitted") else " (هنوز ثبت نکرده)"
+            lines.append(f"• {nm} — {days}{mark}")
+        lines.append("")
+    if no:
+        lines.append("❌ <b>غیرمایل:</b>")
+        for r in no:
+            lines.append(f"• {escape(r.get('name', 'بازیکن'), quote=False)}")
+        lines.append("")
+    if pending:
+        lines.append("⏳ <b>بی‌پاسخ:</b>")
+        for u in pending:
+            lines.append(f"• {escape(cand.get(u, 'بازیکن'), quote=False)}")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
+async def _maybe_send_full_report(bot, sl: dict):
+    """وقتی همهٔ کاندیداها پاسخ نهایی دادند، یک گزارش کامل به ادمین می‌فرستد."""
+    cand = sl.get("candidates", {})
+    responses = sl.get("responses", {})
+
+    def finalized(uid):
+        r = responses.get(uid)
+        return bool(r and (not r.get("participate") or r.get("submitted")))
+
+    if not cand or not all(finalized(u) for u in cand):
+        return
+    if sl.get("report_sent"):
+        return
+
+    sl["report_sent"] = True
+    save_selected_list(sl)
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "🎉 همهٔ ۱۰ نفر پاسخ دادند!\n\n" + build_selected_report(sl),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+SELECTED_DEADLINE_SEC = 48 * 3600  # مهلت ۴۸ ساعته برای پاسخ
+
+async def check_selected_deadline(bot):
+    """اگر بعد از ۴۸ ساعت همه پاسخ نداده باشند، گزارش ناقص را به ادمین می‌فرستد."""
+    sl = load_selected_list()
+    if not sl.get("candidates") or sl.get("report_sent"):
+        return
+    started = sl.get("started_at", 0)
+    if not started or (datetime.now().timestamp() - started) < SELECTED_DEADLINE_SEC:
+        return
+
+    sl["report_sent"] = True
+    save_selected_list(sl)
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "⏰ مهلت ۴۸ ساعتهٔ لیست منتخب تمام شد.\n\n" + build_selected_report(sl),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+async def handle_selected_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    uid = str(q.from_user.id)
+    await safe_q_answer(q)
+
+    sl = load_selected_list()
+    cand = sl.get("candidates", {})
+    responses = sl.setdefault("responses", {})
+
+    if uid not in cand:
+        try:
+            await ctx.bot.send_message(int(uid), "⛔ شما در لیست برترین‌های این هفته نیستید.")
+        except Exception:
+            pass
+        return
+
+    name = cand.get(uid, q.from_user.full_name)
+
+    if data == "sel_no":
+        responses[uid] = {"name": name, "participate": False, "days": [], "submitted": True}
+        save_selected_list(sl)
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=int(uid), message_id=q.message.message_id, reply_markup=None
+            )
+        except Exception:
+            pass
+        await ctx.bot.send_message(int(uid), "باشه، ممنون! 🙏")
+        await _maybe_send_full_report(ctx.bot, sl)
+        return
+
+    if data == "sel_yes":
+        responses[uid] = {"name": name, "participate": True, "days": [], "submitted": False}
+        save_selected_list(sl)
+        await ctx.bot.send_message(
+            int(uid),
+            "📅 کدام روزها می‌توانید بازی کنید؟ (می‌توانید چند روز انتخاب کنید)\n"
+            "در پایان «📝 ثبت» را بزنید:",
+            reply_markup=kb_selected_days(set()),
+        )
+        return
+
+    if data.startswith("selday_"):
+        r = responses.get(uid)
+        if not r or not r.get("participate"):
+            return
+        try:
+            idx = int(data.split("_")[1])
+        except Exception:
+            return
+        day = SELECTED_DAYS[idx]
+        days = set(r.get("days", []))
+        if day in days:
+            days.remove(day)
+        else:
+            days.add(day)
+        r["days"] = [d for d in SELECTED_DAYS if d in days]  # حفظ ترتیب
+        save_selected_list(sl)
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=int(uid),
+                message_id=q.message.message_id,
+                reply_markup=kb_selected_days(r["days"]),
+            )
+        except Exception:
+            pass
+        return
+
+    if data == "sel_submit":
+        r = responses.get(uid)
+        if not r or not r.get("participate"):
+            return
+        if not r.get("days"):
+            await safe_q_answer(q, "حداقل یک روز انتخاب کن.", show_alert=True)
+            return
+        r["submitted"] = True
+        save_selected_list(sl)
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=int(uid), message_id=q.message.message_id, reply_markup=None
+            )
+        except Exception:
+            pass
+        await ctx.bot.send_message(
+            int(uid), f"✅ ثبت شد! روزهای انتخابی شما: {'، '.join(r['days'])}"
+        )
+        await _maybe_send_full_report(ctx.bot, sl)
+        return
+
+
 async def broadcast_weekly_stats(bot, force: bool = False):
     """در صورت رسیدن موعد هفتگی، لیدربرد را به همهٔ گروه‌های فعال می‌فرستد."""
     meta = load_weekly_meta()
@@ -675,6 +960,17 @@ async def broadcast_weekly_stats(bot, force: bool = False):
             except Exception as e:
                 print(f"⚠️ weekly send failed for {chat_id}:", e)
 
+    # 📋 دعوت ۱۰ نفر برتر هفته به لیست منتخب (فقط در اجرای خودکار)
+    if not force and text:
+        try:
+            delta = _weekly_delta(current, snapshot)
+            rows = _rank_block(delta, "wins", "games", 10)
+            cands = [(uid, d.get("name", "بازیکن")) for uid, d in rows]
+            if cands:
+                await launch_selected_round(bot, cands)
+        except Exception as e:
+            print("⚠️ launch_selected_round error:", e)
+
     # در اجرای دستی (force) اسنپ‌شات هفته را صفر نکن تا تست بعدی هم کار کند
     if not force:
         save_weekly_meta({"last_sent": now, "snapshot": current})
@@ -692,6 +988,10 @@ async def weekly_scheduler(app):
             await broadcast_weekly_stats(app.bot)
         except Exception as e:
             print("⚠️ weekly_scheduler error:", e)
+        try:
+            await check_selected_deadline(app.bot)
+        except Exception as e:
+            print("⚠️ check_selected_deadline error:", e)
         await asyncio.sleep(3600)
 
 
@@ -1764,6 +2064,12 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
 # ─────────────────────────────────────────────────────────────
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # 📋 لیست منتخب (مستقل از بازی، در پی‌وی) — قبل از هر چیز
+    _q = update.callback_query
+    if _q and _q.data and (_q.data.startswith("sel_") or _q.data.startswith("selday_")):
+        await handle_selected_callback(update, ctx)
+        return
+
     # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
     if update.effective_chat.type == "private":
         q = update.callback_query
@@ -4105,6 +4411,28 @@ async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report)
 
 
+async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """شروع دستی دور لیست منتخب (برای تست) — فقط مدیر اصلی."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    sent = await launch_selected_round(ctx.bot)
+    if sent == 0:
+        await update.message.reply_text("⚠️ کاندیدایی پیدا نشد یا هیچ‌کس پیام را دریافت نکرد.")
+    else:
+        await update.message.reply_text(f"✅ دعوت لیست منتخب به {sent} نفر ارسال شد.")
+
+
+async def selected_report_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """گزارش وضعیت لیست منتخب — فقط مدیر اصلی."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    sl = load_selected_list()
+    if not sl.get("candidates"):
+        await update.message.reply_text("هنوز دور لیست منتخبی شروع نشده است.")
+        return
+    await update.message.reply_text(build_selected_report(sl), parse_mode="HTML")
+
+
 async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != 99347107:
@@ -4508,6 +4836,8 @@ async def main():
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
     app.add_handler(CommandHandler("sendtoall", sendtoall_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("startselected", start_selected_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("selected", selected_report_cmd, filters=filters.ChatType.PRIVATE))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
     app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
