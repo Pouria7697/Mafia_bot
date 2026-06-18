@@ -1172,19 +1172,19 @@ async def publish_seating(
         # متن اصلی
         lines = [
             f"{group_id_or_link}",
-            "♚🎭 <b>رویداد مافیا</b>",
-            f"♚📆 <b>تاریخ:</b> {today}",
-            f"♚🕰 <b>زمان:</b> {g.event_time or '---'}",
-            f"♚🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+            "🎭 <b>رویداد مافیا</b>",
+            f"📆 <b>تاریخ:</b> {today}",
+            f"🕰 <b>زمان:</b> {g.event_time or '---'}",
+            f"🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
         ]
 
         event_num = int(get_event_numbers().get(str(chat_id), 1))
-        lines.insert(1, f"♚🎯 <b>شماره رویداد:</b> {event_num}")
+        lines.insert(1, f"🎯 <b>شماره رویداد:</b> {event_num}")
 
         if g.scenario:
-            lines.append(f"♚📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
+            lines.append(f"📜 <b>سناریو:</b> {g.scenario.name} | 👥 {sum(g.scenario.roles.values())} نفر")
 
-        lines.append("\n\n♚📂 <b>بازیکنان:</b>\n")
+        lines.append("\n\n📂 <b>بازیکنان:</b>\n")
 
         # لیست صندلی‌ها
         for i in range(1, g.max_seats + 1):
@@ -1205,11 +1205,16 @@ async def publish_seating(
                 if wn > 0:
                     txt += " " + ("❗️" * wn)
 
-                # بازیکن مرده → فقط روی شمارهٔ صندلی خط می‌خورد، اسم دست‌نخورده می‌ماند
-                seat_label = f"<s>{i}</s>" if i in g.striked else f"{i}"
-                line = f"♚{seat_label}  {txt}"
+                # زنده → دایرهٔ سبز | مرده → دایرهٔ قرمز و شمارهٔ خط‌خورده
+                if i in g.striked:
+                    circle = "🔴"
+                    seat_label = f"<s>{i}</s>"
+                else:
+                    circle = "🟢"
+                    seat_label = f"{i}"
+                line = f"{circle}{seat_label}  {txt}"
             else:
-                line = f"♚{i} ⬜ /{i}"
+                line = f"⬜{i} /{i}"
             lines.append(line)
 
         # استعلام وضعیت
