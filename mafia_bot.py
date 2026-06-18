@@ -357,8 +357,6 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this):
     """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند."""
     try:
         stats = load_player_stats()
-        chaos = bool(getattr(g, "chaos_mode", False))
-        chaos_sel = getattr(g, "chaos_selected", set()) or set()
 
         for seat in sorted(g.seats):
             uid, name = g.seats[seat]
@@ -374,11 +372,9 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this):
             else:
                 side = "شهر"
 
-            # برد: در حالت کی‌آس فقط ۳ نفر انتخاب‌شده برنده‌اند
-            if chaos:
-                won = seat in chaos_sel
-            else:
-                won = (side == g.winner_side)
+            # برد فقط بر اساس ساید واقعی هر بازیکن (شهر/مافیا/مستقل) تعیین می‌شود
+            # کی‌آس هیچ تأثیری روی برد ندارد؛ مافیای داخل کی‌آس هم اگر مافیا ببرد برنده است
+            won = (side == g.winner_side)
 
             key = str(uid)
             p = stats.get(key, {
