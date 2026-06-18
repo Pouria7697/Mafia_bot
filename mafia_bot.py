@@ -597,6 +597,50 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
     return "\n".join(lines)
 
 
+def build_alltime_leaderboard_text(current: dict) -> str | None:
+    """لیدربرد کل دوران (تجمعی) — از همان داده‌ی player_stats.json."""
+    overall = _rank_block(current, "wins", "games", 10)
+    citizens = _rank_block(current, "citizen_wins", "citizen_games", 3)
+    mafias = _rank_block(current, "mafia_wins", "mafia_games", 3)
+    gods = sorted(
+        [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
+        key=lambda it: it[1].get("god_games", 0),
+        reverse=True,
+    )[:2]
+
+    if not (overall or citizens or mafias or gods):
+        return None
+
+    def pct(w, n):
+        return f" ({round(w * 100 / n)}٪)" if n > 0 else ""
+
+    def block(title, rows, win_key, game_key, unit="برد"):
+        out = [title]
+        if rows:
+            for i, (_uid, d) in enumerate(rows):
+                nm = escape(d.get("name", "بازیکن"), quote=False)
+                nm = f"<a href='tg://user?id={_uid}'>{nm}</a>"
+                w = d.get(win_key, 0)
+                n = d.get(game_key, 0)
+                suffix = pct(w, n) if unit == "برد" else ""
+                out.append(f"{_medal(i)} {nm} — {w} {unit}{suffix}")
+        else:
+            out.append("—")
+        out.append("")
+        return out
+
+    lines = ["👑 <b>برترین‌های کل دوران مافیا</b> 👑", ""]
+    lines += block("🏅 <b>۱۰ بازیکن برتر کل</b>", overall, "wins", "games")
+    lines += block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_wins", "citizen_games")
+    lines += block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_wins", "mafia_games")
+    lines += block("🎩 <b>پرکارترین راوی‌ها (گاد)</b>", gods, "god_games", "god_games", unit="بازی")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    return "\n".join(lines)
+
+
 async def broadcast_weekly_stats(bot, force: bool = False):
     """در صورت رسیدن موعد هفتگی، لیدربرد را به همهٔ گروه‌های فعال می‌فرستد."""
     meta = load_weekly_meta()
@@ -3704,6 +3748,16 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_player_stats(p), parse_mode="HTML")
+        return
+
+    # 📊 آمار کل — لیدربرد بهترین‌های کل دوران (برای همه در هر گروه فعال)
+    if text == "آمار کل":
+        current = load_player_stats()
+        board = build_alltime_leaderboard_text(current)
+        if not board:
+            await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
+        else:
+            await msg.reply_text(board, parse_mode="HTML")
         return
 
     if g.vote_type == "awaiting_time" and uid == g.god_id:
