@@ -94,6 +94,8 @@ class GameState:
     god_name: str | None = None
     seats: dict[int, tuple[int, str]] | None = None
     event_time: str | None = None
+    event_title: str | None = None
+    awaiting_event_title: bool = False
     max_seats: int = 0
     scenario: Scenario | None = None
     phase: str = "idle"
@@ -718,7 +720,7 @@ async def launch_selected_round(bot, candidates=None) -> int:
         InlineKeyboardButton("✅ بله", callback_data="sel_yes"),
         InlineKeyboardButton("❌ خیر", callback_data="sel_no"),
     ]])
-    sent = 0
+    sent_names = []
     failed = []
     for uid, nm in candidates:
         try:
@@ -728,7 +730,7 @@ async def launch_selected_round(bot, candidates=None) -> int:
                 "آیا تمایل دارید در «لیست منتخب» شرکت کنید؟",
                 reply_markup=kb,
             )
-            sent += 1
+            sent_names.append(nm)
         except Exception as e:
             failed.append(nm)
             print(f"⚠️ selected invite failed for {uid}:", e)
@@ -746,15 +748,19 @@ async def launch_selected_round(bot, candidates=None) -> int:
         except Exception:
             pass
 
-    return sent
+    return {"sent": sent_names, "failed": failed}
 
 
 def build_selected_report(sl: dict) -> str:
     cand = sl.get("candidates", {})
     responses = sl.get("responses", {})
 
+    def link(uid, name):
+        nm = escape(name or "بازیکن", quote=False)
+        return f"<a href='tg://user?id={uid}'>{nm}</a>"
+
     yes = [(u, r) for u, r in responses.items() if r.get("participate")]
-    no = [r for u, r in responses.items() if not r.get("participate")]
+    no = [(u, r) for u, r in responses.items() if not r.get("participate")]
     pending = [u for u in cand if u not in responses]
 
     lines = [
@@ -765,21 +771,20 @@ def build_selected_report(sl: dict) -> str:
     ]
     if yes:
         lines.append("✅ <b>مایل به شرکت:</b>")
-        for _u, r in yes:
-            nm = escape(r.get("name", "بازیکن"), quote=False)
+        for u, r in yes:
             days = "، ".join(r.get("days", [])) or "—"
             mark = "" if r.get("submitted") else " (هنوز ثبت نکرده)"
-            lines.append(f"• {nm} — {days}{mark}")
+            lines.append(f"• {link(u, r.get('name'))} (<code>{u}</code>) — {days}{mark}")
         lines.append("")
     if no:
         lines.append("❌ <b>غیرمایل:</b>")
-        for r in no:
-            lines.append(f"• {escape(r.get('name', 'بازیکن'), quote=False)}")
+        for u, r in no:
+            lines.append(f"• {link(u, r.get('name'))} (<code>{u}</code>)")
         lines.append("")
     if pending:
         lines.append("⏳ <b>بی‌پاسخ:</b>")
         for u in pending:
-            lines.append(f"• {escape(cand.get(u, 'بازیکن'), quote=False)}")
+            lines.append(f"• {link(u, cand.get(u))} (<code>{u}</code>)")
 
     while lines and lines[-1] == "":
         lines.pop()
@@ -1193,9 +1198,20 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
 def settings_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")],
+        [InlineKeyboardButton("📝 تغییر رویداد", callback_data="change_event")],
         [InlineKeyboardButton("⬅️ برگشت", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(rows)
+
+
+async def _is_god_or_admin(ctx, chat_id: int, uid: int, g: GameState) -> bool:
+    if uid == g.god_id:
+        return True
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat_id)
+        return uid in {a.user.id for a in admins}
+    except Exception:
+        return False
 
 
 CARDS_FILENAME = "cards.json"
@@ -1522,7 +1538,7 @@ async def publish_seating(
         lines = [
             f"{group_id_or_link}",
             f"{cr}🎯 <b>شماره رویداد:</b> {event_num}",
-            f"{cr}🎭 <b>رویداد مافیا</b>",
+            f"{cr}🎭 <b>{escape(g.event_title, quote=False) if g.event_title else 'رویداد مافیا'}</b>",
             f"{cr}📆 <b>تاریخ:</b> {today}",
             f"{cr}🕰 <b>زمان:</b> {g.event_time or '---'}",
             f"{cr}🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
@@ -2970,12 +2986,27 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if data == "add_scenario" and (uid == g.god_id or uid in g.admins):
+    if data == "add_scenario" and (uid == g.god_id or uid in getattr(g, "admins", set())):
         g.adding_scenario_step = "name"
         g.adding_scenario_data = {}
         g.adding_scenario_last = datetime.now()
         store.save()
         await ctx.bot.send_message(chat, "📝 نام سناریوی جدید را بفرستید (۵ دقیقه فرصت دارید).")
+        return
+
+    # ─── تغییر موضوع/مناسبت رویداد (گاد یا ادمین‌ها) ─────────────
+    if data == "change_event":
+        if not await _is_god_or_admin(ctx, chat, uid, g):
+            await ctx.bot.send_message(chat, "⛔ فقط راوی یا ادمین‌های گروه می‌توانند رویداد را تغییر دهند.")
+            return
+        g.awaiting_event_title = True
+        store.save()
+        await ctx.bot.send_message(
+            chat,
+            "📝 موضوع رویداد را بنویسید (مثلاً: تولد).\n"
+            "می‌توانید همین پیام را ریپلای کنید یا بدون ریپلای بنویسید.\n"
+            "برای حذف موضوع، بنویسید: حذف"
+        )
         return
 
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
@@ -3506,6 +3537,33 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     await ctx.bot.send_message(chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
 
 
+async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: str) -> bool:
+    """اگر منتظر موضوع رویداد هستیم و فرستنده گاد/ادمین است، موضوع را تنظیم می‌کند."""
+    if not getattr(g, "awaiting_event_title", False):
+        return False
+    if not await _is_god_or_admin(ctx, chat_id, uid, g):
+        return False  # پیام بقیه نادیده گرفته شود تا گاد/ادمین پاسخ دهد
+
+    g.awaiting_event_title = False
+    mode = REG if g.phase == "idle" else CTRL
+
+    if text.strip() in ("حذف", "حذف موضوع", "پاک"):
+        g.event_title = None
+        store.save()
+        await publish_seating(ctx, chat_id, g, mode=mode)
+        await ctx.bot.send_message(chat_id, "✅ موضوع رویداد حذف شد.")
+        return True
+
+    title = text.strip()[:40]
+    g.event_title = title
+    store.save()
+    await publish_seating(ctx, chat_id, g, mode=mode)
+    await ctx.bot.send_message(
+        chat_id, f"✅ موضوع رویداد روی «{escape(title, quote=False)}» تنظیم شد."
+    )
+    return True
+
+
 async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
@@ -3515,6 +3573,10 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     chat_id = msg.chat.id
     g = gs(chat_id)
+
+    # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
+    if await _try_set_event_title(ctx, chat_id, uid, g, text):
+        return
 
     # ─────────────────────────────────────────────────────────────
     # 1) تغییر ساعت شروع (فقط توسط گاد) – با یا بدون ریپلای
@@ -3814,7 +3876,7 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     g = gs(chat)
 
-    if uid != g.god_id:
+    if not await _is_god_or_admin(ctx, chat, uid, g):
         return
 
     if seat in g.seats:
@@ -4049,6 +4111,10 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     uid = msg.from_user.id
     g = gs(chat_id)
     text = msg.text.strip()
+
+    # تغییر موضوع رویداد (گاد/ادمین) — بدون ریپلای
+    if await _try_set_event_title(ctx, chat_id, uid, g, text):
+        return
 
     # 📊 آمار من — هر بازیکنی در گروه فعال می‌تواند آمار خودش را ببیند
     if text == "آمار من":
@@ -4419,11 +4485,24 @@ async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """شروع دستی دور لیست منتخب (برای تست) — فقط مدیر اصلی."""
     if update.effective_user.id != ADMIN_ID:
         return
-    sent = await launch_selected_round(ctx.bot)
-    if sent == 0:
-        await update.message.reply_text("⚠️ کاندیدایی پیدا نشد یا هیچ‌کس پیام را دریافت نکرد.")
-    else:
-        await update.message.reply_text(f"✅ دعوت لیست منتخب به {sent} نفر ارسال شد.")
+    result = await launch_selected_round(ctx.bot)
+    sent_names = result.get("sent", [])
+    failed = result.get("failed", [])
+
+    if not sent_names and not failed:
+        await update.message.reply_text("⚠️ کاندیدایی پیدا نشد.")
+        return
+
+    lines = [f"✅ دعوت لیست منتخب به {len(sent_names)} نفر ارسال شد:"]
+    for i, nm in enumerate(sent_names, 1):
+        lines.append(f"{i}. {escape(nm, quote=False)}")
+    if failed:
+        lines.append("")
+        lines.append(f"⚠️ به {len(failed)} نفر نرسید (بات را استارت نکرده‌اند):")
+        for nm in failed:
+            lines.append(f"• {escape(nm, quote=False)}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def selected_report_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
