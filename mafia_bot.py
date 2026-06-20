@@ -3538,11 +3538,11 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
 
 
 async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: str) -> bool:
-    """اگر منتظر موضوع رویداد هستیم و فرستنده گاد/ادمین است، موضوع را تنظیم می‌کند."""
+    """اگر منتظر موضوع رویداد هستیم و فرستنده گاد است، موضوع را تنظیم می‌کند."""
     if not getattr(g, "awaiting_event_title", False):
         return False
-    if not await _is_god_or_admin(ctx, chat_id, uid, g):
-        return False  # پیام بقیه نادیده گرفته شود تا گاد/ادمین پاسخ دهد
+    if uid != g.god_id:
+        return False  # فقط گاد می‌تواند موضوع را تغییر دهد
 
     g.awaiting_event_title = False
     mode = REG if g.phase == "idle" else CTRL
