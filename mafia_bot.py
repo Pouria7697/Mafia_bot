@@ -185,6 +185,7 @@ class GameState:
         self.votes_cast = self.votes_cast or {}
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
+        self.seat_sides = getattr(self, "seat_sides", {})
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
@@ -364,9 +365,14 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this):
             uid, name = g.seats[seat]
             role = g.assigned_roles.get(seat, "—")
 
-            # تعیین ساید بازیکن (همان منطق announce_winner)
+            # تعیین ساید بازیکن
+            # اولویت اول: خریداری (شهروند → مافیا)
             if getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
                 side = "مافیا"
+            # اولویت دوم: ساید کَش‌شده هنگام تخصیص نقش (قابل اعتماد‌ترین روش)
+            elif getattr(g, "seat_sides", None) and seat in g.seat_sides:
+                side = g.seat_sides[seat]
+            # fallback: تشخیص لحظه‌ای (اگر کَش وجود نداشت)
             elif role in mafia_roles:
                 side = "مافیا"
             elif role in indep_for_this:
@@ -3459,6 +3465,20 @@ async def shuffle_and_assign(
         seat: uid_to_role[g.seats[seat][0]]
         for seat in g.seats
     }
+
+    # کش ساید هر صندلی در لحظه تخصیص نقش (برای ثبت آمار قابل اعتماد در پایان بازی)
+    _mr = load_mafia_roles()
+    _ir_all = load_indep_roles()
+    _indep = _ir_all.get(g.scenario.name, []) if g.scenario else []
+    g.seat_sides = {}
+    for _seat, (_uid, _name) in g.seats.items():
+        _role = g.assigned_roles.get(_seat, "—")
+        if _role in _mr:
+            g.seat_sides[_seat] = "مافیا"
+        elif _role in _indep:
+            g.seat_sides[_seat] = "مستقل"
+        else:
+            g.seat_sides[_seat] = "شهر"
 
     # 6) ارسال نقش‌ها به بازیکن‌ها (اختیاری) و ساخت لاگ برای گاد
     log, unreachable = [], []
