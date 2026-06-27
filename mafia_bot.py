@@ -3484,6 +3484,11 @@ async def shuffle_and_assign(
     log, unreachable = [], []
     stickers = load_stickers()
     if notify_players:
+        try:
+            group_title = (await ctx.bot.get_chat(chat_id)).title or str(chat_id)
+        except Exception:
+            group_title = str(chat_id)
+        scenario_name = getattr(g.scenario, "name", "—")
         for seat in sorted(g.seats):
             uid, name = g.seats[seat]
             role = g.assigned_roles[seat]
@@ -3492,8 +3497,13 @@ async def shuffle_and_assign(
                     await ctx.bot.send_sticker(uid, stickers[role])
                 except:
                     pass
+            role_msg = (
+                f"گروه: {group_title}\n"
+                f"سناریو: {scenario_name}\n"
+                f"نقش: {role}"
+            )
             try:
-                await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
+                await ctx.bot.send_message(uid, role_msg)
             except telegram.error.Forbidden:
                 unreachable.append(name)
 
