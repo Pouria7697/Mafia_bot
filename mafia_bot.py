@@ -239,6 +239,7 @@ class GameState:
         self.night_awaiting_sacrifice = getattr(self, "night_awaiting_sacrifice", False)
         self.night_pending_dead = getattr(self, "night_pending_dead", []) or []
         self.night_pending_reasons = getattr(self, "night_pending_reasons", {}) or {}
+        self.night_god_notified = getattr(self, "night_god_notified", False)
         self.night_mine_handled = getattr(self, "night_mine_handled", False)
         self.night_mine_sacrifice = getattr(self, "night_mine_sacrifice", None)
         # ── حالت شبِ خودکار (سناریو تکاور) ──
@@ -2348,6 +2349,93 @@ async def _night_report(ctx, g, text):
         pass
 
 
+def _night_all_done(g) -> bool:
+    """آیا همهٔ اکت‌های موردانتظارِ امشب انجام شده؟ (پویا بر اساس نقش‌های زنده و شرایط)"""
+    d = g.night_done or set()
+    def alive(r):
+        return _find_seat_by_role(g, r) is not None
+
+    if _is_takavar_scenario(g):
+        return "gunman" in d
+
+    if _is_neg_scenario(g):
+        if "mafia" not in d:
+            return False
+        need = set()
+        if alive(_R_DETECTIVE):
+            need.add("detective")
+        if not g.night_is_negotiation and alive(_R_DOCTOR):
+            need.add("doctor")
+        if not g.sniper_used and _find_sniper(g) is not None:
+            need.add("sniper")
+        if g.night_is_negotiation and alive(_R_REPORTER):
+            need.add("reporter")
+        return need <= d
+
+    if _is_baazpors_scenario(g):
+        if not ({"mafia", "shiad"} <= d):
+            return False
+        need = set()
+        if alive(_R_DETECTIVE):
+            need.add("detective")
+        if not g.night_doctor_blocked and alive(_R_DOCTOR):
+            need.add("doctor")
+        if not g.baazpors_used and alive(_R_BAAZPORS):
+            need.add("baazpors")
+        if not g.sniper_used and _find_seat_by_role(g, _R_SNIPER_BZP) is not None:
+            need.add("sniper")
+        return need <= d
+
+    if _is_nemayande_scenario(g):
+        if getattr(g, "night_awaiting_sacrifice", False):
+            return False   # مین فعال شده و منتظر فدای دن‌مافیا هستیم
+        if not ({"mafia", "hacker"} <= d):
+            return False
+        need = set()
+        if not g.lawyer_used and _find_seat_role_sub(g, _R_LAWYER) is not None:
+            need.add("lawyer")
+        if alive(_R_GUARD):
+            need.add("guard")
+        if not g.night_doctor_blocked and alive(_R_DOCTOR):
+            need.add("doctor")
+        if alive(_R_GUIDE):
+            need.add("guide")
+        return need <= d
+
+    if _is_kapu_scenario(g):
+        if getattr(g, "poison_phase", False):
+            return False
+        if not ({"mafia", "witch"} <= d):
+            return False
+        need = set()
+        if alive(_R_DETECTIVE):
+            need.add("detective")
+        if not g.night_doctor_blocked and alive(_R_ARMORER):
+            need.add("armorer")
+        if not g.attar_poison_used and alive(_R_ATTAR):
+            need.add("attar")
+        return need <= d
+
+    return False
+
+
+async def _maybe_notify_god_done(ctx, g):
+    """اگر همهٔ اکت‌ها تمام شد، یک‌بار به پیوی گاد اطلاع بده تا بداند می‌تواند /روز بزند."""
+    if not getattr(g, "night_active", False):
+        return
+    if getattr(g, "night_god_notified", False):
+        return
+    if not _night_all_done(g):
+        return
+    g.night_god_notified = True
+    store.save()
+    try:
+        await ctx.bot.send_message(
+            g.god_id, "✅ همهٔ اکت‌های امشب انجام شد. هر وقت خواستی «/روز» را بزن.")
+    except Exception:
+        pass
+
+
 async def start_night(ctx, chat_id, g):
     is_neg = _is_neg_scenario(g)
     is_bzp = _is_baazpors_scenario(g)
@@ -2390,6 +2478,7 @@ async def start_night(ctx, chat_id, g):
     g.night_awaiting_sacrifice = False
     g.night_pending_dead = []
     g.night_pending_reasons = {}
+    g.night_god_notified = False
     g.night_mine_handled = False
     g.night_mine_sacrifice = None
     # per-night تکاور
@@ -3777,8 +3866,10 @@ async def _nem_trigger_mine(ctx, chat_id, g):
             pass
     await _night_report(ctx, g, "💥 مین فعال شد")
     mafia_alive = sorted(_mafia_seats(g, alive_only=True))
-    don = _find_seat_by_role(g, _R_DON)
-    picker = don or (mafia_alive[0] if mafia_alive else None)
+    # تصمیم‌گیرندهٔ فدا: دن‌مافیا → یاغی → هکر
+    picker = (_find_seat_by_role(g, _R_DON)
+              or _find_seat_by_role(g, _R_YAGHI)
+              or _find_seat_by_role(g, _R_HACKER))
     if not picker or not mafia_alive:
         await _night_report(ctx, g, "⚠️ مافیایی برای فدا کردن نیست.")
         return
@@ -5362,7 +5453,18 @@ async def _kp_check_heir_inherit(ctx, g):
 async def _kp_begin_poison(ctx, chat_id, g):
     """شروع شب: اعلام سم + رأی‌گیری پادزهر از همه (جز عطار)."""
     target = g.attar_poisoned_seat
+    # اگر فردِ سم‌دار پیش از تعیین‌تکلیف از بازی خارج شده → بدون رأی‌گیری
     if target not in g.seats or target in (g.striked or set()):
+        if target in g.seats:
+            tname = g.seats[target][1]
+            for s in _alive_seats(g):
+                try:
+                    await ctx.bot.send_message(
+                        g.seats[s][0],
+                        f"🧪 سم در بدن {target}. {tname} بود، اما ایشان دیگر در بازی نیستند.")
+                except Exception:
+                    pass
+            await _night_report(ctx, g, f"🧪 سم در بدن {target}. {escape(tname, quote=False)} بود؛ از بازی خارج شده — رأی‌گیری لازم نیست.")
         g.attar_poisoned_seat = None
         store.save()
         await _kp_open_don(ctx, chat_id, g)
@@ -5428,8 +5530,8 @@ async def _kp_after_vote(ctx, chat_id, g):
         # دن/دارندهٔ پادزهر → زنده (پنهان)
         await _kp_apply_poison(ctx, chat_id, g, target, survived=True)
     elif attar is None:
-        # عطار مرده → قطعی می‌میرد
-        await _kp_apply_poison(ctx, chat_id, g, target, survived=False)
+        # عطار در بازی نیست → تصمیم با اکثریت
+        await _kp_apply_poison(ctx, chat_id, g, target, survived=majority_for)
     else:
         attar_uid = g.seats[attar][0]
         mtxt = "اکثریت موافقِ دادن پادزهر هستند." if majority_for else "اکثریت مخالفِ دادن پادزهر هستند."
@@ -5484,20 +5586,25 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
-    if _q and _q.data and _q.data.startswith("night_"):
-        await handle_night_callback(update, ctx)
-        return
-    if _q and _q.data and _q.data.startswith("bzp_"):
-        await handle_baazpors_callback(update, ctx)
-        return
-    if _q and _q.data and _q.data.startswith("nem_"):
-        await handle_nemayande_callback(update, ctx)
-        return
-    if _q and _q.data and _q.data.startswith("tk_"):
-        await handle_takavar_callback(update, ctx)
-        return
-    if _q and _q.data and _q.data.startswith("kp_"):
-        await handle_kapu_callback(update, ctx)
+    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_")):
+        _dt = _q.data
+        if _dt.startswith("night_"):
+            await handle_night_callback(update, ctx)
+        elif _dt.startswith("bzp_"):
+            await handle_baazpors_callback(update, ctx)
+        elif _dt.startswith("nem_"):
+            await handle_nemayande_callback(update, ctx)
+        elif _dt.startswith("tk_"):
+            await handle_takavar_callback(update, ctx)
+        else:
+            await handle_kapu_callback(update, ctx)
+        # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
+        try:
+            _gg, _ = _find_active_night_game(_q.from_user.id, _q)
+            if _gg is not None:
+                await _maybe_notify_god_done(ctx, _gg)
+        except Exception:
+            pass
         return
 
     # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
