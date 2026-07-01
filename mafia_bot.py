@@ -188,6 +188,7 @@ class GameState:
         self.seat_sides = getattr(self, "seat_sides", {})
         # ── حالت شبِ خودکار (سناریو مذاکره) ──
         self.night_active = getattr(self, "night_active", False)
+        self.maarefe_active = getattr(self, "maarefe_active", False)
         self.night_number = getattr(self, "night_number", 0)
         self.night_stage = getattr(self, "night_stage", None)
         self.night_is_negotiation = getattr(self, "night_is_negotiation", False)
@@ -2461,6 +2462,7 @@ async def start_night(ctx, chat_id, g):
         return
 
     g.night_active = True
+    g.maarefe_active = False
     g.night_number = (g.night_number or 0) + 1
     g.night_is_negotiation = False
     g.night_negotiation_target = None
@@ -2912,7 +2914,9 @@ async def handle_night_callback(update, ctx):
     chat_id = None
     candidates = []
     for cid, game in store.games.items():
-        if not (getattr(game, "night_active", False) or getattr(game, "night_awaiting_sacrifice", False)):
+        if not (getattr(game, "night_active", False)
+                or getattr(game, "night_awaiting_sacrifice", False)
+                or getattr(game, "maarefe_active", False)):
             continue
         if _seat_of_uid(game, uid) is not None:
             candidates.append((cid, game))
@@ -3154,7 +3158,9 @@ def _find_active_night_game(uid, q):
     """پیدا کردن بازیِ فعالِ شب که این کاربر در آن بازیکن است (مشترک بین موتورها)."""
     candidates = []
     for cid, game in store.games.items():
-        if not (getattr(game, "night_active", False) or getattr(game, "night_awaiting_sacrifice", False)):
+        if not (getattr(game, "night_active", False)
+                or getattr(game, "night_awaiting_sacrifice", False)
+                or getattr(game, "maarefe_active", False)):
             continue
         if _seat_of_uid(game, uid) is not None:
             candidates.append((cid, game))
@@ -7614,19 +7620,19 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ اول با /newgame <seats> بازی بساز، بعد /god بزن.")
         return
 
-    # ✅ فقط ادمین‌ها یا گاد فعلی اجازه تغییر گاد دارند
+    # ✅ فقط ادمین‌های گروه یا گادِ فعلی اجازه دارند (هم خود، هم ریپلای)
     admins = await ctx.bot.get_chat_administrators(chat)
-    admin_ids = {admin.user.id for admin in admins}
-    is_current_god = update.effective_user.id == g.god_id
-    if update.effective_user.id not in admin_ids and not is_current_god:
-        await update.message.reply_text("❌ فقط ادمین‌های گروه یا گاد فعلی می‌تونن گاد رو عوض کنن.")
+    admin_ids = {a.user.id for a in admins}
+    if update.effective_user.id not in admin_ids and update.effective_user.id != g.god_id:
+        await update.message.reply_text("❌ فقط ادمین‌های گروه یا گاد فعلی می‌تونن گاد رو تعیین کنن.")
         return
 
-    if not update.message.reply_to_message:
-        await update.message.reply_text("❌ لطفاً روی پیام کسی ریپلای کنید و بعد /god را بزنید.")
-        return
+    # هدف: با ریپلای → آن شخص؛ بدون ریپلای → خودِ فرستنده
+    if update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user
+    else:
+        target = update.effective_user
 
-    target = update.message.reply_to_message.from_user
     if g.god_id == target.id:
         await update.message.reply_text("ℹ️ همین حالا هم گاد هست.")
         return
@@ -7644,9 +7650,17 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # نام ترجیحی: از gist اگر موجود، وگرنه نام تلگرام
     new_name = g.user_names.get(target.id, target.full_name)
 
+    old_god_id = g.god_id
     g.god_id = target.id
     g.god_name = new_name
     store.save()
+
+    # 🔗 اتاق مافیا: گادِ قبلی حذف، لینک به گادِ جدید
+    if getattr(g, "mafia_room_id", None):
+        if old_god_id and old_god_id in g.mafia_room_members and old_god_id != target.id:
+            await _room_kick(ctx, g, old_god_id, allow_return=True)
+            g.mafia_room_members.discard(old_god_id)
+        await _room_send_link(ctx, g, target.id)
 
     await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_name}.")
 
@@ -7896,6 +7910,8 @@ async def do_maarefe(ctx, chat_id, g):
     if not getattr(g, "assigned_roles", None):
         await ctx.bot.send_message(chat_id, "⛔ ابتدا باید نقش‌ها پخش شوند.")
         return
+    g.maarefe_active = True   # شبِ معارفه (بدون اکت) — با /روز بسته می‌شود
+    store.save()
     await ctx.bot.send_message(chat_id, "🎭 <b>شب معارفه</b>", parse_mode="HTML")
     sides = getattr(g, "seat_sides", {}) or {}
     mafia_seats = [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
@@ -7928,8 +7944,7 @@ async def do_maarefe(ctx, chat_id, g):
                 m = await ctx.bot.send_message(
                     huid, "⚱️ شب معارفه — چه کسی را انتخاب می‌کنی؟ (اجباری، یک‌بار)",
                     reply_markup=_kb_night_seats(targets, g, "kp_heir_", confirm_cb="kp_heir_confirm"))
-                g.night_active = True   # تا کال‌بک وارث پیدا شود
-                g.night_pm_msgs[huid] = m.message_id
+                g.night_pm_msgs[huid] = m.message_id   # maarefe_active قبلاً ست شده تا کال‌بک پیدا شود
                 store.save()
             except Exception:
                 pass
@@ -7956,9 +7971,19 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if await _is_god_or_admin(ctx, chat_id, uid, g):
             await start_night(ctx, chat_id, g)
         return
+
     if text == "/روز":
         if await _is_god_or_admin(ctx, chat_id, uid, g):
-            await end_night(ctx, chat_id, g)
+            if g.night_active:
+                await end_night(ctx, chat_id, g)
+            elif getattr(g, "maarefe_active", False):
+                # پایانِ شبِ معارفه: فقط بستن چت مافیا (بدون محاسبهٔ مرگ)
+                g.maarefe_active = False
+                store.save()
+                await _room_set_locked(ctx, g, True)
+                await ctx.bot.send_message(chat_id, "☀️ روز شد. چت گروه مافیا بسته شد.")
+            else:
+                await end_night(ctx, chat_id, g)
         return
 
     # تغییر موضوع رویداد (گاد/ادمین) — بدون ریپلای
