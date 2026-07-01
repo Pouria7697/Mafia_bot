@@ -7568,6 +7568,28 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """«آمار من» و «آمار کل» در پیوی بات."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    text = msg.text.strip()
+    uid = msg.from_user.id
+    if text == "آمار من":
+        stats = load_player_stats()
+        p = stats.get(str(uid))
+        if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
+            await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
+        else:
+            await msg.reply_text(format_player_stats(p), parse_mode="HTML")
+    elif text == "آمار کل":
+        board = build_alltime_leaderboard_text(load_player_stats())
+        if not board:
+            await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
+        else:
+            await msg.reply_text(board, parse_mode="HTML")
+
+
 async def do_maarefe(ctx, chat_id, g):
     """شب معارفه: اعلام در گروه + ارسال اسم یاران به مافیاها (بدون اکت برای شهروندان)."""
     if not getattr(g, "assigned_roles", None):
@@ -8432,6 +8454,12 @@ async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & filters.Regex(r"^\s*(آمار من|آمار کل)\s*$"),
+            handle_stats_pm
+        )
+    )
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
