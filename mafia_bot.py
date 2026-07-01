@@ -15,7 +15,7 @@ from telegram.ext import filters
 from telegram.error import RetryAfter, TimedOut, BadRequest
 group_filter = filters.ChatType.GROUPS
 from datetime import datetime, timezone, timedelta  
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message, ChatPermissions
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
@@ -274,6 +274,11 @@ class GameState:
         self.heir_inherited = getattr(self, "heir_inherited", False)
         self.heir_no_yakuza = getattr(self, "heir_no_yakuza", False)
         self.kp_decider_seat = getattr(self, "kp_decider_seat", None)
+        # ── اتاق چت مافیا ──
+        self.mafia_room_id = getattr(self, "mafia_room_id", None)
+        self.mafia_room_link = getattr(self, "mafia_room_link", None)
+        self.mafia_room_members = getattr(self, "mafia_room_members", set()) or set()
+        self.mafia_room_pending_link = getattr(self, "mafia_room_pending_link", []) or []
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
@@ -2113,6 +2118,9 @@ async def announce_winner(ctx, update, g: GameState):
             except Exception:
                 pass
 
+    # 🔗 پایان بازی: پاک‌سازی اتاق مافیا (حذف همه + باطل‌کردن لینک)
+    await _room_cleanup(ctx, g)
+
 
 
 
@@ -2518,6 +2526,9 @@ async def start_night(ctx, chat_id, g):
     )
     await _night_report(ctx, g, f"━━━━━━━━━━━━\n🌙 <b>شب {g.night_number}</b>")
 
+    # 🔗 اتاق مافیا: باز کردن چت + حذف مافیای مرده + لینکِ معوقِ مذاکره
+    await _room_sync_on_night(ctx, g)
+
     if is_neg:
         g.night_stage = "mafia_decision"
         store.save()
@@ -2653,6 +2664,8 @@ async def end_night(ctx, chat_id, g):
     store.save()
     await ctx.bot.send_message(chat_id, f"☀️ روز شد. اکت‌گیری شب {g.night_number} پایان یافت.")
     await _night_report(ctx, g, f"☀️ پایان شب {g.night_number}")
+    # 🔒 بستن چتِ اتاق مافیا در روز
+    await _room_set_locked(ctx, g, True)
     # 💀 محاسبه و خط‌زدن خودکار کشته‌های شب
     await _resolve_night(ctx, chat_id, g)
 
@@ -2992,6 +3005,9 @@ async def handle_night_callback(update, ctx):
                 await ctx.bot.send_message(tu, "🤝 با شما مذاکره شد. اکنون «مافیا ساده» هستید.")
             except Exception:
                 pass
+            # لینک اتاق مافیا با یک شب تأخیر ارسال می‌شود
+            if g.mafia_room_id and tu not in (g.mafia_room_pending_link or []):
+                g.mafia_room_pending_link.append(tu)
             await _night_report(ctx, g, f"🤝 مذاکره با <b>{s}. {escape(tname, quote=False)}</b> → تبدیل به مافیا ساده ✅")
         else:
             await _night_report(ctx, g, f"🤝 مذاکره با <b>{s}. {escape(tname, quote=False)}</b> → نقش قابل جذب نبود ❌")
@@ -3450,6 +3466,7 @@ async def handle_baazpors_callback(update, ctx):
                 await ctx.bot.send_message(tu, "🥷 با شما یاکوزایی شد. اکنون «مافیا ساده» هستید.")
             except Exception:
                 pass
+            await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → مافیا ساده ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
@@ -5181,6 +5198,7 @@ async def handle_kapu_callback(update, ctx):
                 await ctx.bot.send_message(tu, "🥷 با شما یاکوزایی انجام شده است. اکنون مافیا هستید.")
             except Exception:
                 pass
+            await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
@@ -7369,6 +7387,14 @@ async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = Non
     elif not chat_id:
         raise ValueError("chat_id باید مشخص شود اگر update وجود ندارد")
 
+    # 🔗 پاک‌سازی اتاق مافیای بازی قبلی (قبل از ساخت GameState جدید)
+    old = store.games.get(chat_id)
+    if ctx is not None and old is not None and getattr(old, "mafia_room_id", None):
+        try:
+            await _room_cleanup(ctx, old)
+        except Exception:
+            pass
+
     # 🔄 بارگذاری نام‌ها
     usernames = load_usernames_from_gist()
 
@@ -7697,6 +7723,174 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(board, parse_mode="HTML")
 
 
+# ═════════════════════════════════════════════════════════════
+#  اتاق چت مافیا (گروه‌های جداگانه)
+# ═════════════════════════════════════════════════════════════
+ROOMS_FILENAME = "mafia_rooms.json"
+
+
+def load_mafia_rooms() -> list:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        if r.status_code == 200:
+            content = r.json()["files"].get(ROOMS_FILENAME, {}).get("content", "[]")
+            return json.loads(content) or []
+    except Exception as e:
+        print("❌ load_mafia_rooms error:", e)
+    return []
+
+
+def save_mafia_rooms(rooms: list):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        data = {"files": {ROOMS_FILENAME: {"content": json.dumps(rooms, ensure_ascii=False, indent=2)}}}
+        httpx.patch(url, headers=headers, json=data)
+    except Exception as e:
+        print("❌ save_mafia_rooms error:", e)
+
+
+def _mafia_room_seats(g):
+    """صندلی‌های مافیایی که باید لینک اتاق بگیرند (در تکاور گروگانگیر مستثنی است)."""
+    sides = getattr(g, "seat_sides", {}) or {}
+    seats = [s for s in g.seats if s in (g.negotiated_seats or set()) or sides.get(s) == "مافیا"]
+    if _is_takavar_scenario(g):
+        seats = [s for s in seats if _seat_role_norm(g, s) != _R_HOSTAGE]
+    return seats
+
+
+async def _room_send_link(ctx, g, uid):
+    if not g.mafia_room_id or not g.mafia_room_link or uid in g.mafia_room_members:
+        return
+    g.mafia_room_members.add(uid)
+    store.save()
+    try:
+        await ctx.bot.send_message(uid, f"🔗 لینک گروه مافیا:\n{g.mafia_room_link}")
+    except Exception:
+        pass
+
+
+async def _room_kick(ctx, g, uid, allow_return=False):
+    if not g.mafia_room_id:
+        return
+    try:
+        await ctx.bot.ban_chat_member(g.mafia_room_id, uid)
+        if allow_return:
+            await ctx.bot.unban_chat_member(g.mafia_room_id, uid, only_if_banned=True)
+    except Exception:
+        pass
+
+
+async def _room_set_locked(ctx, g, locked: bool):
+    if not g.mafia_room_id:
+        return
+    try:
+        if locked:
+            perms = ChatPermissions(can_send_messages=False)
+        else:
+            perms = ChatPermissions(
+                can_send_messages=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True)
+        await ctx.bot.set_chat_permissions(g.mafia_room_id, perms)
+    except Exception:
+        pass
+
+
+async def _room_allocate(ctx, g):
+    """یک اتاقِ آزاد به این بازی اختصاص می‌دهد و لینک می‌سازد."""
+    if g.mafia_room_id:
+        return True
+    rooms = load_mafia_rooms()
+    used = {getattr(game, "mafia_room_id", None) for game in store.games.values()
+            if getattr(game, "mafia_room_id", None)}
+    room = next((r for r in rooms if r not in used), None)
+    if room is None:
+        return False
+    try:
+        link = await ctx.bot.create_chat_invite_link(room, name=f"game-{g.god_id}")
+        g.mafia_room_id = room
+        g.mafia_room_link = link.invite_link
+        g.mafia_room_members = set()
+        g.mafia_room_pending_link = []
+        store.save()
+        await _room_set_locked(ctx, g, False)   # شبِ معارفه باز باشد
+        return True
+    except Exception as e:
+        print("❌ _room_allocate error:", e)
+        return False
+
+
+async def _room_sync_on_night(ctx, g):
+    """در /شب: باز کردن چت + حذف مافیای مرده + ارسال لینکِ معوق (مذاکره)."""
+    if not g.mafia_room_id:
+        return
+    await _room_set_locked(ctx, g, False)
+    for uid in list(g.mafia_room_members):
+        seat = _seat_of_uid(g, uid)
+        if seat is None or seat in (g.striked or set()):
+            await _room_kick(ctx, g, uid)
+            g.mafia_room_members.discard(uid)
+    for uid in list(g.mafia_room_pending_link or []):
+        await _room_send_link(ctx, g, uid)
+    g.mafia_room_pending_link = []
+    store.save()
+
+
+async def _room_cleanup(ctx, g):
+    """پایان بازی: حذف همه + باطل‌کردن لینک + آزادسازی اتاق."""
+    if not g.mafia_room_id:
+        return
+    for uid in list(g.mafia_room_members):
+        await _room_kick(ctx, g, uid, allow_return=True)
+    if g.mafia_room_link:
+        try:
+            await ctx.bot.revoke_chat_invite_link(g.mafia_room_id, g.mafia_room_link)
+        except Exception:
+            pass
+    g.mafia_room_id = None
+    g.mafia_room_link = None
+    g.mafia_room_members = set()
+    g.mafia_room_pending_link = []
+    store.save()
+
+
+async def addroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """ثبتِ گروهِ فعلی به‌عنوان اتاق چت مافیا (ادمین)."""
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("این دستور فقط در گروه‌ها کار می‌کند.")
+        return
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat.id)
+        if update.effective_user.id not in {a.user.id for a in admins}:
+            await update.message.reply_text("❌ فقط ادمین‌ها می‌توانند این گروه را ثبت کنند.")
+            return
+    except Exception:
+        pass
+    rooms = load_mafia_rooms()
+    if chat.id in rooms:
+        await update.message.reply_text("ℹ️ این گروه از قبل به‌عنوان اتاق مافیا ثبت شده است.")
+        return
+    rooms.append(chat.id)
+    save_mafia_rooms(rooms)
+    await update.message.reply_text(
+        "✅ این گروه به‌عنوان «اتاق چت مافیا» ثبت شد.\n"
+        "این گروه را «/active» نکنید. بات باید ادمین با دسترسیِ «دعوت» و «حذف اعضا» باشد.")
+
+
+async def delroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    rooms = load_mafia_rooms()
+    if chat.id in rooms:
+        rooms.remove(chat.id)
+        save_mafia_rooms(rooms)
+        await update.message.reply_text("🗑 این گروه از فهرست اتاق‌های مافیا حذف شد.")
+    else:
+        await update.message.reply_text("ℹ️ این گروه در فهرست اتاق‌ها نبود.")
+
+
 async def do_maarefe(ctx, chat_id, g):
     """شب معارفه: اعلام در گروه + ارسال اسم یاران به مافیاها (بدون اکت برای شهروندان)."""
     if not getattr(g, "assigned_roles", None):
@@ -7713,6 +7907,16 @@ async def do_maarefe(ctx, chat_id, g):
             await ctx.bot.send_message(uid, text)
         except Exception:
             pass
+
+    # 🔗 اتاق چت مافیا: تخصیص + ارسال لینک به گاد و مافیاها (در تکاور گروگانگیر مستثنی)
+    if await _room_allocate(ctx, g):
+        await _room_send_link(ctx, g, g.god_id)
+        for s in _mafia_room_seats(g):
+            await _room_send_link(ctx, g, g.seats[s][0])
+        await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
+    else:
+        if load_mafia_rooms():
+            await ctx.bot.send_message(chat_id, "⚠️ اتاق مافیای آزادی موجود نیست (همه مشغول‌اند).")
 
     # سناریو کاپو: اکت اجباری وارث در شب معارفه
     if _is_kapu_scenario(g) and g.heir_target is None:
@@ -8567,6 +8771,8 @@ async def main():
             handle_stats_pm
         )
     )
+    app.add_handler(CommandHandler("addroom", addroom_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("delroom", delroom_cmd, filters=group_filter))
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
