@@ -1907,8 +1907,8 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
     return True
 
 
-async def _send_vote_timing_report(ctx, g):
-    """گزارش تست: زمانِ ثبت هر رأی نسبت به پیامِ «رأی‌گیری برای…» — به پیوی گاد."""
+async def _send_vote_timing_report(ctx, g, chat_id):
+    """گزارش تست: زمانِ ثبت هر رأی نسبت به پیامِ «رأی‌گیری برای…» — داخل گروه."""
     logs = getattr(g, "vote_logs", {}) or {}
     if not logs:
         return
@@ -1929,7 +1929,7 @@ async def _send_vote_timing_report(ctx, g):
             vname = g.seats.get(vs, (0, "؟"))[1] if vs else "؟"
             lines.append(f"  • {vs}. {escape(vname, quote=False)} — {rel:.1f} ثانیه")
     try:
-        await ctx.bot.send_message(g.god_id, "\n".join(lines), parse_mode="HTML")
+        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
     except Exception:
         pass
 
@@ -6524,7 +6524,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if data == "vote_done_initial" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
-        await _send_vote_timing_report(ctx, g)   # 🕒 گزارش تست زمان‌بندی به پیوی گاد
+        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست زمان‌بندی داخل گروه
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
@@ -6536,7 +6536,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done_final" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
-        await _send_vote_timing_report(ctx, g)   # 🕒 گزارش تست زمان‌بندی به پیوی گاد
+        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست زمان‌بندی داخل گروه
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
