@@ -2030,7 +2030,9 @@ async def announce_winner(ctx, update, g: GameState):
     else:
         group_link = group_title
 
+    event_title = escape(g.event_title, quote=False) if getattr(g, "event_title", None) else "رویداد مافیا"
     lines = [
+        f"🎭 <b>{event_title}</b>",
         f"░⚜️🎮 گروه: {group_link}",
         f"░⚜️📅 تاریخ: {date_str}",
         f"░⚜️🎯 شماره رویداد:{event_num}",
@@ -2910,6 +2912,15 @@ async def _resolve_baazpors(ctx, chat_id, g):
     if yk and yk in g.seats:
         dead.add(yk); reasons[yk] = "فدای یاکوزایی"
     _resolve_sniper(g, dead, reasons)   # اسنایپر بازپرس ۱۲/۱۳ نفره
+
+    # 🪢 هانتر: اگر امشب کشته شود و به مافیایی جز گادفادر بسته باشد، آن فرد را با خود می‌برد
+    hunter = _find_seat_by_role(g, _R_HUNTER, alive_only=False)
+    ht = g.night_hunter_target
+    if hunter is not None and hunter in dead and ht and ht in g.seats and ht not in dead:
+        draggable = (ht in _mafia_seats(g)) and (_seat_role_norm(g, ht) != _R_GODFATHER)
+        if draggable:
+            dead.add(ht); reasons[ht] = "هانتر با خود برد"
+
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
 
 
@@ -3386,7 +3397,8 @@ async def handle_baazpors_callback(update, ctx):
             return
         g.night_hunter_target = s
         _tu, tname = g.seats[s]
-        correct = _seat_role_norm(g, s) in (_R_SHIAD, _R_NATO)
+        # درست = هر مافیایی جز گادفادر (شیاد، ناتو، مافیا ساده، یاکوزایی‌شده)
+        correct = (s in _mafia_seats(g)) and (_seat_role_norm(g, s) != _R_GODFATHER)
         tick = "✅" if correct else "❌"
         await _close_pm(ctx, uid, mid, f"🪢 خودت را به {s}. {tname} بستی.")
         await _night_report(ctx, g, f"🪢 هانتر → بست به {s}. {escape(tname, quote=False)} {tick}")
