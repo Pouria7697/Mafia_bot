@@ -468,10 +468,10 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this):
             # اولویت دوم: ساید کَش‌شده هنگام تخصیص نقش (قابل اعتماد‌ترین روش)
             elif getattr(g, "seat_sides", None) and seat in g.seat_sides:
                 side = g.seat_sides[seat]
-            # fallback: تشخیص لحظه‌ای (اگر کَش وجود نداشت)
-            elif role in mafia_roles:
+            # fallback: تشخیص لحظه‌ای (اگر کَش وجود نداشت) — با نرمالایز عربی/فارسی
+            elif _nz(role) in {_nz(x) for x in mafia_roles}:
                 side = "مافیا"
-            elif role in indep_for_this:
+            elif _nz(role) in {_nz(x) for x in indep_for_this}:
                 side = "مستقل"
             else:
                 side = "شهر"
@@ -1797,18 +1797,18 @@ async def publish_seating(
         # لیست نقش‌ها
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
-                mafia_roles = load_mafia_roles()
+                mafia_roles = {_nz(x) for x in load_mafia_roles()}
                 indep_roles = load_indep_roles()
-                indep_for_this = indep_roles.get(g.scenario.name, [])
+                indep_for_this = {_nz(x) for x in indep_roles.get(g.scenario.name, [])}
                 mafia_lines = ["<b>نقش‌های مافیا:</b>"]
                 citizen_lines = ["<b>نقش‌های شهروند:</b>"]
                 indep_lines = ["<b>نقش‌های مستقل:</b>"]
 
                 for role, count in g.scenario.roles.items():
                     for _ in range(count):
-                        if role in mafia_roles:
+                        if _nz(role) in mafia_roles:
                             mafia_lines.append(f"♠️ {role}")
-                        elif role in indep_for_this:
+                        elif _nz(role) in indep_for_this:
                             indep_lines.append(f"♦️ {role}")
                         else:
                             citizen_lines.append(f"♥️ {role}")
@@ -2041,9 +2041,9 @@ async def announce_winner(ctx, update, g: GameState):
         "",
     ]
 
-    mafia_roles = load_mafia_roles()
+    mafia_roles = {_nz(x) for x in load_mafia_roles()}
     indep_roles = load_indep_roles()
-    indep_for_this = indep_roles.get(g.scenario.name, [])
+    indep_for_this = {_nz(x) for x in indep_roles.get(g.scenario.name, [])}
 
     for seat in sorted(g.seats):
         uid, name = g.seats[seat]
@@ -2056,10 +2056,10 @@ async def announce_winner(ctx, update, g: GameState):
         elif getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
             role_display = f"{role} / مافیا"
             marker = "◾️"  # خریداری شده → مافیا
-        elif role in mafia_roles:
+        elif _nz(role) in mafia_roles:
             marker = "◾️"  # مافیا
             role_display = role
-        elif role in indep_for_this:
+        elif _nz(role) in indep_for_this:
             marker = "♦️"  # مستقل
             role_display = role
                 
@@ -3221,15 +3221,16 @@ def _find_active_night_game(uid, q):
 
 
 def _bzp_detective_positive(g, seat) -> bool:
-    if seat in (g.negotiated_seats or set()):
-        return True  # یاکوزایی‌شده همیشه مثبت
     rn = _seat_role_norm(g, seat)
-    if rn in (_R_SHIAD, _R_NATO):
-        det = _find_seat_by_role(g, _R_DETECTIVE)
-        if g.night_shiad_guess is not None and det is not None and g.night_shiad_guess == det:
-            return False  # شیاد کاراگاه را درست حدس زده → استتار شیاد/ناتو
-        return True
-    return False  # گادفادر و شهروندان منفی
+    # نقش‌هایی که معمولاً مثبت‌اند: شیاد، ناتو، و فرد یاکوزایی‌شده
+    positive_role = (seat in (g.negotiated_seats or set())) or (rn in (_R_SHIAD, _R_NATO))
+    if not positive_role:
+        return False  # گادفادر و شهروندان منفی
+    # اگر شیاد کاراگاه را درست حدس زده باشد → استتار (هر سه منفی می‌شوند)
+    det = _find_seat_by_role(g, _R_DETECTIVE)
+    if g.night_shiad_guess is not None and det is not None and g.night_shiad_guess == det:
+        return False
+    return True
 
 
 async def _bzp_broadcast_special(ctx, g, kind):
@@ -3846,7 +3847,7 @@ async def _nem_open_mafia(ctx, chat_id, g):
         g.night_done.add("hacker")
     else:
         huid = g.seats[hk][0]
-        targets = _alive_seats(g)
+        targets = [s for s in _alive_seats(g) if s != hk]   # خودش نباشد
         m = await _safe_pm(ctx, huid, "💻 اکتِ چه کسی را هک می‌کنی؟ (مرحلهٔ ۱: فاعل)",
                            _kb_night_seats(targets, g, "nem_hka_",
                                            selected=g.night_sel.get(huid), confirm_cb="nem_hka_confirm"))
@@ -4160,7 +4161,8 @@ async def handle_nemayande_callback(update, ctx):
         g.night_hacker_actor = s
         g.night_sel.pop(uid, None)
         store.save()
-        targets = _alive_seats(g)
+        hk = _seat_of_uid(g, uid)
+        targets = [x for x in _alive_seats(g) if x != hk and x != s]   # نه خودش، نه فاعل
         await _edit_pm(ctx, uid, mid, "💻 اکتش روی چه کسی بسته شود؟ (مرحلهٔ ۲: مفعول)",
                        _kb_night_seats(targets, g, "nem_hkt_", confirm_cb="nem_hkt_confirm"))
         return
@@ -4169,8 +4171,10 @@ async def handle_nemayande_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
+        hk = _seat_of_uid(g, uid)
         await _edit_pm(ctx, uid, mid, "💻 اکتِ چه کسی را هک می‌کنی؟ (مرحلهٔ ۱: فاعل)",
-                       _kb_night_seats(_alive_seats(g), g, "nem_hka_", selected=s, confirm_cb="nem_hka_confirm"))
+                       _kb_night_seats([x for x in _alive_seats(g) if x != hk], g, "nem_hka_",
+                                       selected=s, confirm_cb="nem_hka_confirm"))
         return
 
     if data == "nem_hkt_confirm":
@@ -4193,8 +4197,10 @@ async def handle_nemayande_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
+        hk = _seat_of_uid(g, uid)
+        targets = [x for x in _alive_seats(g) if x != hk and x != g.night_hacker_actor]
         await _edit_pm(ctx, uid, mid, "💻 اکتش روی چه کسی بسته شود؟ (مرحلهٔ ۲: مفعول)",
-                       _kb_night_seats(_alive_seats(g), g, "nem_hkt_", selected=s, confirm_cb="nem_hkt_confirm"))
+                       _kb_night_seats(targets, g, "nem_hkt_", selected=s, confirm_cb="nem_hkt_confirm"))
         return
 
     # ── وکیل (یکبار) ──
@@ -6834,14 +6840,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند استعلام وضعیت بگیرد!")
             return
 
-        mafia_roles = load_mafia_roles()
-        dead_seats = [s for s in g.striked]  
+        mafia_roles = {_nz(x) for x in load_mafia_roles()}
+        dead_seats = [s for s in g.striked]
         mafia_count = 0
         citizen_count = 0
 
         for s in dead_seats:
             role = g.assigned_roles.get(s)
-            if role and role in mafia_roles:
+            if role and _nz(role) in mafia_roles:
                 mafia_count += 1
             else:
                 citizen_count += 1
@@ -7050,12 +7056,12 @@ async def shuffle_and_assign(
     }
 
     # کش ساید هر صندلی در لحظه تخصیص نقش (برای ثبت آمار قابل اعتماد در پایان بازی)
-    _mr = load_mafia_roles()
+    _mr = {_nz(x) for x in load_mafia_roles()}                    # نرمالایز (عربی/فارسی)
     _ir_all = load_indep_roles()
-    _indep = _ir_all.get(g.scenario.name, []) if g.scenario else []
+    _indep = {_nz(x) for x in (_ir_all.get(g.scenario.name, []) if g.scenario else [])}
     g.seat_sides = {}
     for _seat, (_uid, _name) in g.seats.items():
-        _role = g.assigned_roles.get(_seat, "—")
+        _role = _nz(g.assigned_roles.get(_seat, "—"))
         if _role in _mr:
             g.seat_sides[_seat] = "مافیا"
         elif _role in _indep:
