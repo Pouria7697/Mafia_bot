@@ -1857,6 +1857,83 @@ async def publish_seating(
 # ─────────────────────────────────────────────────────────────
 #  رأی‌گیری (همان نسخهٔ قبلی؛ فقط دست نزدیم)
 # ─────────────────────────────────────────────────────────────
+def _is_valid_vote_text(text: str) -> bool:
+    """رأی معتبر: فقط «دولایک با هر رنگ پوست» یا «دو نقطه ..»"""
+    t = (text or "").strip()
+    if t == "..":
+        return True
+    # حذف رنگ پوست، کاراکترهای نامرئی ایموجی و فاصله‌ها
+    _strip = {"︎", "️", "‍", " ", "‌"}    # variation selectors + ZWJ + فاصله + نیم‌فاصله
+    cleaned = "".join(
+        ch for ch in t
+        if not ("\U0001F3FB" <= ch <= "\U0001F3FF")           # skin tone modifiers
+        and ch not in _strip
+    )
+    return cleaned == "\U0001F44D\U0001F44D"                  # 👍👍
+
+
+def _try_capture_vote(g, msg, uid, text) -> bool:
+    """اگر پیام یک رأی معتبر داخل پنجرهٔ رأی‌گیری باشد، ثبتش می‌کند.
+    ملاک زمان = ساعتِ ارسال تلگرام (msg.date)، نه زمان پردازش."""
+    vw = getattr(g, "vote_window", None)
+    target = getattr(g, "current_vote_target", None)
+    if not vw or not target:
+        return False
+    if not _is_valid_vote_text(text):
+        return False
+    start, end, win_target = vw
+    if win_target != target:
+        return False
+    try:
+        msg_ts = msg.date.timestamp()
+    except Exception:
+        msg_ts = datetime.now().timestamp()
+    if not (start <= msg_ts <= end + 1.0):   # ۱ ثانیه تلورانس ساعت
+        return False
+    voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
+    if not voter_seat or voter_seat == target or voter_seat in (g.striked or set()):
+        return False
+    g.votes_cast.setdefault(target, set())
+    if uid not in g.votes_cast[target]:      # هر نفر برای «هر هدف» فقط یک رأی (به اهداف مختلف آزاد است)
+        g.votes_cast[target].add(uid)
+        if not hasattr(g, "vote_logs"):
+            g.vote_logs = {}
+        g.vote_logs.setdefault(target, [])
+        g.vote_logs[target].append((uid, msg_ts - start))
+        store.save()
+    if not hasattr(g, "vote_cleanup_ids"):
+        g.vote_cleanup_ids = []
+    g.vote_cleanup_ids.append(msg.message_id)
+    return True
+
+
+async def _send_vote_timing_report(ctx, g):
+    """گزارش تست: زمانِ ثبت هر رأی نسبت به پیامِ «رأی‌گیری برای…» — به پیوی گاد."""
+    logs = getattr(g, "vote_logs", {}) or {}
+    if not logs:
+        return
+    order, seen = [], set()
+    for t in (getattr(g, "vote_order", []) or []):
+        if t not in seen:
+            seen.add(t); order.append(t)
+    for t in logs:
+        if t not in seen:
+            seen.add(t); order.append(t)
+    lines = ["🕒 <b>گزارش زمان ثبت رأی‌ها (تست)</b>"]
+    for target in order:
+        entries = logs.get(target, [])
+        tname = g.seats.get(target, (0, "؟"))[1]
+        lines.append(f"\n🎯 {target}. {escape(tname, quote=False)} — <b>{len(entries)}</b> رأی:")
+        for u, rel in entries:
+            vs = next((s for s, (uu, _) in g.seats.items() if uu == u), None)
+            vname = g.seats.get(vs, (0, "؟"))[1] if vs else "؟"
+            lines.append(f"  • {vs}. {escape(vname, quote=False)} — {rel:.1f} ثانیه")
+    try:
+        await ctx.bot.send_message(g.god_id, "\n".join(lines), parse_mode="HTML")
+    except Exception:
+        pass
+
+
 async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_stage = stage
     g.tally = {}
@@ -1928,10 +2005,6 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     g.current_vote_target = target_seat
 
-    start_time = datetime.now().timestamp()
-    end_time = start_time + 4.3
-    g.vote_window = (start_time, end_time, target_seat)
-
     g.vote_collecting = True
     g.votes_cast.setdefault(target_seat, set())
     g.vote_logs.setdefault(target_seat, [])
@@ -1943,8 +2016,6 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
 
-    store.save()
-
     msg = await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
@@ -1952,10 +2023,19 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     )
     g.vote_cleanup_ids.append(msg.message_id)
 
+    # ⏱ ملاک زمان = ساعتِ سرور تلگرام (msg.date) — سقفِ موقت تا ارسال «تمام»
+    start_time = msg.date.timestamp()
+    g.vote_window = (start_time, start_time + 30.0, target_seat)
+    store.save()
+
     await asyncio.sleep(4)
 
     g.vote_collecting = False
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
+
+    # ⏱ بستنِ پنجره با ساعتِ واقعیِ پیامِ «تمام» — رأی‌های دیررسیده ولی به‌موقع‌فرستاده هنوز شمرده می‌شوند
+    g.vote_window = (start_time, end_msg.date.timestamp(), target_seat)
+    store.save()
 
     if g.vote_stage == "initial_vote":
         g.last_vote_msg_id_initial = end_msg.message_id
@@ -6444,9 +6524,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if data == "vote_done_initial" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
+        await _send_vote_timing_report(ctx, g)   # 🕒 گزارش تست زمان‌بندی به پیوی گاد
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
+        g.vote_window = None
         g.vote_has_ended_initial = True
         g.vote_order = []
         store.save()
@@ -6454,9 +6536,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done_final" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
+        await _send_vote_timing_report(ctx, g)   # 🕒 گزارش تست زمان‌بندی به پیوی گاد
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
+        g.vote_window = None
         g.vote_has_ended_final = True
         g.vote_order = []
         store.save()
@@ -7204,6 +7288,10 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     chat_id = msg.chat.id
     g = gs(chat_id)
+
+    # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
+    if _try_capture_vote(g, msg, uid, text):
+        return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -8052,6 +8140,11 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     g = gs(chat_id)
     text = msg.text.strip()
 
+    # 🗳 ثبت رأی — فقط «دولایک با هر رنگ» یا «..»؛ ملاک زمان = ساعت تلگرام
+    # (قبل از هر شرط دیگری، تا هیچ هندلری پیامِ رأی را ندزدد)
+    if _try_capture_vote(g, msg, uid, text):
+        return
+
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
         if await _is_god_or_admin(ctx, chat_id, uid, g):
@@ -8169,25 +8262,6 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await publish_seating(ctx, chat_id, g)
         return
 
-    if getattr(g, "vote_collecting", False) and g.current_vote_target:
-        start, end, target = g.vote_window
-        now = datetime.now().timestamp()
-        voter_seat = next((s for s,(u,_) in g.seats.items() if u == uid), None)
-
-        if voter_seat and voter_seat != target and start <= now <= end:
-            # ثبت رأی یکتا
-            g.votes_cast.setdefault(target, set())
-            g.votes_cast[target].add(uid)
-
-            # 🕒 ذخیره لاگ رأی‌ها با زمان نسبی
-            if not hasattr(g, "vote_logs"):
-                g.vote_logs = {}
-            g.vote_logs.setdefault(target, [])
-            rel_time = now - start  # زمان از شروع بازه
-            g.vote_logs[target].append((uid, rel_time))
-            if not hasattr(g, "vote_cleanup_ids"):
-                g.vote_cleanup_ids = []
-            g.vote_cleanup_ids.append(msg.message_id)
 
 
     # -------------- defense seats by God ------------------
