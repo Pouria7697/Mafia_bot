@@ -1795,6 +1795,29 @@ async def publish_seating(
                         pass
         except (TimedOut, RetryAfter):
             pass  # خطای گذرا – پیام جدید نفرست
+        except telegram.error.BadRequest as e:
+            if "not modified" in str(e).lower():
+                pass  # محتوا تغییری نکرده (مثلاً شبِ بدون کشته) – پیام جدید نفرست
+            else:
+                old_msg_id = g.last_seating_msg_id
+                msg = await _retry(ctx.bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=kb
+                ))
+                g.last_seating_msg_id = msg.message_id
+                if chat_id < 0:
+                    try:
+                        await _retry(ctx.bot.pin_chat_message(
+                            chat_id, msg.message_id, disable_notification=True))
+                    except Exception:
+                        pass
+                if old_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id, old_msg_id)
+                    except Exception:
+                        pass
         except Exception:
             old_msg_id = g.last_seating_msg_id
             msg = await _retry(ctx.bot.send_message(
@@ -2519,7 +2542,7 @@ def _night_all_done(g) -> bool:
             need.add("doctor")
         if not g.sniper_used and _find_sniper(g) is not None:
             need.add("sniper")
-        if g.night_is_negotiation and alive(_R_REPORTER):
+        if getattr(g, "negotiation_used", False) and alive(_R_REPORTER):
             need.add("reporter")
         return need <= d
 
@@ -2828,8 +2851,9 @@ async def _night_open_citizens(ctx, chat_id, g):
             if m:
                 g.night_pm_msgs[suid] = m.message_id
 
-    # 📰 خبرنگار — فقط در شب مذاکره
-    if g.night_is_negotiation:
+    # 📰 خبرنگار — از شبِ مذاکره به بعد، هر شب اکت دارد
+    # (فقط مذاکره‌شده برایش مثبت است؛ بقیه حتی مافیا منفی)
+    if getattr(g, "negotiation_used", False):
         rep = _find_seat_by_role(g, _R_REPORTER)
         if rep:
             ruid, _rn = g.seats[rep]
@@ -8745,6 +8769,8 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.mafia_room_members.discard(old_god_id)
             await _room_rotate_link(ctx, g)
         await _room_send_link(ctx, g, target.id)
+        # ⏰ اگر گادِ جدید تا ۵ دقیقه جوین نشد، لینکِ جدید بساز و بفرست
+        asyncio.create_task(_room_join_check_later(ctx, g))
 
     await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_name}.")
 
@@ -8889,7 +8915,8 @@ async def _room_kick(ctx, g, uid, allow_return=True):
 
 
 async def _room_rotate_link(ctx, g):
-    """باطل‌کردنِ لینکِ فعلی و ساختِ لینکِ جدید (تا حذف‌شده‌ها نتوانند برگردند)."""
+    """باطل‌کردنِ لینکِ فعلی و ساختِ لینکِ جدید (تا حذف‌شده‌ها نتوانند برگردند).
+    لینکِ جدید برای اعضایی که هنوز واردِ اتاق نشده‌اند دوباره ارسال می‌شود."""
     if not g.mafia_room_id:
         return
     if g.mafia_room_link:
@@ -8902,7 +8929,23 @@ async def _room_rotate_link(ctx, g):
         g.mafia_room_link = link.invite_link
         store.save()
     except Exception:
-        pass
+        return
+    # 🔁 لینکِ قبلیِ کسانی که هنوز جوین نشده‌اند باطل شد — لینکِ جدید را برایشان بفرست
+    for uid in list(g.mafia_room_members):
+        try:
+            cm = await ctx.bot.get_chat_member(g.mafia_room_id, uid)
+            inside = cm.status in ("member", "administrator", "creator")
+        except Exception:
+            inside = False
+        if not inside:
+            try:
+                await ctx.bot.unban_chat_member(g.mafia_room_id, uid, only_if_banned=True)
+            except Exception:
+                pass
+            try:
+                await ctx.bot.send_message(uid, f"🔗 لینکِ جدید گروه مافیا (لینک قبلی باطل شد):\n{g.mafia_room_link}")
+            except Exception:
+                pass
 
 
 async def _room_set_locked(ctx, g, locked: bool):
@@ -8952,8 +8995,40 @@ async def _room_allocate(ctx, g):
         return False
 
 
+async def _room_membership(ctx, g):
+    """وضعیت عضویتِ اعضای موردانتظار اتاق: (داخل‌ها، بیرون‌مانده‌ها) — بدون نیاز به پیام از کسی."""
+    inside, outside = [], []
+    for uid in list(g.mafia_room_members):
+        try:
+            cm = await ctx.bot.get_chat_member(g.mafia_room_id, uid)
+            ok = cm.status in ("member", "administrator", "creator")
+        except Exception:
+            ok = False
+        (inside if ok else outside).append(uid)
+    return inside, outside
+
+
+async def _room_join_check_later(ctx, g, delay=300):
+    """⏰ بعد از ۵ دقیقه: هر عضو موردانتظار (مافیا/گاد) که هنوز جوین نشده →
+    لینکِ جدید ساخته و برایش ارسال می‌شود + گزارش به گاد."""
+    await asyncio.sleep(delay)
+    if not getattr(g, "mafia_room_id", None):
+        return   # بازی تمام/ریست شده
+    _in, _out = await _room_membership(ctx, g)
+    if not _out:
+        return
+    await _room_rotate_link(ctx, g)   # لینک نو + رفعِ بن + ارسال به جوین‌نشده‌ها
+    names = []
+    for uid in _out:
+        seat = _seat_of_uid(g, uid)
+        names.append(f"{seat}. {g.seats[seat][1]}" if seat
+                     else ("گاد" if uid == g.god_id else str(uid)))
+    await _night_report(ctx, g, "⏰ بعد از ۵ دقیقه هنوز واردِ اتاق مافیا نشده بودند: "
+                        + "، ".join(names) + "\n(لینکِ جدید ساخته و برایشان ارسال شد)")
+
+
 async def _room_sync_on_night(ctx, g):
-    """در /شب: باز کردن چت + حذف مافیای مرده + چرخشِ لینک + ارسال لینکِ معوق (مذاکره)."""
+    """در /شب: باز کردن چت + حذف مافیای مرده + چرخشِ لینک + ارسال لینکِ معوق + چکِ جوین‌نشده‌ها."""
     if not g.mafia_room_id:
         return
     await _room_set_locked(ctx, g, False)
@@ -8971,6 +9046,23 @@ async def _room_sync_on_night(ctx, g):
         await _room_send_link(ctx, g, uid)
     g.mafia_room_pending_link = []
     store.save()
+    # 👀 هر کس هنوز جوین نشده: رفعِ بن + ارسالِ دوباره‌ی لینک + گزارش به گاد
+    _in, _out = await _room_membership(ctx, g)
+    if _out:
+        names = []
+        for uid in _out:
+            seat = _seat_of_uid(g, uid)
+            names.append(f"{seat}. {g.seats[seat][1]}" if seat else str(uid))
+            try:
+                await ctx.bot.unban_chat_member(g.mafia_room_id, uid, only_if_banned=True)
+            except Exception:
+                pass
+            try:
+                await ctx.bot.send_message(uid, f"🔗 هنوز واردِ گروه مافیا نشده‌ای — لینک:\n{g.mafia_room_link}")
+            except Exception:
+                pass
+        await _night_report(ctx, g, "⚠️ هنوز واردِ اتاق مافیا نشده‌اند: " + "، ".join(names)
+                            + "\n(لینک دوباره برایشان ارسال شد)")
 
 
 async def _room_cleanup(ctx, g):
@@ -9058,6 +9150,8 @@ async def do_maarefe(ctx, chat_id, g):
         for s in _mafia_room_seats(g):
             await _room_send_link(ctx, g, g.seats[s][0])
         await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
+        # ⏰ بعد از ۵ دقیقه اگر کسی جوین نشده بود، لینکِ جدید بساز و بفرست
+        asyncio.create_task(_room_join_check_later(ctx, g))
     else:
         if load_mafia_rooms():
             await ctx.bot.send_message(chat_id, "⚠️ اتاق مافیای آزادی موجود نیست (همه مشغول‌اند).")
