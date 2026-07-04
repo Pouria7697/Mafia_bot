@@ -218,6 +218,7 @@ class GameState:
         self.night_yakuza_sacrifice = getattr(self, "night_yakuza_sacrifice", None)
         self.night_hunter_target = getattr(self, "night_hunter_target", None)
         self.night_baz_sel = getattr(self, "night_baz_sel", {}) or {}
+        self.night_baz_targets = getattr(self, "night_baz_targets", []) or []
         self.bzp_decider_seat = getattr(self, "bzp_decider_seat", None)
         # ── حالت شبِ خودکار (سناریو نماینده) ──
         self.mine_seat = getattr(self, "mine_seat", None)            # محل مین (تا آخر بازی)
@@ -241,6 +242,8 @@ class GameState:
         self.night_pending_dead = getattr(self, "night_pending_dead", []) or []
         self.night_pending_reasons = getattr(self, "night_pending_reasons", {}) or {}
         self.night_god_notified = getattr(self, "night_god_notified", False)
+        self.night_kick_seat = getattr(self, "night_kick_seat", None)
+        self.vote_prev_window = getattr(self, "vote_prev_window", None)
         self.night_mine_handled = getattr(self, "night_mine_handled", False)
         self.night_mine_sacrifice = getattr(self, "night_mine_sacrifice", None)
         # ── حالت شبِ خودکار (سناریو تکاور) ──
@@ -1924,38 +1927,44 @@ def _is_valid_vote_text(text: str) -> bool:
 
 
 def _try_capture_vote(g, msg, uid, text) -> bool:
-    """اگر پیام یک رأی معتبر داخل پنجرهٔ رأی‌گیری باشد، ثبتش می‌کند.
-    ملاک زمان = ساعتِ ارسال تلگرام (msg.date)، نه زمان پردازش."""
-    vw = getattr(g, "vote_window", None)
-    target = getattr(g, "current_vote_target", None)
-    if not vw or not target:
-        return False
+    """اگر پیام یک رأی معتبر داخل پنجرهٔ رأی‌گیری (جاری یا قبلی) باشد، ثبتش می‌کند.
+    ملاک زمان = ساعتِ ارسال تلگرام (msg.date)، نه زمان پردازش.
+    پنجره‌ی قبلی برای رأی‌هایی است که به‌موقع فرستاده شده ولی دیر به بات رسیده‌اند."""
     if not _is_valid_vote_text(text):
-        return False
-    start, end, win_target = vw
-    if win_target != target:
         return False
     try:
         msg_ts = msg.date.timestamp()
     except Exception:
         msg_ts = datetime.now().timestamp()
-    if not (start <= msg_ts <= end):   # بدون تلورانس — ساعتِ بعد از «تمام» رد می‌شود
-        return False
-    voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
-    if not voter_seat or voter_seat == target or voter_seat in (g.striked or set()):
-        return False
-    g.votes_cast.setdefault(target, set())
-    if uid not in g.votes_cast[target]:      # هر نفر برای «هر هدف» فقط یک رأی (به اهداف مختلف آزاد است)
-        g.votes_cast[target].add(uid)
-        if not hasattr(g, "vote_logs"):
-            g.vote_logs = {}
-        g.vote_logs.setdefault(target, [])
-        g.vote_logs[target].append((uid, msg_ts - start))
-        store.save()
-    if not hasattr(g, "vote_cleanup_ids"):
-        g.vote_cleanup_ids = []
-    g.vote_cleanup_ids.append(msg.message_id)
-    return True
+
+    candidates = []
+    cur = getattr(g, "vote_window", None)
+    target_now = getattr(g, "current_vote_target", None)
+    if cur and target_now and cur[2] == target_now:
+        candidates.append(cur)
+    prev = getattr(g, "vote_prev_window", None)
+    if prev:
+        candidates.append(prev)
+
+    for start, end, win_target in candidates:
+        if not (start <= msg_ts <= end):   # بدون تلورانس — ساعتِ بعد از «تمام» رد می‌شود
+            continue
+        voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
+        if not voter_seat or voter_seat == win_target or voter_seat in (g.striked or set()):
+            return False
+        g.votes_cast.setdefault(win_target, set())
+        if uid not in g.votes_cast[win_target]:  # هر نفر برای «هر هدف» فقط یک رأی
+            g.votes_cast[win_target].add(uid)
+            if not hasattr(g, "vote_logs"):
+                g.vote_logs = {}
+            g.vote_logs.setdefault(win_target, [])
+            g.vote_logs[win_target].append((uid, msg_ts - start))
+            store.save()
+        if not hasattr(g, "vote_cleanup_ids"):
+            g.vote_cleanup_ids = []
+        g.vote_cleanup_ids.append(msg.message_id)
+        return True
+    return False
 
 
 async def _send_vote_timing_report(ctx, g, chat_id):
@@ -2076,6 +2085,13 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
 
     # ⏱ ملاک زمان = ساعتِ سرور تلگرام (msg.date) — سقفِ موقت تا ارسال «تمام»
     start_time = msg.date.timestamp()
+    # 🕰 پنجره‌ی قبلی را نگه دار تا رأی‌های دیررسیده‌ی دورِ قبل گم نشوند
+    _old = getattr(g, "vote_window", None)
+    if _old:
+        _os, _oe, _ot = _old
+        if _oe > start_time:
+            _oe = start_time   # سقفِ بازِ قبلی با شروعِ دورِ جدید بسته می‌شود
+        g.vote_prev_window = (_os, _oe, _ot)
     g.vote_window = (start_time, start_time + 30.0, target_seat)
     store.save()
 
@@ -2632,7 +2648,8 @@ async def start_night(ctx, chat_id, g):
             f"نامش با هیچ سناریوی خودکاری نمی‌خواند. با /چک بررسی کن.",
             parse_mode="HTML")
         return
-    if g.phase != "playing":
+    # فازهای رأی‌گیریِ روز هم قابل قبول‌اند؛ فقط قبل از شروع/بعد از پایان بازی رد می‌شود
+    if g.phase in ("idle", "ended", "awaiting_winner") or not getattr(g, "assigned_roles", None):
         await ctx.bot.send_message(chat_id, "⛔ ابتدا باید بازی شروع شده باشد.")
         return
     if g.night_active:
@@ -2641,6 +2658,7 @@ async def start_night(ctx, chat_id, g):
 
     g.night_active = True
     g.maarefe_active = False
+    g.phase = "playing"   # برگرداندنِ فاز از حالت‌های رأی‌گیریِ روز
     g.night_number = (g.night_number or 0) + 1
     g.night_is_negotiation = False
     g.night_negotiation_target = None
@@ -2667,6 +2685,7 @@ async def start_night(ctx, chat_id, g):
     g.night_pending_dead = []
     g.night_pending_reasons = {}
     g.night_god_notified = False
+    g.night_kick_seat = None
     g.night_mine_handled = False
     g.night_mine_sacrifice = None
     # per-night تکاور
@@ -2713,6 +2732,7 @@ async def start_night(ctx, chat_id, g):
     g.night_sel = {}
     g.night_doc_sel = {}
     g.night_baz_sel = {}
+    g.night_baz_targets = []
     g.night_pm_msgs = {}
     g.night_alive_at_start = len(_alive_seats(g))
     store.save()
@@ -2732,6 +2752,18 @@ async def start_night(ctx, chat_id, g):
         await _room_sync_on_night(ctx, g)
         # ⚠️ هشدار درباره بازیکن‌هایی که بات را استارت نکرده‌اند
         await _report_unreachable(ctx, chat_id, g)
+
+        # 👢 کیک شب (همه‌ی سناریوها): از گاد بپرس
+        try:
+            await ctx.bot.send_message(
+                g.god_id,
+                f"👢 شب {g.night_number} — آیا امشب کسی «کیکِ شب» می‌شود؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ بله", callback_data="nkick_yes")],
+                    [InlineKeyboardButton("🚫 خیر", callback_data="nkick_no")],
+                ]))
+        except Exception:
+            pass
 
         if is_neg:
             g.night_stage = "mafia_decision"
@@ -2929,17 +2961,37 @@ def _shot_outcome(g, seat):
     return "kill"
 
 
+def _add_night_kick(g, dead, reasons):
+    """👢 کیکِ شب (انتخابِ گاد) — جزو کشته‌های شب، ولی جدا گزارش می‌شود."""
+    ks = getattr(g, "night_kick_seat", None)
+    if ks and ks in g.seats and ks not in (g.striked or set()):
+        dead.add(ks)
+        reasons[ks] = "کیک شب"
+
+
 async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     dead = {s for s in dead if s in g.seats and s not in (g.striked or set())}
     for s in dead:
         g.striked.add(s)
     store.save()
     if dead:
-        lines = ["💀 <b>کشته‌های امشب</b>:"]
-        for s in sorted(dead):
-            nm = g.seats[s][1]
-            why = reasons.get(s) or reasons.get(str(s)) or ""
-            lines.append(f"• {s}. {escape(nm, quote=False)}" + (f" — {why}" if why else ""))
+        def _why(s):
+            return reasons.get(s) or reasons.get(str(s)) or ""
+        kick_list = [s for s in sorted(dead) if _why(s) == "کیک شب"]
+        kill_list = [s for s in sorted(dead) if s not in kick_list]
+        lines = []
+        if kill_list:
+            lines.append("💀 <b>کشته‌های شب</b>:")
+            for s in kill_list:
+                nm = g.seats[s][1]
+                why = _why(s)
+                lines.append(f"• {s}. {escape(nm, quote=False)}" + (f" — {why}" if why else ""))
+        if kick_list:
+            lines.append("👢 <b>کیک شب</b>:")
+            mafia_all = _mafia_seats(g)   # شامل جذب‌شده‌ها (مذاکره/یاکوزایی) هم می‌شود
+            for s in kick_list:
+                side = "مافیا" if s in mafia_all else "شهر"
+                lines.append(f"• {s}. {escape(g.seats[s][1], quote=False)} ({side})")
         await _night_report(ctx, g, "\n".join(lines))
         await ctx.bot.send_message(chat_id, f"💀 {len(dead)} نفر امشب از لیست خط خوردند.")
     else:
@@ -3021,6 +3073,7 @@ async def _resolve_gamer(ctx, chat_id, g):
         g.gm_bomb_fuses = {}
         store.save()
 
+    _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
 
 
@@ -3042,6 +3095,7 @@ async def _resolve_kapu(ctx, chat_id, g):
     if yk and yk in g.seats:
         dead.add(yk); reasons[yk] = "فدای یاکوزایی"
 
+    _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
 
     # ⚱️ ارث‌بریِ وارث (اگر فردِ انتخابی امشب مُرد)
@@ -3075,6 +3129,7 @@ async def _resolve_takavar(ctx, chat_id, g):
     if nt and nt in g.seats and g.night_nato_correct:
         dead.add(nt); reasons[nt] = "ناتویی درست"
 
+    _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
 
     # 🔫 برگشت تفنگ جنگی اگر دارنده‌اش کشته شد
@@ -3095,6 +3150,7 @@ async def _resolve_mozakere(ctx, chat_id, g):
         elif out == "zereh":
             zereh.append(st)
     _resolve_sniper(g, dead, reasons)
+    _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
 
 
@@ -3139,6 +3195,16 @@ async def _resolve_baazpors(ctx, chat_id, g):
         if draggable:
             dead.add(ht); reasons[ht] = "هانتر با خود برد"
 
+    _add_night_kick(g, dead, reasons)   # کیکِ شب هم کشته‌ی شب حساب می‌شود
+
+    # 🧑‍⚖️ اگر یکی از احضارشدگانِ بازپرس همین امشب کشته شود (به هر شکلی، حتی کیک)،
+    #     خطِ بازپرسی می‌شکند و بازپرس شبِ بعد دوباره حقِ اکت دارد
+    bt = getattr(g, "night_baz_targets", []) or []
+    if bt and any(t in dead for t in bt):
+        g.baazpors_used = False
+        await _night_report(ctx, g, "🧑‍⚖️ یکی از احضارشدگان به بازپرسی امشب کشته شد — "
+                            "خطِ بازپرسی شکست؛ بازپرس شبِ بعد دوباره اکت دارد.")
+
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
 
 
@@ -3171,6 +3237,8 @@ async def _resolve_nemayande(ctx, chat_id, g):
     # فدای مین (قبلاً بعد از اکت راهنما انتخاب شده)
     if mine_hit and g.night_mine_sacrifice and g.night_mine_sacrifice in g.seats:
         dead.add(g.night_mine_sacrifice); reasons[g.night_mine_sacrifice] = "فدای مین"
+
+    _add_night_kick(g, dead, reasons)   # کیکِ شب هم کشته‌ی شب حساب می‌شود
 
     # مصرف وکالت: اگر موکل همان شب کشته نشد → وکالت مصرف می‌شود
     if g.night_lawyer_target is not None:
@@ -3911,6 +3979,7 @@ async def handle_baazpors_callback(update, ctx):
             await safe_q_answer(q, "باید دقیقاً ۲ نفر را انتخاب کنی.", show_alert=True)
             return
         g.baazpors_used = True
+        g.night_baz_targets = list(sel)   # اگر یکی امشب کشته شود، حقِ بازپرسی برمی‌گردد
         names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sel)
         await _close_pm(ctx, uid, mid, f"🧑‍⚖️ بازپرسی: {names}")
         await _night_report(ctx, g, f"🧑‍⚖️ بازپرس → احضار به بازپرسی: <b>{escape(names, quote=False)}</b>")
@@ -4626,11 +4695,25 @@ def _tk_guide_positive(g, seat) -> bool:
 
 
 async def _tk_notify_hostaged(ctx, g, seat):
-    try:
-        await ctx.bot.send_message(g.seats[seat][0], "🔒 شما گرو گرفته شده‌اید و امشب حق اکت ندارید.")
-    except Exception:
-        pass
+    # پیامِ «گرو گرفته شدید» به‌صورت مرکزی در _tk_send_hostage_notice ارسال می‌شود
     await _night_report(ctx, g, f"🔒 صندلی {seat} گرو گرفته شده و اکت نداد.")
+
+
+async def _tk_send_hostage_notice(ctx, g):
+    """پیامِ «گرو گرفته شدید» — فقط برای نقش‌دارهای اکت‌دار (کاراگاه/پزشک/تفنگدار/تکاور،
+    حتی تکاورِ شات‌نشده)؛ نگهبان مستثنی است و نگهبانی‌شده هم بی‌خبر می‌ماند."""
+    hs = getattr(g, "night_hostage_seat", None)
+    if not hs or hs not in g.seats:
+        return
+    if hs in set(g.night_guard_seats or []):
+        return   # نگهبانی شده → اکتِ عادی، بدون هیچ پیامی (گروگانگیر هم نمی‌فهمد)
+    rn = _seat_role_norm(g, hs)
+    if rn in (_R_DETECTIVE, _R_DOCTOR, _R_GUNMAN, _R_COMMANDO):
+        try:
+            await ctx.bot.send_message(g.seats[hs][0], "🔒 شما گرو گرفته شده‌اید و امشب حق اکت ندارید.")
+        except Exception:
+            pass
+        await _night_report(ctx, g, f"🔒 پیامِ گرو به {hs}. {escape(g.seats[hs][1], quote=False)} رفت.")
 
 
 async def _tk_open_shield(ctx, chat_id, g):
@@ -4673,14 +4756,17 @@ async def _tk_open_first(ctx, chat_id, g):
     else:
         g.night_done.add("watchman")
 
-    # 🔒 گروگانگیر
+    # 🔒 گروگانگیر (اسپم ندارد: دو شب متوالی یک نفر ممنوع؛ رد شدن هم آزاد است)
     host = _find_seat_by_role(g, _R_HOSTAGE)
     if host:
         huid = g.seats[host][0]
         targets = [s for s in _alive_seats(g) if s != host and s != g.hostage_last_target]
-        m = await _safe_pm(ctx, huid, "🔒 چه کسی را گرو می‌گیری؟",
-                           _kb_night_seats(targets, g, "tk_host_",
-                                           selected=g.night_sel.get(huid), confirm_cb="tk_host_confirm"))
+        kb = _kb_night_seats(targets, g, "tk_host_",
+                             selected=g.night_sel.get(huid), confirm_cb="tk_host_confirm")
+        rows = list(kb.inline_keyboard) + [
+            [InlineKeyboardButton("⏭ امشب گرو نمی‌گیرم", callback_data="tk_host_skip")]
+        ]
+        m = await _safe_pm(ctx, huid, "🔒 چه کسی را گرو می‌گیری؟", InlineKeyboardMarkup(rows))
         if m:
             g.night_pm_msgs[huid] = m.message_id
     else:
@@ -4696,6 +4782,8 @@ async def _tk_check_open_mafia(ctx, chat_id, g):
         return
     g.night_done.add("mafia_opened")
     store.save()
+    # 🔒 حالا که هم نگهبان هم گروگانگیر مشخص شده‌اند، پیامِ گرو ارسال می‌شود
+    await _tk_send_hostage_notice(ctx, g)
     await _tk_open_mafia(ctx, chat_id, g)
 
 
@@ -4931,6 +5019,17 @@ async def handle_takavar_callback(update, ctx):
         return
 
     # ── گروگانگیر ──
+    if data == "tk_host_skip":
+        g.night_hostage_seat = None
+        g.hostage_last_target = None   # محدودیتِ نفرِ قبلی آزاد می‌شود
+        g.night_sel.pop(uid, None)
+        await _close_pm(ctx, uid, mid, "⏭ امشب گرو نگرفتی.")
+        await _night_report(ctx, g, "🔒 گروگانگیر → امشب گرو نگرفت")
+        g.night_done.add("hostage")
+        store.save()
+        await _tk_check_open_mafia(ctx, chat_id, g)
+        return
+
     if data == "tk_host_confirm":
         s = g.night_sel.get(uid)
         if not s:
@@ -6695,6 +6794,57 @@ async def handle_don_sentence_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         return
 
 
+async def handle_night_kick_callback(update, ctx):
+    """👢 کیک شب — انتخابِ گاد در پیوی (همه‌ی سناریوها)."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None
+    chat_id = None
+    for cid, game in store.games.items():
+        if getattr(game, "night_active", False) and game.god_id == uid:
+            g, chat_id = game, cid
+            break
+    if g is None:
+        await safe_q_answer(q, "شبِ فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    if data == "nkick_no":
+        await _close_pm(ctx, uid, mid, "👢 امشب کیکِ شب نداریم.")
+        return
+
+    if data == "nkick_yes":
+        await _edit_pm(ctx, uid, mid, "👢 چه کسی کیکِ شب می‌شود؟",
+                       _kb_night_seats(_alive_seats(g), g, "nkick_",
+                                       selected=g.night_sel.get(uid), confirm_cb="nkick_ok"))
+        return
+
+    if data == "nkick_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_kick_seat = s
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid,
+                        f"👢 کیک شب ثبت شد: {s}. {_tn}\n"
+                        f"(امشب اکتش را انجام می‌دهد و هنگامِ روز خط می‌خورد)")
+        await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b>")
+        store.save()
+        return
+
+    if data.startswith("nkick_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "👢 چه کسی کیکِ شب می‌شود؟",
+                       _kb_night_seats(_alive_seats(g), g, "nkick_", selected=s, confirm_cb="nkick_ok"))
+        return
+
+
 # ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
@@ -6704,6 +6854,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _q = update.callback_query
     if _q and _q.data and (_q.data.startswith("sel_") or _q.data.startswith("selday_")):
         await handle_selected_callback(update, ctx)
+        return
+
+    # 👢 کیک شب (گاد در پیوی) — قبل از گارد پی‌وی
+    if _q and _q.data and _q.data.startswith("nkick_"):
+        await handle_night_kick_callback(update, ctx)
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
@@ -6740,9 +6895,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g = None
         chat = None
 
-        # برای purchase_pick_: بر اساس شناسه پیام PM بازی درست را پیدا کن
-        # (اگر گاد در چند گروه فعال باشد این روش بازی صحیح را برمی‌گرداند)
-        if data and data.startswith("purchase_pick_") and q and q.message:
+        # برای همه‌ی purchase_ callbackها (انتخاب/تأیید/بازگشت): بر اساس شناسه پیام PM
+        # (دکمه‌ها همه روی همان پیامِ پی‌وی هستند؛ مستقل از فازِ بازی)
+        if data and data.startswith("purchase_") and q and q.message:
             target_msg_id = q.message.message_id
             for chat_id, game in store.games.items():
                 if getattr(game, "purchase_pm_msg_id", None) == target_msg_id:
@@ -6750,10 +6905,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     chat = chat_id
                     break
 
-        # برای بقیه purchase_ callbackها یا اگر بالا پیدا نشد → جستجو بر اساس god_id
+        # اگر بالا پیدا نشد → جستجو بر اساس god_id (فازهای رأی‌گیریِ روز هم قبول)
         if not g:
             for chat_id, game in store.games.items():
-                if game.god_id == uid and game.phase in ("playing", "awaiting_winner"):
+                if game.god_id == uid and game.phase in (
+                        "playing", "awaiting_winner", "voting_selection", "defense_selection"):
                     g = game
                     chat = chat_id
                     break
@@ -7482,6 +7638,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.vote_logs = {}
         g.current_vote_target = None
         g.vote_window = None
+        g.vote_prev_window = None
         g.vote_has_ended_initial = True
         g.vote_order = []
         store.save()
@@ -7494,6 +7651,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.vote_logs = {}
         g.current_vote_target = None
         g.vote_window = None
+        g.vote_prev_window = None
         g.vote_has_ended_final = True
         g.vote_order = []
         store.save()
