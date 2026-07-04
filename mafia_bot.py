@@ -1939,7 +1939,7 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
         msg_ts = msg.date.timestamp()
     except Exception:
         msg_ts = datetime.now().timestamp()
-    if not (start <= msg_ts <= end + 1.0):   # ۱ ثانیه تلورانس ساعت
+    if not (start <= msg_ts <= end):   # بدون تلورانس — ساعتِ بعد از «تمام» رد می‌شود
         return False
     voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
     if not voter_seat or voter_seat == target or voter_seat in (g.striked or set()):
