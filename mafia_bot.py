@@ -183,6 +183,7 @@ class GameState:
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
+        self.pending_defense = getattr(self, "pending_defense", []) or []
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
         self.seat_sides = getattr(self, "seat_sides", {})
@@ -1994,6 +1995,67 @@ async def _send_vote_timing_report(ctx, g, chat_id):
         pass
 
 
+def _final_vote_threshold(alive_count: int) -> int:
+    """حدنصابِ ورود به دفاعیه بر اساس تعداد زنده‌ها:
+    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → نصفِ زنده‌ها (براکت پایین)"""
+    if alive_count <= 5:
+        return 2
+    if alive_count <= 7:
+        return 3
+    if alive_count <= 10:
+        return 4
+    return alive_count // 2
+
+
+async def _offer_auto_defense(ctx, chat_id, g):
+    """بعد از پایانِ رأی اولیه: محاسبه‌ی حدنصاب، اعلامِ واجدانِ دفاعیه و پیشنهاد ساختِ رأی نهایی."""
+    alive = len(_alive_seats(g))
+    thr = _final_vote_threshold(alive)
+    counts = {t: len(v) for t, v in (g.votes_cast or {}).items()}
+    order, seen = [], set()
+    for t in (getattr(g, "vote_order", []) or []):
+        if t not in seen and t in counts:
+            seen.add(t); order.append(t)
+    for t in counts:
+        if t not in seen:
+            seen.add(t); order.append(t)
+    qualified = [t for t in order
+                 if counts.get(t, 0) >= thr and t in g.seats and t not in (g.striked or set())]
+
+    # ⚖️ نماینده: اکتِ وکیل (فقط ۲۴ ساعت — همان شبِ قبل) مانع ورود به دفاعیه می‌شود
+    lawyer_seat = None
+    if _is_nemayande_scenario(g):
+        lt = getattr(g, "night_lawyer_target", None)
+        if lt in qualified:
+            qualified.remove(lt)
+            lawyer_seat = lt
+
+    if not qualified and lawyer_seat is None:
+        await ctx.bot.send_message(chat_id, f"ℹ️ هیچ‌کس به حدنصاب دفاعیه ({thr} رأی) نرسید.")
+        return
+
+    lines = [f"🗳 حدنصاب دفاعیه با {alive} بازیکنِ زنده: <b>{thr}</b> رأی",
+             "🧍 <b>این افراد داخل دفاعیه هستند:</b>"]
+    for t in qualified:
+        lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
+    if lawyer_seat is not None:
+        lines.append(f"⚖️ {lawyer_seat}. {escape(g.seats[lawyer_seat][1], quote=False)} "
+                     f"با اکتِ وکیل واردِ دفاع نمی‌شود.")
+    if not qualified:
+        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        return
+
+    g.pending_defense = list(qualified)
+    store.save()
+    lines.append("")
+    lines.append("تأیید می‌کنید؟ (با «بله» رأی‌گیری نهایی برای همین افراد ساخته می‌شود)")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ بله", callback_data="autofinal_yes"),
+        InlineKeyboardButton("🚫 خیر", callback_data="autofinal_no"),
+    ]])
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
 async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_stage = stage
     g.tally = {}
@@ -2825,7 +2887,7 @@ async def _night_open_mafia_decision(ctx, chat_id, g):
         ])
         m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nمذاکره یا شات؟", kb)
     else:
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا (شاید بخواهند خودی بزنند)
         kb = _kb_night_seats(targets, g, "night_shot_", confirm_cb="night_shot_confirm")
         m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\n🔫 هدف شلیک را انتخاب کن:", kb)
     if m:
@@ -3043,6 +3105,8 @@ async def _resolve_gamer(ctx, chat_id, g):
             immortal = True   # لوگان نامیرای شب (مگر امشب دزدیده شده باشد)
         if robbed_ok and g.gm_robbed_seat == logan and st == g.gm_gift_to:
             immortal = True   # گیرنده‌ی هدیه، نامیرایی لوگان را دارد
+        if don is not None and st == don and not (robbed_ok and g.gm_robbed_seat == don):
+            immortal = True   # دن نامیرای شب است (مگر امشب دزدیده شده باشد)
         if not immortal and not _is_saved(g, st):
             dead.add(st); reasons[st] = "شلیک مافیا"
 
@@ -3282,7 +3346,7 @@ async def handle_night_callback(update, ctx):
     if data == "night_dec_shoot":
         g.night_is_negotiation = False
         store.save()
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "night_shot_",
                                        selected=g.night_sel.get(uid), confirm_cb="night_shot_confirm"))
@@ -3332,7 +3396,7 @@ async def handle_night_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "night_shot_", selected=s, confirm_cb="night_shot_confirm"))
         return
@@ -3705,7 +3769,7 @@ async def handle_baazpors_callback(update, ctx):
 
     # ── تصمیم گادفادر ──
     if data == "bzp_gf_shoot":
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "bzp_shot_",
                                        selected=g.night_sel.get(uid), confirm_cb="bzp_shot_confirm"))
@@ -3768,7 +3832,7 @@ async def handle_baazpors_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "bzp_shot_", selected=s, confirm_cb="bzp_shot_confirm"))
         return
@@ -4354,7 +4418,7 @@ async def handle_nemayande_callback(update, ctx):
     if data == "nem_don_shot":
         g.night_don_act = "shot"
         store.save()
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "nem_shot_",
                                        selected=g.night_sel.get(uid), confirm_cb="nem_shot_confirm"))
@@ -4389,7 +4453,7 @@ async def handle_nemayande_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "nem_shot_", selected=s, confirm_cb="nem_shot_confirm"))
         return
@@ -5057,7 +5121,7 @@ async def handle_takavar_callback(update, ctx):
 
     # ── تصمیم مافیا ──
     if data == "tk_shot":
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "tk_st_",
                                        selected=g.night_sel.get(uid), confirm_cb="tk_st_confirm"))
@@ -5101,7 +5165,7 @@ async def handle_takavar_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "tk_st_", selected=s, confirm_cb="tk_st_confirm"))
         return
@@ -5476,7 +5540,7 @@ async def handle_kapu_callback(update, ctx):
 
     # ── تصمیم دن ──
     if data == "kp_don_shot":
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "kp_st_",
                                        selected=g.night_sel.get(uid), confirm_cb="kp_st_confirm"))
@@ -5539,7 +5603,7 @@ async def handle_kapu_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "kp_st_", selected=s, confirm_cb="kp_st_confirm"))
         return
@@ -6110,9 +6174,9 @@ async def _gm_open_mafia(ctx, chat_id, g):
     elif don_robbed:
         await _safe_pm(ctx, g.seats[don][0], "🏹 نقش شما دزدیده شده و حق شات ندارید.")
         await _night_report(ctx, g, "🏹 شاتِ مافیا امشب دستِ گیرنده‌ی هدیه‌ی رابین‌هود است.")
-        # شات را گیرنده‌ی هدیه می‌زند
+        # شات را گیرنده‌ی هدیه می‌زند — می‌تواند «هر کسی» را بزند، حتی مافیا (فقط خودش نه)
         actor = g.gm_gift_to
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True) and s != actor]
+        targets = [s for s in _alive_seats(g) if s != actor]
         await _gm_prompt(ctx, g, actor, "shot", "🔫 (اکتِ هدیه) هدف شلیک را انتخاب کن:",
                          _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
     else:
@@ -6120,7 +6184,7 @@ async def _gm_open_mafia(ctx, chat_id, g):
         if not decider:
             g.night_done.add("shot")
         else:
-            targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+            targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
             await _gm_prompt(ctx, g, decider, "shot", "🔫 هدف شلیک را انتخاب کن:",
                              _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
 
@@ -6435,7 +6499,12 @@ async def handle_gamer_callback(update, ctx):
         g.night_sel[uid] = s
         store.save()
         me = _seat_of_uid(g, uid)
-        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True) and x != me]
+        if me in _mafia_seats(g, alive_only=True):
+            # تیرانداز مافیاست → همه‌ی زنده‌ها، شاملِ خودِ تیم (شاید بخواهند خودی بزنند)
+            targets = list(_alive_seats(g))
+        else:
+            # گیرنده‌ی هدیه‌ی رابین‌هود → همه به‌جز خودش (مافیا هم شامل)
+            targets = [x for x in _alive_seats(g) if x != me]
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
                        _kb_night_seats(targets, g, "gm_st_", selected=s, confirm_cb="gm_st_ok"))
         return
@@ -7634,6 +7703,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "vote_done_initial" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
         await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست زمان‌بندی داخل گروه
+        await _offer_auto_defense(ctx, chat, g)        # 🧍 پیشنهادِ دفاعیه‌ی خودکار (قبل از پاک شدن آرا)
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
@@ -7901,6 +7971,43 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_vote(ctx, chat, g, "initial_vote")
         return
 
+
+    # ─── دفاعیه‌ی خودکار: تأیید/ردِ گاد ─────────────────────────────
+    if data == "autofinal_yes" and uid == g.god_id:
+        seats_list = [s for s in (getattr(g, "pending_defense", []) or [])
+                      if s in g.seats and s not in (g.striked or set())]
+        g.pending_defense = []
+        try:
+            await ctx.bot.edit_message_reply_markup(chat, q.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        if not seats_list:
+            await ctx.bot.send_message(chat, "ℹ️ لیست دفاعیه خالی است؛ از دکمه‌ی «رأی نهایی» استفاده کن.")
+            store.save()
+            return
+        g.votes_cast = {}
+        g.vote_logs = {}
+        g.current_vote_target = None
+        g.vote_window = None
+        g.vote_prev_window = None
+        g.voted_targets = set()
+        g.defense_seats = list(seats_list)
+        g.vote_type = "defense_selected"
+        store.save()
+        await ctx.bot.send_message(chat, f"🛡 صندلی‌های دفاع: {'، '.join(map(str, g.defense_seats))}")
+        await start_vote(ctx, chat, g, "final")
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
+    if data == "autofinal_no" and uid == g.god_id:
+        g.pending_defense = []
+        store.save()
+        try:
+            await ctx.bot.edit_message_reply_markup(chat, q.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        await ctx.bot.send_message(chat, "↩️ باشه؛ دفاعیه را خودت با دکمه‌ی «رأی نهایی» انتخاب کن.")
+        return
 
     # ─── رأی‌گیری نهایی: انتخاب دفاع با دکمه ─────────────────────────────
     if data == "final_vote" and uid == g.god_id:
@@ -9192,6 +9299,8 @@ async def _room_sync_on_night(ctx, g):
     await _room_set_locked(ctx, g, False)
     removed_any = False
     for uid in list(g.mafia_room_members):
+        if uid == g.god_id:
+            continue   # ⚠️ گاد صندلی ندارد ولی هیچ‌وقت نباید حذف شود!
         seat = _seat_of_uid(g, uid)
         if seat is None or seat in (g.striked or set()):
             await _room_kick(ctx, g, uid)
