@@ -249,6 +249,7 @@ class GameState:
         self.night_mine_sacrifice = getattr(self, "night_mine_sacrifice", None)
         # ── حالت شبِ خودکار (سناریو تکاور) ──
         self.night_shield = getattr(self, "night_shield", False)
+        self.tk_shield_lost = getattr(self, "tk_shield_lost", False)   # افتادنِ شیلد دائمی است
         self.night_guard_seats = getattr(self, "night_guard_seats", []) or []
         self.night_guard_sel = getattr(self, "night_guard_sel", {}) or {}
         self.tk_guard_need = getattr(self, "tk_guard_need", 1)
@@ -312,6 +313,7 @@ class GameState:
         self.mafia_room_members = getattr(self, "mafia_room_members", set()) or set()
         self.mafia_room_pending_link = getattr(self, "mafia_room_pending_link", []) or []
         self.mafia_room_kicked = getattr(self, "mafia_room_kicked", set()) or set()
+        self.mafia_room_taken_at = getattr(self, "mafia_room_taken_at", None)
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
@@ -1968,8 +1970,8 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
     return False
 
 
-async def _send_vote_timing_report(ctx, g, chat_id):
-    """گزارش تست: زمانِ ثبت هر رأی نسبت به پیامِ «رأی‌گیری برای…» — داخل گروه."""
+async def _send_vote_timing_report(ctx, g, chat_id=None):
+    """گزارش تست: زمانِ ثبت هر رأی — فقط به پیوی سازنده‌ی بات (ADMIN_ID)، تا گروه شلوغ نشود."""
     logs = getattr(g, "vote_logs", {}) or {}
     if not logs:
         return
@@ -1990,7 +1992,7 @@ async def _send_vote_timing_report(ctx, g, chat_id):
             vname = g.seats.get(vs, (0, "؟"))[1] if vs else "؟"
             lines.append(f"  • {vs}. {escape(vname, quote=False)} — {rel:.1f} ثانیه")
     try:
-        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        await ctx.bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
     except Exception:
         pass
 
@@ -4783,7 +4785,8 @@ async def _tk_send_hostage_notice(ctx, g):
 async def _tk_open_shield(ctx, chat_id, g):
     # اول از همه: از گادِ راوی بپرس نگهبان شیلد دارد؟
     watch = _find_seat_by_role(g, _R_WATCHMAN)
-    if not watch:
+    if not watch or getattr(g, "tk_shield_lost", False):
+        # نگهبان مرده یا شیلدش قبلاً افتاده → دیگر نه سؤالی، نه اکتی (تا آخر بازی)
         g.night_shield = False
         g.night_done.add("shield")
         g.night_done.add("watchman")
@@ -5035,8 +5038,11 @@ async def handle_takavar_callback(update, ctx):
         mid = q.message.message_id if q.message else None
         g.night_shield = (data == "tk_shield_yes")
         g.night_done.add("shield")
+        if not g.night_shield:
+            g.tk_shield_lost = True   # افتادنِ شیلد دائمی است — دیگر نه سؤال، نه اکت
         await _close_pm(ctx, uid, mid,
-                        "🛡 شیلد نگهبان: بله" if g.night_shield else "🚫 شیلد نگهبان: خیر (نگهبان امشب اکت ندارد)")
+                        "🛡 شیلد نگهبان: بله" if g.night_shield
+                        else "🚫 شیلد افتاد — نگهبان تا آخر بازی دیگر اکت ندارد.")
         store.save()
         await _tk_open_first(ctx, chat_id, g)
         return
@@ -9233,11 +9239,56 @@ async def _room_allocate(ctx, g):
     if g.mafia_room_id:
         return True
     rooms = load_mafia_rooms()
-    used = {getattr(game, "mafia_room_id", None) for game in store.games.values()
-            if getattr(game, "mafia_room_id", None)}
+    if not rooms:
+        return False
+
+    # نگاشتِ اتاق → بازی‌هایی که آن را نگه داشته‌اند
+    holders = {}
+    for game in store.games.values():
+        rid = getattr(game, "mafia_room_id", None)
+        if rid:
+            holders.setdefault(rid, []).append(game)
+
+    _now = datetime.now().timestamp()
+
+    def _holder_stale(game):
+        # بازیِ تمام‌شده/ریست‌شده → اتاقش آزاد
+        if getattr(game, "phase", "idle") in ("idle", "ended"):
+            return True
+        # اتاقی که بیش از ۲۴ ساعت پیش گرفته شده → بازیِ رهاشده حساب می‌شود
+        taken = getattr(game, "mafia_room_taken_at", None)
+        if taken and (_now - taken) > 24 * 3600:
+            return True
+        return False
+
+    used = {rid for rid, hs in holders.items() if any(not _holder_stale(x) for x in hs)}
     room = next((r for r in rooms if r not in used), None)
     if room is None:
-        return False
+        # همه واقعاً مشغول‌اند → اتاقی که قدیمی‌ترین زمانِ گرفتن را دارد پس گرفته می‌شود
+        def _oldest_ts(rid):
+            return min((getattr(x, "mafia_room_taken_at", None) or 0)
+                       for x in holders.get(rid, []))
+        candidates = [r for r in rooms if r in holders]
+        room = min(candidates, key=_oldest_ts) if candidates else rooms[0]
+
+    # 🧹 پاک‌سازیِ نگه‌دارنده‌های قبلیِ این اتاق (اعضای کهنه بیرون + لینکِ قدیمی باطل)
+    for game in holders.get(room, []):
+        for old_uid in list(getattr(game, "mafia_room_members", set()) or set()):
+            try:
+                await ctx.bot.ban_chat_member(room, old_uid)
+                await ctx.bot.unban_chat_member(room, old_uid, only_if_banned=True)
+            except Exception:
+                pass
+        if getattr(game, "mafia_room_link", None):
+            try:
+                await ctx.bot.revoke_chat_invite_link(room, game.mafia_room_link)
+            except Exception:
+                pass
+        game.mafia_room_id = None
+        game.mafia_room_link = None
+        game.mafia_room_members = set()
+        game.mafia_room_pending_link = []
+    store.save()
     try:
         link = await ctx.bot.create_chat_invite_link(room, name=f"game-{g.god_id}")
         g.mafia_room_id = room
@@ -9245,6 +9296,7 @@ async def _room_allocate(ctx, g):
         g.mafia_room_members = set()
         g.mafia_room_pending_link = []
         g.mafia_room_kicked = set()
+        g.mafia_room_taken_at = datetime.now().timestamp()
         store.save()
         # 🔁 چرخش اتاق‌ها: اتاقِ استفاده‌شده به تهِ فهرست می‌رود تا بازیِ بعدی اتاقِ دیگری بگیرد
         try:
@@ -9354,6 +9406,7 @@ async def _room_cleanup(ctx, g):
     g.mafia_room_members = set()
     g.mafia_room_pending_link = []
     g.mafia_room_kicked = set()
+    g.mafia_room_taken_at = None
     store.save()
 
 
