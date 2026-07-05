@@ -2998,6 +2998,13 @@ async def start_night(ctx, chat_id, g):
         except Exception:
             pass
 
+    # 🔄 با بازشدنِ چت در شب، برچسبِ دکمه‌ی قفل (بستن/باز کردن) به‌روز شود
+    if getattr(g, "mafia_room_id", None):
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)
+        except Exception:
+            pass
+
 
 async def _night_open_mafia_decision(ctx, chat_id, g):
     gf  = _find_seat_by_role(g, _R_GODFATHER)
@@ -3459,8 +3466,54 @@ async def _do_day(ctx, chat_id, g):
         store.save()
         await _room_set_locked(ctx, g, True)
         await ctx.bot.send_message(chat_id, "☀️ روز شد. چت گروه مافیا بسته شد.")
+        # 🔄 برچسبِ دکمه‌ی قفل به‌روز شود
+        if getattr(g, "mafia_room_id", None):
+            try:
+                await publish_seating(ctx, chat_id, g, mode=CTRL)
+            except Exception:
+                pass
     else:
         await end_night(ctx, chat_id, g)
+
+
+async def _do_room_open(ctx, chat_id, g):
+    """🔓 بازکردن چت مافیا (+ در گیمر: سؤالِ بمب از الیوت) — مشترک بین «/باز» و دکمه."""
+    opened = False
+    if getattr(g, "mafia_room_id", None):
+        await _room_set_locked(ctx, g, False)
+        await ctx.bot.send_message(chat_id, "🔓 چت گروه مافیا باز شد. با «روز» یا «بستن» دوباره بسته می‌شود.")
+        opened = True
+    else:
+        await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
+    # 💣 گیمر: اگر بمبی فعال است، از الیوت بپرس می‌خواهد کاری کند؟
+    if _is_gamer_scenario(g) and getattr(g, "gm_bomb_seat", None):
+        el = _find_seat_by_role(g, _R_ELLIOT)
+        seat = g.gm_bomb_seat
+        if el and seat in g.seats:
+            tname = g.seats[seat][1]
+            m = await _safe_pm(ctx, g.seats[el][0],
+                               f"💣 جلوی {seat}. {tname} بمب وجود دارد!\nآیا می‌خواهی کاری کنی؟",
+                               _gm_yesno_kb("gm_bz_yes", "gm_bz_no"))
+            if m:
+                await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
+    if opened:
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
+        except Exception:
+            pass
+
+
+async def _do_room_close(ctx, chat_id, g):
+    """🔒 بستنِ چت مافیا — مشترک بین «/بسته» و دکمه."""
+    if getattr(g, "mafia_room_id", None):
+        await _room_set_locked(ctx, g, True)
+        await ctx.bot.send_message(chat_id, "🔒 چت گروه مافیا بسته شد.")
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
+        except Exception:
+            pass
+    else:
+        await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
 
 
 async def handle_night_callback(update, ctx):
@@ -7501,29 +7554,30 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
-    # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا (فقط گاد) ────────
-    if data == "ctl_maarefe" and uid == g.god_id:
-        await do_maarefe(ctx, chat, g)
-        await publish_seating(ctx, chat, g, mode=CTRL)   # اگر انجام شد، دکمه‌ی معارفه حذف می‌شود
-        return
-
-    if data == "ctl_night" and uid == g.god_id:
-        await start_night(ctx, chat, g)
-        return
-
-    if data == "ctl_day" and uid == g.god_id:
-        await _do_day(ctx, chat, g)
-        return
-
-    if data == "ctl_roomlock" and uid == g.god_id:
-        if not getattr(g, "mafia_room_id", None):
-            await safe_q_answer(q, "اتاق مافیا برای این بازی فعال نیست.", show_alert=True)
+    # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
+    # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
+    if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock"):
+        if uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
             return
-        new_locked = not getattr(g, "mafia_room_locked", False)
-        await _room_set_locked(ctx, g, new_locked)
-        await ctx.bot.send_message(chat, "🔒 چت گروه مافیا بسته شد." if new_locked
-                                   else "🔓 چت گروه مافیا باز شد.")
-        await publish_seating(ctx, chat, g, mode=CTRL)   # برچسبِ دکمه عوض شود
+        if data == "ctl_maarefe":
+            await do_maarefe(ctx, chat, g)
+            try:
+                await publish_seating(ctx, chat, g, mode=CTRL)  # اگر انجام شد، دکمه‌ی معارفه حذف می‌شود
+            except Exception:
+                pass
+        elif data == "ctl_night":
+            await start_night(ctx, chat, g)
+        elif data == "ctl_day":
+            await _do_day(ctx, chat, g)
+        else:  # ctl_roomlock
+            if not getattr(g, "mafia_room_id", None):
+                await safe_q_answer(q, "اتاق مافیا برای این بازی فعال نیست.", show_alert=True)
+                return
+            if getattr(g, "mafia_room_locked", False):
+                await _do_room_open(ctx, chat, g)
+            else:
+                await _do_room_close(ctx, chat, g)
         return
 
     # شروع «تغییر سناریو/ظرفیت»
@@ -9818,53 +9872,37 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 await msg.reply_text("⚠️ نتوانستم به پیوی گاد بفرستم؛ گاد باید بات را استارت کند.")
         return
 
-    # 🎭 شب معارفه (فقط گاد/ادمین)
+    # 🎭 شب معارفه (فقط گادِ فعلی)
     if text == "/معارفه":
-        if await _is_god_or_admin(ctx, chat_id, uid, g):
+        if uid == g.god_id:
             await do_maarefe(ctx, chat_id, g)
+            try:
+                await publish_seating(ctx, chat_id, g, mode=CTRL)  # 🔄 حذفِ دکمه‌ی معارفه از پنل
+            except Exception:
+                pass
         return
 
-    # 🌙 شروع/پایان اکت‌گیریِ شب (فقط گاد/ادمین)
+    # 🌙 شروع/پایان اکت‌گیریِ شب (فقط گادِ فعلی)
     if text == "/شب":
-        if await _is_god_or_admin(ctx, chat_id, uid, g):
+        if uid == g.god_id:
             await start_night(ctx, chat_id, g)
         return
 
     if text == "/روز":
-        if await _is_god_or_admin(ctx, chat_id, uid, g):
+        if uid == g.god_id:
             await _do_day(ctx, chat_id, g)
         return
 
-    # 🔓 باز کردن دستیِ چت اتاق مافیا وسط روز (برای سؤال از تیم مافیا)
+    # 🔓 باز کردن دستیِ چت اتاق مافیا وسط روز (+ سؤالِ بمبِ الیوت در گیمر) — فقط گاد
     if text == "/باز":
-        if await _is_god_or_admin(ctx, chat_id, uid, g):
-            if getattr(g, "mafia_room_id", None):
-                await _room_set_locked(ctx, g, False)
-                await ctx.bot.send_message(chat_id, "🔓 چت گروه مافیا باز شد. با «/روز» یا «/بسته» دوباره بسته می‌شود.")
-            else:
-                await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
-            # 💣 گیمر: اگر بمبی فعال است، از الیوت بپرس می‌خواهد کاری کند؟
-            if _is_gamer_scenario(g) and getattr(g, "gm_bomb_seat", None):
-                el = _find_seat_by_role(g, _R_ELLIOT)
-                seat = g.gm_bomb_seat
-                if el and seat in g.seats:
-                    tname = g.seats[seat][1]
-                    m = await _safe_pm(
-                        ctx, g.seats[el][0],
-                        f"💣 جلوی {seat}. {tname} بمب وجود دارد!\nآیا می‌خواهی کاری کنی؟",
-                        _gm_yesno_kb("gm_bz_yes", "gm_bz_no"))
-                    if m:
-                        await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
+        if uid == g.god_id:
+            await _do_room_open(ctx, chat_id, g)
         return
 
-    # 🔒 بستن دستیِ چت اتاق مافیا
+    # 🔒 بستن دستیِ چت اتاق مافیا — فقط گاد
     if text == "/بسته":
-        if await _is_god_or_admin(ctx, chat_id, uid, g):
-            if getattr(g, "mafia_room_id", None):
-                await _room_set_locked(ctx, g, True)
-                await ctx.bot.send_message(chat_id, "🔒 چت گروه مافیا بسته شد.")
-            else:
-                await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
+        if uid == g.god_id:
+            await _do_room_close(ctx, chat_id, g)
         return
 
     # تغییر موضوع رویداد (گاد/ادمین) — بدون ریپلای
