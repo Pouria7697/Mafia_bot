@@ -236,6 +236,13 @@ class GameState:
         self.night_nato_correct = getattr(self, "night_nato_correct", False)
         self.night_lawyer_target = getattr(self, "night_lawyer_target", None)
         self.nem_decider_seat = getattr(self, "nem_decider_seat", None)
+        # ── دنگ خیانت (نماینده — فقط روز ۱) ──
+        self.nem_reps = getattr(self, "nem_reps", []) or []            # [نماینده اول, نماینده دوم]
+        self.nem_reps_tmp = getattr(self, "nem_reps_tmp", []) or []
+        self.nem_ding = getattr(self, "nem_ding", None)                # (ایندکس نماینده, +1/-1)
+        self.nem_ding_used = getattr(self, "nem_ding_used", False)
+        self.nem_awaiting_reps = getattr(self, "nem_awaiting_reps", False)
+        self.nem_awaiting_ding = getattr(self, "nem_awaiting_ding", False)
         # ── محاسبهٔ خودکار مرگ ──
         self.night_doc_saved = getattr(self, "night_doc_saved", []) or []
         self.night_sniper_target = getattr(self, "night_sniper_target", None)
@@ -2117,6 +2124,32 @@ async def _finalize_final_vote(ctx, chat_id, g):
     if not targets:
         return
 
+    # 🗡 دنگ خیانت (نماینده — فقط اولین رأی نهایی بعد از ثبت): ±۱ روی نفرِ اول/دومِ رأی‌گیری
+    if (_is_nemayande_scenario(g) and getattr(g, "nem_ding", None)
+            and not getattr(g, "nem_ding_used", False)
+            and isinstance(g.nem_ding, tuple) and g.nem_ding[1] != 0):
+        idx, sign = g.nem_ding
+        g.nem_ding_used = True
+        store.save()
+        if g.night_number != 0:
+            # ⏳ فقط روزِ ۱ اعتبار دارد — روزهای بعد بی‌صدا منقضی (فقط گاد می‌فهمد)
+            await _night_report(ctx, g, "🗡 دنگ خیانت فقط برای روزِ ۱ بود — منقضی شد.")
+        else:
+            rep_lbl = "اول" if idx == 0 else "دوم"
+            sign_lbl = "مثبت (+۱)" if sign > 0 else "منفی (−۱)"
+            if idx < len(targets):
+                t = targets[idx]
+                old_c = counts[t]
+                counts[t] = max(0, old_c + sign)
+                note = (f"🗡 با احتسابِ دنگ خیانتِ {sign_lbl} روی نماینده‌ی {rep_lbl}: "
+                        f"آرای نفرِ {rep_lbl} رأی‌گیری ({t}. {escape(g.seats[t][1], quote=False)}): "
+                        f"{old_c} ← <b>{counts[t]}</b>")
+            else:
+                note = (f"🗡 دنگ خیانتِ {sign_lbl} روی نماینده‌ی {rep_lbl} بود، "
+                        f"اما نفرِ {rep_lbl}ی در رأی‌گیری نبود — بی‌اثر.")
+            await ctx.bot.send_message(chat_id, note, parse_mode="HTML")
+            await _night_report(ctx, g, note)
+
     hist = getattr(g, "defense_history", {}) or {}
     alive = len(_alive_seats(g))
     thr = _final_vote_threshold(alive)
@@ -3496,11 +3529,160 @@ async def _do_room_open(ctx, chat_id, g):
                                _gm_yesno_kb("gm_bz_yes", "gm_bz_no"))
             if m:
                 await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
+
+    # 🗡 نماینده — دنگ خیانت (فقط روزِ ۱: بعد از معارفه، قبل از اولین شب)
+    if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
+            and g.night_number == 0 and not getattr(g, "nem_ding_used", False)):
+        if not g.nem_reps and not getattr(g, "nem_awaiting_reps", False):
+            g.nem_awaiting_reps = True
+            g.nem_reps_tmp = []
+            store.save()
+            await _safe_pm(ctx, g.god_id,
+                           "🗳 چه کسانی نماینده شدند؟ (به ترتیب: اولین انتخاب = نماینده اول)",
+                           _nem_reps_kb(g, []))
+        elif getattr(g, "nem_awaiting_reps", False):
+            await _safe_pm(ctx, g.god_id,
+                           "🗳 چه کسانی نماینده شدند؟ (به ترتیب: اولین انتخاب = نماینده اول)",
+                           _nem_reps_kb(g, list(g.nem_reps_tmp or [])))
+        elif getattr(g, "nem_awaiting_ding", False):
+            await _nem_ding_prompt_don(ctx, g)   # یادآوری به دن اگر هنوز انتخاب نکرده
+
     if opened:
         try:
             await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
         except Exception:
             pass
+
+
+def _nem_reps_kb(g, tmp):
+    rows = []
+    for s in _alive_seats(g):
+        name = g.seats[s][1]
+        mark = ""
+        if s in tmp:
+            mark = "1️⃣ " if tmp.index(s) == 0 else "2️⃣ "
+        rows.append([InlineKeyboardButton(f"{mark}{s} {name}", callback_data=f"nrep_{s}")])
+    rows.append([InlineKeyboardButton("✅ تأیید (دقیقاً ۲ نفر)", callback_data="nrep_ok")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _nem_ding_prompt_don(ctx, g):
+    """پیوی دن‌مافیا: انتخابِ نماینده برای دنگ خیانت (خودش را نمی‌تواند)."""
+    don = _find_seat_by_role(g, _R_DON)
+    if don is None:
+        g.nem_awaiting_ding = False
+        store.save()
+        await _night_report(ctx, g, "🗡 دن‌مافیا زنده نیست — دنگ خیانت منتفی شد.")
+        return
+    rows = []
+    for i, rep in enumerate(g.nem_reps):
+        if rep == don:
+            continue   # دن روی خودش دنگ نمی‌گذارد
+        lbl = "اول" if i == 0 else "دوم"
+        rows.append([InlineKeyboardButton(
+            f"نماینده {lbl} — {rep}. {g.seats[rep][1]}", callback_data=f"nding_{i}")])
+    if not rows:
+        g.nem_awaiting_ding = False
+        store.save()
+        await _night_report(ctx, g, "🗡 هر دو نماینده خودِ دن بودند؟! دنگ خیانت منتفی.")
+        return
+    await _safe_pm(ctx, g.seats[don][0],
+                   "🗡 دنگ خیانت را روی کدام نماینده می‌گذاری؟",
+                   InlineKeyboardMarkup(rows))
+
+
+async def handle_nem_ding_callback(update, ctx):
+    """🗡 دنگ خیانت: انتخابِ نماینده‌ها (گاد) + انتخابِ دن (نماینده و مثبت/منفی)."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+
+    # انتخاب نماینده‌ها توسط گاد
+    if data.startswith("nrep_"):
+        g = None; chat_id = None
+        for cid, game in store.games.items():
+            if getattr(game, "nem_awaiting_reps", False) and game.god_id == uid:
+                g, chat_id = game, cid
+                break
+        if g is None:
+            await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        mid = q.message.message_id if q.message else None
+        if data == "nrep_ok":
+            if len(g.nem_reps_tmp) != 2:
+                await safe_q_answer(q, "دقیقاً ۲ نفر را انتخاب کن.", show_alert=True)
+                return
+            g.nem_reps = list(g.nem_reps_tmp)
+            g.nem_reps_tmp = []
+            g.nem_awaiting_reps = False
+            g.nem_awaiting_ding = True
+            store.save()
+            r1, r2 = g.nem_reps
+            await _close_pm(ctx, uid, mid,
+                            f"✅ نماینده‌ها ثبت شدند:\nاول: {r1}. {g.seats[r1][1]}\nدوم: {r2}. {g.seats[r2][1]}")
+            await _nem_ding_prompt_don(ctx, g)
+            return
+        s = int(data.rsplit("_", 1)[1])
+        tmp = list(g.nem_reps_tmp or [])
+        if s in tmp:
+            tmp.remove(s)
+        elif len(tmp) < 2:
+            tmp.append(s)
+        else:
+            await safe_q_answer(q, "حداکثر ۲ نفر.", show_alert=True)
+            return
+        g.nem_reps_tmp = tmp
+        store.save()
+        await _edit_pm(ctx, uid, mid,
+                       "🗳 چه کسانی نماینده شدند؟ (به ترتیب: اولین انتخاب = نماینده اول)",
+                       _nem_reps_kb(g, tmp))
+        return
+
+    # انتخابِ دن: کدام نماینده + مثبت/منفی
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if not getattr(game, "nem_awaiting_ding", False):
+            continue
+        don = _find_seat_by_role(game, _R_DON)
+        if don is not None and game.seats[don][0] == uid:
+            g, chat_id = game, cid
+            break
+    if g is None:
+        await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    if data.startswith("nding_"):
+        i = int(data.rsplit("_", 1)[1])
+        g.nem_ding = (i, 0)   # علامت بعداً
+        store.save()
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("➕ مثبت", callback_data="ndsign_p"),
+            InlineKeyboardButton("➖ منفی", callback_data="ndsign_n"),
+        ]])
+        lbl = "اول" if i == 0 else "دوم"
+        await _edit_pm(ctx, uid, mid, f"🗡 رأی خیانت روی نماینده {lbl} — مثبت یا منفی؟", kb)
+        return
+
+    if data in ("ndsign_p", "ndsign_n"):
+        if not g.nem_ding:
+            return
+        i, _ = g.nem_ding
+        sign = 1 if data == "ndsign_p" else -1
+        g.nem_ding = (i, sign)
+        g.nem_awaiting_ding = False
+        store.save()
+        lbl = "اول" if i == 0 else "دوم"
+        s_lbl = "مثبت (+۱)" if sign > 0 else "منفی (−۱)"
+        rep = g.nem_reps[i]
+        await _close_pm(ctx, uid, mid, f"🗡 دنگ خیانت {s_lbl} روی نماینده {lbl} ثبت شد.")
+        await _night_report(ctx, g,
+                            f"🗡 دنگ خیانت: دن → {s_lbl} روی نماینده {lbl} "
+                            f"({rep}. {escape(g.seats[rep][1], quote=False)}) — "
+                            f"در رأی نهاییِ امروز روی نفرِ {lbl} اعمال می‌شود.")
+        return
 
 
 async def _do_room_close(ctx, chat_id, g):
@@ -7134,6 +7316,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 👢 کیک شب (گاد در پیوی) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith("nkick_"):
         await handle_night_kick_callback(update, ctx)
+        return
+
+    # 🗡 دنگ خیانت (نماینده — پیوی گاد و دن)
+    if _q and _q.data and _q.data.startswith(("nrep_", "nding_", "ndsign_")):
+        await handle_nem_ding_callback(update, ctx)
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
