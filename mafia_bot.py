@@ -10612,10 +10612,19 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
     role = g.assigned_roles.get(seat_no)
+    old_uid, _old_name = g.seats[seat_no]
 
     g.seats[seat_no] = (new_uid, new_name)
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
+
+    # 🔗 اتاق مافیا: اگر صندلیِ جایگزین‌شده مافیاست → قدیمی بیرون + لینکِ نو برای جدید
+    if getattr(g, "mafia_room_id", None) and seat_no in _mafia_room_seats(g):
+        if old_uid in (g.mafia_room_members or set()):
+            await _room_kick(ctx, g, old_uid)
+            g.mafia_room_members.discard(old_uid)
+            await _room_rotate_link(ctx, g)   # لینکِ قبلی باطل تا قدیمی برنگردد
+        await _room_send_link(ctx, g, new_uid)
 
 
     stickers = load_stickers()
