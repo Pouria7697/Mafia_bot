@@ -9262,35 +9262,52 @@ async def _room_allocate(ctx, g):
         return False
 
     used = {rid for rid, hs in holders.items() if any(not _holder_stale(x) for x in hs)}
-    room = next((r for r in rooms if r not in used), None)
-    if room is None:
-        # همه واقعاً مشغول‌اند → اتاقی که قدیمی‌ترین زمانِ گرفتن را دارد پس گرفته می‌شود
-        def _oldest_ts(rid):
-            return min((getattr(x, "mafia_room_taken_at", None) or 0)
-                       for x in holders.get(rid, []))
-        candidates = [r for r in rooms if r in holders]
-        room = min(candidates, key=_oldest_ts) if candidates else rooms[0]
+    free_rooms = [r for r in rooms if r not in used]
+    def _oldest_ts(rid):
+        return min((getattr(x, "mafia_room_taken_at", None) or 0)
+                   for x in holders.get(rid, []))
+    held_rooms = sorted([r for r in rooms if r in holders and r not in free_rooms],
+                        key=_oldest_ts)
+    # اول آزادها، بعد (در صورت نیاز) مشغول‌ها از قدیمی‌ترین — تا اولین اتاقِ «سالم» پیدا شود
+    candidates = free_rooms + held_rooms
+    if not candidates:
+        candidates = list(rooms)
 
-    # 🧹 پاک‌سازیِ نگه‌دارنده‌های قبلیِ این اتاق (اعضای کهنه بیرون + لینکِ قدیمی باطل)
-    for game in holders.get(room, []):
-        for old_uid in list(getattr(game, "mafia_room_members", set()) or set()):
-            try:
-                await ctx.bot.ban_chat_member(room, old_uid)
-                await ctx.bot.unban_chat_member(room, old_uid, only_if_banned=True)
-            except Exception:
-                pass
-        if getattr(game, "mafia_room_link", None):
-            try:
-                await ctx.bot.revoke_chat_invite_link(room, game.mafia_room_link)
-            except Exception:
-                pass
-        game.mafia_room_id = None
-        game.mafia_room_link = None
-        game.mafia_room_members = set()
-        game.mafia_room_pending_link = []
-    store.save()
-    try:
-        link = await ctx.bot.create_chat_invite_link(room, name=f"game-{g.god_id}")
+    for room in candidates:
+        # 🧪 اول تست کن اتاق سالم است (لینک ساخته می‌شود)؛ اگر مرده بود برو سراغ بعدی
+        try:
+            link = await ctx.bot.create_chat_invite_link(room, name=f"game-{g.god_id}")
+        except Exception as e:
+            print(f"❌ اتاق {room} خراب است:", e)
+            emsg = str(e).lower()
+            if any(k in emsg for k in ("not found", "kicked", "upgraded", "migrated", "deactivated")):
+                # اتاقِ مرده (مثلاً تبدیل به سوپرگروه و تغییر آیدی) → از فهرست حذف
+                try:
+                    rooms.remove(room)
+                    save_mafia_rooms(rooms)
+                    print(f"🗑 اتاق مرده {room} از فهرست حذف شد.")
+                except Exception:
+                    pass
+            continue
+
+        # 🧹 پاک‌سازیِ نگه‌دارنده‌های قبلیِ این اتاق (اعضای کهنه بیرون + لینکِ قدیمی باطل)
+        for game in holders.get(room, []):
+            for old_uid in list(getattr(game, "mafia_room_members", set()) or set()):
+                try:
+                    await ctx.bot.ban_chat_member(room, old_uid)
+                    await ctx.bot.unban_chat_member(room, old_uid, only_if_banned=True)
+                except Exception:
+                    pass
+            if getattr(game, "mafia_room_link", None):
+                try:
+                    await ctx.bot.revoke_chat_invite_link(room, game.mafia_room_link)
+                except Exception:
+                    pass
+            game.mafia_room_id = None
+            game.mafia_room_link = None
+            game.mafia_room_members = set()
+            game.mafia_room_pending_link = []
+
         g.mafia_room_id = room
         g.mafia_room_link = link.invite_link
         g.mafia_room_members = set()
@@ -9298,7 +9315,7 @@ async def _room_allocate(ctx, g):
         g.mafia_room_kicked = set()
         g.mafia_room_taken_at = datetime.now().timestamp()
         store.save()
-        # 🔁 چرخش اتاق‌ها: اتاقِ استفاده‌شده به تهِ فهرست می‌رود تا بازیِ بعدی اتاقِ دیگری بگیرد
+        # 🔁 چرخش اتاق‌ها: اتاقِ استفاده‌شده به تهِ فهرست می‌رود
         try:
             rooms.remove(room)
             rooms.append(room)
@@ -9307,9 +9324,8 @@ async def _room_allocate(ctx, g):
             pass
         await _room_set_locked(ctx, g, False)   # شبِ معارفه باز باشد
         return True
-    except Exception as e:
-        print("❌ _room_allocate error:", e)
-        return False
+
+    return False   # هیچ اتاقِ سالمی پیدا نشد
 
 
 async def _room_membership(ctx, g):
@@ -9474,7 +9490,13 @@ async def do_maarefe(ctx, chat_id, g):
         asyncio.create_task(_room_join_check_later(ctx, g))
     else:
         if load_mafia_rooms():
-            await ctx.bot.send_message(chat_id, "⚠️ اتاق مافیای آزادی موجود نیست (همه مشغول‌اند).")
+            await ctx.bot.send_message(
+                chat_id,
+                "⚠️ هیچ اتاقِ مافیای سالمی در دسترس نیست.\n"
+                "احتمالاً آیدیِ اتاق‌ها عوض شده (تبدیل به سوپرگروه). "
+                "در هر اتاق دوباره /addroom بزن.")
+        else:
+            await ctx.bot.send_message(chat_id, "ℹ️ هنوز اتاق مافیایی ثبت نشده — در گروهِ اتاق /addroom بزن.")
 
     # سناریو گیمر: دن‌کارلئونه باید یک جمله بنویسد (به مسترهلمز می‌رسد)
     if _is_gamer_scenario(g):
