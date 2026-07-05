@@ -9290,9 +9290,12 @@ async def _room_allocate(ctx, g):
                     pass
             continue
 
-        # 🧹 پاک‌سازیِ نگه‌دارنده‌های قبلیِ این اتاق (اعضای کهنه بیرون + لینکِ قدیمی باطل)
+        # 🧹 پاک‌سازیِ نگه‌دارنده‌های قبلیِ این اتاق (اعضای کهنه + همه‌ی بازیکنانِ آن بازی)
         for game in holders.get(room, []):
-            for old_uid in list(getattr(game, "mafia_room_members", set()) or set()):
+            olds = set(getattr(game, "mafia_room_members", set()) or set())
+            for _s, (u, _n) in (getattr(game, "seats", {}) or {}).items():
+                olds.add(u)
+            for old_uid in olds:
                 try:
                     await ctx.bot.ban_chat_member(room, old_uid)
                     await ctx.bot.unban_chat_member(room, old_uid, only_if_banned=True)
@@ -9404,7 +9407,12 @@ async def _room_cleanup(ctx, g):
     """پایان بازی: حذف همه + رفعِ بنِ همه + باطل‌کردن لینک + آزادسازی اتاق."""
     if not g.mafia_room_id:
         return
-    for uid in list(g.mafia_room_members):
+    # 🧹 جاروی کامل: ردیابی‌شده‌ها + همه‌ی بازیکنانِ بازی
+    # (یاکوزایی/مذاکره/خریداری‌شده یا هرکسی که با لینکِ فورواردی داخل مانده)
+    targets = set(g.mafia_room_members or set())
+    for _s, (u, _n) in (g.seats or {}).items():
+        targets.add(u)
+    for uid in list(targets):
         await _room_kick(ctx, g, uid, allow_return=True)
     # 🔓 رفعِ بنِ کسانی که وسط بازی حذف شده بودند (تا در بازی‌های بعدیِ این اتاق «لینک منقضی» نگیرند)
     for uid in list(getattr(g, "mafia_room_kicked", set()) or set()):
@@ -9448,6 +9456,42 @@ async def addroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ این گروه به‌عنوان «اتاق چت مافیا» ثبت شد.\n"
         "این گروه را «/active» نکنید. بات باید ادمین با دسترسیِ «دعوت» و «حذف اعضا» باشد.")
+
+
+async def rooms_status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🏠 وضعیت اتاق‌های مافیا (فقط سازنده‌ی بات، در پیوی): تعداد اعضا + لینک سرکشی."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    rooms = load_mafia_rooms()
+    if not rooms:
+        await update.message.reply_text("ℹ️ هیچ اتاقی ثبت نشده.")
+        return
+    # کدام بازی الان کدام اتاق را نگه داشته؟
+    holder_of = {}
+    for cid, game in store.games.items():
+        rid = getattr(game, "mafia_room_id", None)
+        if rid:
+            holder_of[rid] = (cid, getattr(game, "phase", "؟"))
+    lines = ["🏠 <b>وضعیت اتاق‌های مافیا:</b>"]
+    for rid in rooms:
+        try:
+            chat_obj = await ctx.bot.get_chat(rid)
+            cnt = await ctx.bot.get_chat_member_count(rid)
+            others = max(0, cnt - 1)   # منهای خودِ بات
+            try:
+                link = await ctx.bot.create_chat_invite_link(rid, name="inspect")
+                link_txt = link.invite_link
+            except Exception:
+                link_txt = "—"
+            hold = holder_of.get(rid)
+            hold_txt = f" | 🎮 در دستِ بازیِ {hold[0]} (فاز: {hold[1]})" if hold else " | آزاد"
+            lines.append(f"\n• <b>{escape(chat_obj.title or str(rid), quote=False)}</b>"
+                         f" — 👥 {others} عضو (غیر از بات){hold_txt}\n"
+                         f"  🔗 سرکشی: {link_txt}")
+        except Exception as e:
+            lines.append(f"\n• <code>{rid}</code> → ❌ در دسترس نیست ({type(e).__name__}) — آیدیِ مرده، با /delroom یا /addroom مجدد درستش کن")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+                                    disable_web_page_preview=True)
 
 
 async def delroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -10439,6 +10483,8 @@ async def main():
     )
     app.add_handler(CommandHandler("addroom", addroom_cmd, filters=group_filter))
     app.add_handler(CommandHandler("delroom", delroom_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("rooms", rooms_status_cmd,
+                                   filters=filters.ChatType.PRIVATE & filters.User(ADMIN_ID)))
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
