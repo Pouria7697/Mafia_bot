@@ -245,6 +245,12 @@ class GameState:
         self.night_god_notified = getattr(self, "night_god_notified", False)
         self.night_kick_seat = getattr(self, "night_kick_seat", None)
         self.vote_prev_window = getattr(self, "vote_prev_window", None)
+        self.maarefe_done = getattr(self, "maarefe_done", False)
+        self.vote_bounds = getattr(self, "vote_bounds", None)
+        self.vote_prev_bounds = getattr(self, "vote_prev_bounds", None)
+        self.mafia_room_locked = getattr(self, "mafia_room_locked", False)
+        self.defense_history = getattr(self, "defense_history", {}) or {}   # سابقه‌ی حضور در رأی نهایی
+        self.zereh_fallen = getattr(self, "zereh_fallen", False)            # زرهِ زره‌پوش با اجماع افتاده
         self.night_mine_handled = getattr(self, "night_mine_handled", False)
         self.night_mine_sacrifice = getattr(self, "night_mine_sacrifice", None)
         # ── حالت شبِ خودکار (سناریو تکاور) ──
@@ -1409,8 +1415,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out"),
         ],
         [
-            InlineKeyboardButton("📊 وضعیت (اتومات)", callback_data="status_auto"),
-            InlineKeyboardButton("📊 وضعیت (دستی)", callback_data="status_query"),
+            InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_auto"),
         ],
         [
             InlineKeyboardButton("🗳 رأی اولیه", callback_data="init_vote"),
@@ -1420,9 +1425,24 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu"),
             InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm"),
         ],
-        # Keep "end game" alone (safer)
-        [InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")],
     ])
+
+    # 🌙 دکمه‌های شب/روز/معارفه (به‌جای دستورهای متنی)
+    night_row = []
+    if not getattr(g, "maarefe_done", False):
+        night_row.append(InlineKeyboardButton("🎭 معارفه", callback_data="ctl_maarefe"))
+    night_row.append(InlineKeyboardButton("🌙 شب", callback_data="ctl_night"))
+    night_row.append(InlineKeyboardButton("☀️ روز", callback_data="ctl_day"))
+    rows.append(night_row)
+
+    # 🔒/🔓 یک دکمه‌ی toggle برای چت اتاق مافیا (فقط وقتی اتاق فعال است)
+    if getattr(g, "mafia_room_id", None):
+        lbl = ("🔓 باز کردن چت مافیا" if getattr(g, "mafia_room_locked", False)
+               else "🔒 بستن چت مافیا")
+        rows.append([InlineKeyboardButton(lbl, callback_data="ctl_roomlock")])
+
+    # Keep "end game" alone (safer)
+    rows.append([InlineKeyboardButton("🏁 اتمام بازی", callback_data="end_game")])
 
     return InlineKeyboardMarkup(rows)
 
@@ -1944,14 +1964,21 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
     cur = getattr(g, "vote_window", None)
     target_now = getattr(g, "current_vote_target", None)
     if cur and target_now and cur[2] == target_now:
-        candidates.append(cur)
+        candidates.append((cur, getattr(g, "vote_bounds", None)))
     prev = getattr(g, "vote_prev_window", None)
     if prev:
-        candidates.append(prev)
+        candidates.append((prev, getattr(g, "vote_prev_bounds", None)))
 
-    for start, end, win_target in candidates:
+    for (start, end, win_target), bounds in candidates:
         if not (start <= msg_ts <= end):   # بدون تلورانس — ساعتِ بعد از «تمام» رد می‌شود
             continue
+        # 🔒 فیلترِ دوم (ترتیبِ چت): رأیی که پایینِ «تمام» نشسته، حتی هم‌ثانیه، رد می‌شود
+        if bounds:
+            b_start, b_end = bounds
+            if b_start and msg.message_id <= b_start:
+                continue
+            if b_end and msg.message_id >= b_end:
+                continue
         voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
         if not voter_seat or voter_seat == win_target or voter_seat in (g.striked or set()):
             return False
@@ -2024,6 +2051,22 @@ async def _offer_auto_defense(ctx, chat_id, g):
     qualified = [t for t in order
                  if counts.get(t, 0) >= thr and t in g.seats and t not in (g.striked or set())]
 
+    # مرتب‌سازی بر اساس تعداد رأی (نزولی)؛ در تساوی، ترتیبِ رأی‌گیری
+    qualified.sort(key=lambda t: (-counts.get(t, 0), order.index(t)))
+
+    # ⚖️ قانونِ اختلاف آرا
+    gap_note = None
+    if qualified:
+        c1 = counts.get(qualified[0], 0)
+        c2 = counts.get(qualified[1], 0) if len(qualified) > 1 else None
+        if (c1 - thr) >= 3 and (c2 is None or (c1 - c2) >= 3):
+            if len(qualified) > 1:
+                gap_note = "⚖️ اختلاف آرا: تک‌دفاع"
+            qualified = qualified[:1]
+        elif len(qualified) >= 3 and (c1 - c2) < 3 and (c2 - counts.get(qualified[2], 0)) >= 2:
+            qualified = qualified[:2]
+            gap_note = "⚖️ اختلاف آرا: فقط دو نفرِ اول وارد دفاعیه می‌شوند"
+
     # ⚖️ نماینده: اکتِ وکیل (فقط ۲۴ ساعت — همان شبِ قبل) مانع ورود به دفاعیه می‌شود
     lawyer_seat = None
     if _is_nemayande_scenario(g):
@@ -2040,6 +2083,8 @@ async def _offer_auto_defense(ctx, chat_id, g):
              "🧍 <b>این افراد داخل دفاعیه هستند:</b>"]
     for t in qualified:
         lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
+    if gap_note:
+        lines.append(gap_note)
     if lawyer_seat is not None:
         lines.append(f"⚖️ {lawyer_seat}. {escape(g.seats[lawyer_seat][1], quote=False)} "
                      f"با اکتِ وکیل واردِ دفاع نمی‌شود.")
@@ -2056,6 +2101,74 @@ async def _offer_auto_defense(ctx, chat_id, g):
         InlineKeyboardButton("🚫 خیر", callback_data="autofinal_no"),
     ]])
     await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+async def _finalize_final_vote(ctx, chat_id, g):
+    """بعد از «پایان رأی‌گیری نهایی»: تعیینِ خروج (با سابقه در تساوی) + افتادنِ زره/شیلد + ثبتِ سابقه."""
+    counts = {t: len(v) for t, v in (g.votes_cast or {}).items()
+              if t in g.seats and t not in (g.striked or set())}
+    targets, seen = [], set()
+    for t in (getattr(g, "vote_order", []) or []):
+        if t in counts and t not in seen:
+            seen.add(t); targets.append(t)
+    for t in counts:
+        if t not in seen:
+            seen.add(t); targets.append(t)
+    if not targets:
+        return
+
+    hist = getattr(g, "defense_history", {}) or {}
+    alive = len(_alive_seats(g))
+    thr = _final_vote_threshold(alive)
+    reached = [t for t in targets if counts[t] >= thr]
+
+    exiter = None
+    if reached:
+        mx = max(counts[t] for t in reached)
+        tops = [t for t in reached if counts[t] == mx]
+        if len(tops) == 1:
+            exiter = tops[0]
+        else:
+            # 📜 تساوی آرا → سابقه‌ی بیشتر (دفعاتِ حضور در رأی نهایی) خارج می‌شود
+            hmx = max(hist.get(t, 0) for t in tops)
+            htops = [t for t in tops if hist.get(t, 0) == hmx]
+            if len(htops) == 1:
+                exiter = htops[0]
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"📜 تساوی آرا — {exiter}. {escape(g.seats[exiter][1], quote=False)} "
+                    f"به‌دلیلِ سابقه‌ی بیشتر ({hmx} بار حضور در رأی نهایی) انتخاب شد.",
+                    parse_mode="HTML")
+            else:
+                await ctx.bot.send_message(chat_id, "📜 تساوی آرا و تساوی سابقه — تصمیم با گاد.")
+
+    # 📜 ثبتِ سابقه برای همه‌ی حاضرانِ دفاعِ امروز
+    for t in targets:
+        hist[t] = hist.get(t, 0) + 1
+    g.defense_history = hist
+    store.save()
+
+    if exiter is None:
+        return
+
+    nm = escape(g.seats[exiter][1], quote=False)
+    # ⚠️ پیامِ یکسان برای همه — هیچ ساید/نقشی لو نمی‌رود
+    await ctx.bot.send_message(chat_id, f"🚪 {exiter}. {nm} حد نصاب آورد — وصیت کند.",
+                               parse_mode="HTML")
+
+    # 🛡 زره‌پوش (مذاکره) و نگهبانِ شیلددار (تکاور) خط نمی‌خورند —
+    #    تصمیم (افتادنِ شیلد یا خروج) با خودِ گاد است
+    rn = _seat_role_norm(g, exiter)
+    protected = ((_is_takavar_scenario(g) and rn == _R_WATCHMAN
+                  and not getattr(g, "tk_shield_lost", False))
+                 or (_is_neg_scenario(g) and rn == _R_ARMORED))
+    if not protected:
+        g.striked.add(exiter)
+        store.save()
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)
+        except Exception:
+            pass
 
 
 async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
@@ -2151,12 +2264,18 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     start_time = msg.date.timestamp()
     # 🕰 پنجره‌ی قبلی را نگه دار تا رأی‌های دیررسیده‌ی دورِ قبل گم نشوند
     _old = getattr(g, "vote_window", None)
+    _old_b = getattr(g, "vote_bounds", None)
     if _old:
         _os, _oe, _ot = _old
         if _oe > start_time:
             _oe = start_time   # سقفِ بازِ قبلی با شروعِ دورِ جدید بسته می‌شود
         g.vote_prev_window = (_os, _oe, _ot)
+        if _old_b:
+            g.vote_prev_bounds = (_old_b[0], _old_b[1] or msg.message_id)
+        else:
+            g.vote_prev_bounds = None
     g.vote_window = (start_time, start_time + 30.0, target_seat)
+    g.vote_bounds = (msg.message_id, None)
     store.save()
 
     await asyncio.sleep(4)
@@ -2165,7 +2284,19 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
     end_msg = await ctx.bot.send_message(chat_id, "🛑 تمام", parse_mode="HTML")
 
     # ⏱ بستنِ پنجره با ساعتِ واقعیِ پیامِ «تمام» — رأی‌های دیررسیده ولی به‌موقع‌فرستاده هنوز شمرده می‌شوند
-    g.vote_window = (start_time, end_msg.date.timestamp(), target_seat)
+    end_real = end_msg.date.timestamp()
+    g.vote_window = (start_time, end_real, target_seat)
+    g.vote_bounds = (g.vote_bounds[0] if g.vote_bounds else None, end_msg.message_id)
+
+    # ✂️ هرسِ نهایی: رأی‌هایی که در شکافِ کوتاهِ قبل از ثبتِ «تمام» با سقفِ موقت قبول شده‌اند
+    #     ولی ساعتشان واقعاً بعد از «تمام» است، حذف می‌شوند (علتِ رأی‌های ۴-۵ ثانیه‌ای)
+    dur = end_real - start_time
+    logs = (g.vote_logs or {}).get(target_seat, [])
+    removed = [(u, rel) for (u, rel) in logs if rel > dur + 0.001]
+    if removed:
+        g.vote_logs[target_seat] = [(u, rel) for (u, rel) in logs if rel <= dur + 0.001]
+        for u, _r in removed:
+            (g.votes_cast.get(target_seat) or set()).discard(u)
     store.save()
 
     if g.vote_stage == "initial_vote":
@@ -3021,6 +3152,9 @@ def _shot_outcome(g, seat):
     if kind == "rouin":
         return "rouin"
     if kind == "zereh":
+        # 🔒 افتادنِ خودکارِ زره فعلاً غیرفعال (گاد خودش مدیریت می‌کند):
+        # if getattr(g, "zereh_fallen", False):
+        #     return "kill"
         return "zereh"
     return "kill"
 
@@ -3313,6 +3447,20 @@ async def _resolve_nemayande(ctx, chat_id, g):
         store.save()
 
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
+
+
+async def _do_day(ctx, chat_id, g):
+    """☀️ روز — هم برای دستورِ متنی /روز هم دکمه‌ی پنل."""
+    if g.night_active:
+        await end_night(ctx, chat_id, g)
+    elif getattr(g, "maarefe_active", False):
+        # پایانِ شبِ معارفه: فقط بستن چت مافیا (بدون محاسبهٔ مرگ)
+        g.maarefe_active = False
+        store.save()
+        await _room_set_locked(ctx, g, True)
+        await ctx.bot.send_message(chat_id, "☀️ روز شد. چت گروه مافیا بسته شد.")
+    else:
+        await end_night(ctx, chat_id, g)
 
 
 async def handle_night_callback(update, ctx):
@@ -4783,13 +4931,12 @@ async def _tk_send_hostage_notice(ctx, g):
 
 
 async def _tk_open_shield(ctx, chat_id, g):
-    # اول از همه: از گادِ راوی بپرس نگهبان شیلد دارد؟
+    # 🛡 فعلاً دستی: هر شب از گاد پرسیده می‌شود (تا دقتِ شمارشِ رأی تأیید شود)
+    #    اولین «خیر» = افتادنِ دائمیِ شیلد (دیگر نه سؤال، نه اکت)
     watch = _find_seat_by_role(g, _R_WATCHMAN)
     if not watch or getattr(g, "tk_shield_lost", False):
-        # نگهبان مرده یا شیلدش قبلاً افتاده → دیگر نه سؤالی، نه اکتی (تا آخر بازی)
         g.night_shield = False
         g.night_done.add("shield")
-        g.night_done.add("watchman")
         store.save()
         await _tk_open_first(ctx, chat_id, g)
         return
@@ -7354,6 +7501,31 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
+    # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا (فقط گاد) ────────
+    if data == "ctl_maarefe" and uid == g.god_id:
+        await do_maarefe(ctx, chat, g)
+        await publish_seating(ctx, chat, g, mode=CTRL)   # اگر انجام شد، دکمه‌ی معارفه حذف می‌شود
+        return
+
+    if data == "ctl_night" and uid == g.god_id:
+        await start_night(ctx, chat, g)
+        return
+
+    if data == "ctl_day" and uid == g.god_id:
+        await _do_day(ctx, chat, g)
+        return
+
+    if data == "ctl_roomlock" and uid == g.god_id:
+        if not getattr(g, "mafia_room_id", None):
+            await safe_q_answer(q, "اتاق مافیا برای این بازی فعال نیست.", show_alert=True)
+            return
+        new_locked = not getattr(g, "mafia_room_locked", False)
+        await _room_set_locked(ctx, g, new_locked)
+        await ctx.bot.send_message(chat, "🔒 چت گروه مافیا بسته شد." if new_locked
+                                   else "🔓 چت گروه مافیا باز شد.")
+        await publish_seating(ctx, chat, g, mode=CTRL)   # برچسبِ دکمه عوض شود
+        return
+
     # شروع «تغییر سناریو/ظرفیت»
     if data == "change_scenario":
         if g.god_id is None or uid != g.god_id:
@@ -7715,6 +7887,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.current_vote_target = None
         g.vote_window = None
         g.vote_prev_window = None
+        g.vote_bounds = None
+        g.vote_prev_bounds = None
         g.vote_has_ended_initial = True
         g.vote_order = []
         store.save()
@@ -7722,12 +7896,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done_final" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
-        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست زمان‌بندی داخل گروه
+        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست (پیوی سازنده)
+        await _finalize_final_vote(ctx, chat, g)       # 🚪 خروج/سابقه/افتادنِ زره و شیلد
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
         g.vote_window = None
         g.vote_prev_window = None
+        g.vote_bounds = None
+        g.vote_prev_bounds = None
         g.vote_has_ended_final = True
         g.vote_order = []
         store.save()
@@ -7996,6 +8173,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.current_vote_target = None
         g.vote_window = None
         g.vote_prev_window = None
+        g.vote_bounds = None
+        g.vote_prev_bounds = None
         g.voted_targets = set()
         g.defense_seats = list(seats_list)
         g.vote_type = "defense_selected"
@@ -9230,6 +9409,8 @@ async def _room_set_locked(ctx, g, locked: bool):
                 can_send_messages=True, can_send_polls=True,
                 can_send_other_messages=True, can_add_web_page_previews=True)
         await ctx.bot.set_chat_permissions(g.mafia_room_id, perms)
+        g.mafia_room_locked = locked
+        store.save()
     except Exception:
         pass
 
@@ -9462,6 +9643,14 @@ async def rooms_status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🏠 وضعیت اتاق‌های مافیا (فقط سازنده‌ی بات، در پیوی): تعداد اعضا + لینک سرکشی."""
     if update.effective_user.id != ADMIN_ID:
         return
+    # 🙈 اگر خودم بازیکنِ زنده‌ی یک بازیِ در جریانم، لیست اتاق‌ها نباید لو برود
+    for _cid, _game in store.games.items():
+        if getattr(_game, "phase", "idle") in ("idle", "ended"):
+            continue
+        _seat = _seat_of_uid(_game, update.effective_user.id)
+        if _seat is not None and _seat not in (_game.striked or set()):
+            await update.message.reply_text("🙈 الان خودت بازیکنِ یک بازیِ در جریانی — بعد از بازی دوباره بزن.")
+            return
     rooms = load_mafia_rooms()
     if not rooms:
         await update.message.reply_text("ℹ️ هیچ اتاقی ثبت نشده.")
@@ -9472,7 +9661,7 @@ async def rooms_status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rid = getattr(game, "mafia_room_id", None)
         if rid:
             holder_of[rid] = (cid, getattr(game, "phase", "؟"))
-    lines = ["🏠 <b>وضعیت اتاق‌های مافیا:</b>"]
+    lines = [f"🏠 <b>وضعیت اتاق‌های مافیا</b> ({len(rooms)} اتاق ثبت‌شده در Gist):"]
     for rid in rooms:
         try:
             chat_obj = await ctx.bot.get_chat(rid)
@@ -9530,6 +9719,8 @@ async def do_maarefe(ctx, chat_id, g):
         for s in _mafia_room_seats(g):
             await _room_send_link(ctx, g, g.seats[s][0])
         await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
+        g.maarefe_done = True   # ✅ موفق → دکمه‌ی معارفه از پنل حذف می‌شود
+        store.save()
         # ⏰ بعد از ۵ دقیقه اگر کسی جوین نشده بود، لینکِ جدید بساز و بفرست
         asyncio.create_task(_room_join_check_later(ctx, g))
     else:
@@ -9539,8 +9730,10 @@ async def do_maarefe(ctx, chat_id, g):
                 "⚠️ هیچ اتاقِ مافیای سالمی در دسترس نیست.\n"
                 "احتمالاً آیدیِ اتاق‌ها عوض شده (تبدیل به سوپرگروه). "
                 "در هر اتاق دوباره /addroom بزن.")
+            # ❗ ناموفق → دکمه‌ی معارفه می‌ماند تا دوباره امتحان شود
         else:
-            await ctx.bot.send_message(chat_id, "ℹ️ هنوز اتاق مافیایی ثبت نشده — در گروهِ اتاق /addroom بزن.")
+            g.maarefe_done = True   # اتاقی تعریف نشده → معارفه بدون اتاق انجام شد
+            store.save()
 
     # سناریو گیمر: دن‌کارلئونه باید یک جمله بنویسد (به مسترهلمز می‌رسد)
     if _is_gamer_scenario(g):
@@ -9639,16 +9832,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     if text == "/روز":
         if await _is_god_or_admin(ctx, chat_id, uid, g):
-            if g.night_active:
-                await end_night(ctx, chat_id, g)
-            elif getattr(g, "maarefe_active", False):
-                # پایانِ شبِ معارفه: فقط بستن چت مافیا (بدون محاسبهٔ مرگ)
-                g.maarefe_active = False
-                store.save()
-                await _room_set_locked(ctx, g, True)
-                await ctx.bot.send_message(chat_id, "☀️ روز شد. چت گروه مافیا بسته شد.")
-            else:
-                await end_night(ctx, chat_id, g)
+            await _do_day(ctx, chat_id, g)
         return
 
     # 🔓 باز کردن دستیِ چت اتاق مافیا وسط روز (برای سؤال از تیم مافیا)
