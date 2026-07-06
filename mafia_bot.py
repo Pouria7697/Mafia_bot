@@ -249,6 +249,12 @@ class GameState:
         self.score_act_impossible = getattr(self, "score_act_impossible", set()) or set()
         self.score_day_initial = getattr(self, "score_day_initial", False)
         self.score_day_final = getattr(self, "score_day_final", False)
+        self.score_farib_days = getattr(self, "score_farib_days", set()) or set()  # هر روز فقط یک‌بار فریب
+        # 🔥 سوزوندنِ اکت (گاد)
+        self.night_burned = getattr(self, "night_burned", set()) or set()
+        self.night_burned_uids = getattr(self, "night_burned_uids", set()) or set()
+        self.burn_tmp = getattr(self, "burn_tmp", []) or []
+        self.night_god_panel_mid = getattr(self, "night_god_panel_mid", None)
         # 🎯 حدسِ ۳ مافیا توسط شهروندِ خروجیِ روز ۱
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
@@ -2093,6 +2099,9 @@ async def _offer_auto_defense(ctx, chat_id, g):
             qualified = qualified[:2]
             gap_note = "⚖️ اختلاف آرا: فقط دو نفرِ اول وارد دفاعیه می‌شوند"
 
+    # 🔢 ترتیبِ نهایی (لیست و دکمه‌های رأی نهایی) = ترتیبِ رأی‌گیریِ اولیه، نه تعدادِ رأی
+    qualified.sort(key=lambda t: order.index(t))
+
     # ⚖️ نماینده: اکتِ وکیل (فقط ۲۴ ساعت — همان شبِ قبل) مانع ورود به دفاعیه می‌شود
     lawyer_seat = None
     if _is_nemayande_scenario(g):
@@ -2194,10 +2203,19 @@ def _score_votes_final(g, targets, exit_seat, exited):
                 elif vside == "مافیا":
                     if tside == "شهر" and exited and t == exit_seat:
                         _sc_add(g, vs, "push", 15, "پوش: دخالت در خروجِ شهروند")
-        # فریب بخش ۱: مافیای زنده‌ای که امروز به دفاع نیامد
-        for m in _alive_seats(g):
-            if _sc_side(g, m) == "مافیا" and m not in targets:
-                _sc_add(g, m, "farib1", 5, "به دفاع نیامد")
+                    elif tside == "مافیا":
+                        # 🔻 رأی نهایی به هم‌تیمی: −۵ / اگر منجر به خروجش شد: −۱۰ (جایگزین)
+                        if exited and t == exit_seat:
+                            _sc_add(g, vs, "push", -10, "رأی منجر به خروجِ هم‌تیمی")
+                        else:
+                            _sc_add(g, vs, "push", -5, "رأی خروج به هم‌تیمیِ مافیا")
+        # فریب بخش ۱: مافیای زنده‌ای که امروز به دفاع نیامد (هر روز فقط یک‌بار)
+        _day = int(getattr(g, "night_number", 0) or 0)
+        if _day not in (g.score_farib_days or set()):
+            for m in _alive_seats(g):
+                if _sc_side(g, m) == "مافیا" and m not in targets:
+                    _sc_add(g, m, "farib1", 5, "به دفاع نیامد")
+            g.score_farib_days.add(_day)
         g.score_day_final = True
         store.save()
     except Exception as e:
@@ -2208,9 +2226,12 @@ def _score_day_rollover(g):
     """مرزِ روز→شب: اگر روزی دفاعیه نداشت، فریبِ همه‌ی مافیاهای زنده +۵."""
     try:
         if getattr(g, "score_day_initial", False) and not getattr(g, "score_day_final", False):
-            for m in _alive_seats(g):
-                if _sc_side(g, m) == "مافیا":
-                    _sc_add(g, m, "farib1", 5, "روزِ بدون دفاعیه")
+            _day = int(getattr(g, "night_number", 0) or 0)
+            if _day not in (g.score_farib_days or set()):
+                for m in _alive_seats(g):
+                    if _sc_side(g, m) == "مافیا":
+                        _sc_add(g, m, "farib1", 5, "روزِ بدون دفاعیه")
+                g.score_farib_days.add(_day)
         g.score_day_initial = False
         g.score_day_final = False
         store.save()
@@ -2232,46 +2253,31 @@ def _score_compute(g):
         def _sum(cat):
             return sum(p for c, p, _r in sev if c == cat)
 
-        acts = [(p) for c, p, _r in sev if c == "act"]
-        inqs = [(p) for c, p, _r in sev if c == "inq"]
-        no_act = False
-        if inqs:
-            act_score = max(0.0, min(15.0, sum(inqs)))          # استعلام‌گیر: فقط مثبت، بدون منفی
-        elif acts:
-            succ = any(p > 0 for p in acts)
-            negs = sum(-p for p in acts if p < 0)
-            act_score = max(0.0, min(15.0, (15.0 if succ else 0.0) - negs))
-        elif seat in impossible:
-            act_score = 15.0                                     # «نشد» → ۱۵ کامل
-        else:
-            act_score = 0.0
-            no_act = True                                        # «نداشت/نخواست» → بازتوزیع
-
+        # 📐 فرمولِ یکدست (اکتِ شب فعلاً در امتیاز لحاظ نمی‌شود؛ رویدادها برای آینده ثبت می‌مانند)
         win = 25.0 if side == getattr(g, "winner_side", None) else 0.0
         enz = 0.0 if seat in kicked else max(0.0, 15.0 - 5.0 * int(warns.get(seat, 0) or 0))
-        parts = {"win": win, "enz": enz}
-
         if side == "مافیا":
-            cap = 20.0 if no_act else 15.0
-            farib = min(cap, _sum("farib1")) + min(cap, _sum("farib2"))
-            push = min(cap, _sum("push"))
-            parts.update({"act": (None if no_act else act_score), "farib": farib, "push": push})
-            total = win + (0.0 if no_act else act_score) + farib + push + enz
+            farib = min(40.0, _sum("farib1"))
+            push = max(0.0, min(20.0, _sum("push")))   # کف ۰ (رأی به هم‌تیمی منفی دارد)
+            parts = {"win": win, "farib": farib, "push": push, "enz": enz}
+            total = win + farib + push + enz
         else:
-            cap = 60.0 if no_act else 45.0
-            tash = max(0.0, min(cap, _sum("tash")))
+            tash = max(0.0, min(60.0, _sum("tash")))
             guess = _sum("guess")   # 🎯 جایزه‌ی حدسِ شهروندِ خروجیِ روز ۱ (خارج از سقف)
-            parts.update({"act": (None if no_act else act_score), "tash": tash, "guess": guess})
-            total = win + (0.0 if no_act else act_score) + tash + guess + enz
-        out[seat] = {"side": side, "total": round(total, 1), "parts": parts, "no_act": no_act}
+            parts = {"win": win, "tash": tash, "guess": guess, "enz": enz}
+            total = win + tash + guess + enz
+        out[seat] = {"side": side, "total": round(total, 1), "parts": parts}
     return out
 
 
 def _sc_fmt(x):
     try:
-        return str(int(x)) if float(x).is_integer() else f"{float(x):.1f}"
+        v = float(x)
+        s = str(int(v)) if v.is_integer() else f"{v:.1f}"
     except Exception:
-        return str(x)
+        s = str(x)
+    # 🔡 اعداد یکدستِ فارسی
+    return s.translate(str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫"))
 
 
 def _score_card_lines(g, scores):
@@ -2283,17 +2289,10 @@ def _score_card_lines(g, scores):
         name = escape(g.seats[seat][1], quote=False)
         if sc["side"] == "مافیا":
             mark = "◾️"
-            if sc["no_act"]:
-                det = f"برد {_sc_fmt(p['win'])} | فریب {_sc_fmt(p['farib'])}/۴۰ | پوش {_sc_fmt(p['push'])}/۲۰"
-            else:
-                det = (f"برد {_sc_fmt(p['win'])} | اکت {_sc_fmt(p['act'])} | "
-                       f"فریب {_sc_fmt(p['farib'])} | پوش {_sc_fmt(p['push'])}")
+            det = f"برد {_sc_fmt(p['win'])} | فریب {_sc_fmt(p['farib'])}/۴۰ | پوش {_sc_fmt(p['push'])}/۲۰"
         else:
             mark = "♦️" if sc["side"] == "مستقل" else "◽️"
-            if sc["no_act"]:
-                det = f"برد {_sc_fmt(p['win'])} | تشخیص {_sc_fmt(p['tash'])}/۶۰"
-            else:
-                det = f"برد {_sc_fmt(p['win'])} | اکت {_sc_fmt(p['act'])} | تشخیص {_sc_fmt(p['tash'])}"
+            det = f"برد {_sc_fmt(p['win'])} | تشخیص {_sc_fmt(p['tash'])}/۶۰"
             if p.get("guess"):
                 det += f" | حدس {_sc_fmt(p['guess'])}"
         det += f" | انضباط {_sc_fmt(p['enz'])}"
@@ -3109,6 +3108,13 @@ def _kb_night_seats(seats, g, prefix, selected=None, confirm_cb=None):
 
 
 async def _safe_pm(ctx, uid, text, kb=None):
+    # 🔥 اکتِ سوخته: مثل بازیکنِ با پیویِ بسته رفتار می‌شود — هیچ پرامپتی نمی‌گیرد
+    try:
+        for _g in store.games.values():
+            if uid in (getattr(_g, "night_burned_uids", set()) or set()):
+                return None
+    except Exception:
+        pass
     try:
         return await ctx.bot.send_message(uid, text, reply_markup=kb)
     except Exception:
@@ -3273,6 +3279,11 @@ async def start_night(ctx, chat_id, g):
     if g.night_active:
         await ctx.bot.send_message(chat_id, "🌙 شب فعال است. برای پایان «/روز» را بنویسید.")
         return
+    # 🎭 وسطِ معارفه «شب» معنا ندارد — معارفه خودش شب است؛ اکت‌گیری شروع نشود
+    if getattr(g, "maarefe_active", False):
+        await ctx.bot.send_message(
+            chat_id, "🎭 الان شبِ معارفه است و اکت‌گیری ندارد — اول «☀️ روز» را بزن تا معارفه تمام شود.")
+        return
 
     _score_day_rollover(g)   # 🏅 فریبِ روزِ بدونِ دفاعیه + ریستِ پرچم‌های روز
 
@@ -3423,6 +3434,18 @@ async def start_night(ctx, chat_id, g):
         except Exception:
             pass
 
+    # 🎛 پنلِ شبِ گاد در پیوی: سوزاندن اکت + کیک شب (با پایانِ شب دکمه‌ها حذف می‌شوند)
+    try:
+        _kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔥 سوزاندن اکت", callback_data="nburn_open"),
+            InlineKeyboardButton("👢 کیک شب", callback_data="nkick_open"),
+        ]])
+        _pm = await ctx.bot.send_message(g.god_id, f"🌙 شب {g.night_number} — پنلِ گاد", reply_markup=_kb)
+        g.night_god_panel_mid = _pm.message_id
+        store.save()
+    except Exception:
+        pass
+
     # 🔄 با بازشدنِ چت در شب، برچسبِ دکمه‌ی قفل (بستن/باز کردن) به‌روز شود
     if getattr(g, "mafia_room_id", None):
         try:
@@ -3529,6 +3552,17 @@ async def end_night(ctx, chat_id, g):
     if not g.night_active:
         await ctx.bot.send_message(chat_id, "ℹ️ شبی فعال نیست.")
         return
+    # 🔥 سوختگیِ اکت فقط تا پایانِ همین شب اعتبار دارد
+    g.night_burned = set()
+    g.night_burned_uids = set()
+    # 🎛 دکمه‌های پنلِ شبِ گاد حذف شوند (اشتباهی در روز دستش نخورد)
+    _pmid = getattr(g, "night_god_panel_mid", None)
+    if _pmid:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=g.god_id, message_id=_pmid, reply_markup=None)
+        except Exception:
+            pass
+        g.night_god_panel_mid = None
     g.night_active = False
     g.night_stage = None
     for u, mid in list((g.night_pm_msgs or {}).items()):
@@ -3946,6 +3980,70 @@ async def _do_room_open(ctx, chat_id, g):
             await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
         except Exception:
             pass
+
+
+def _burn_kb(g):
+    tmp = getattr(g, "burn_tmp", []) or []
+    rows = []
+    for s in _alive_seats(g):
+        mark = "🔥 " if s in tmp else ""
+        rows.append([InlineKeyboardButton(f"{mark}{s} {g.seats[s][1]}", callback_data=f"nburn_{s}")])
+    rows.append([InlineKeyboardButton("✅ تأیید سوزوندن", callback_data="nburn_ok")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_burn_callback(update, ctx):
+    """🔥 انتخاب و تأییدِ سوزوندنِ اکت توسط گاد (در پیوی)."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None
+    for cid, game in store.games.items():
+        if game.god_id == uid and game.phase not in ("idle", "ended") and getattr(game, "assigned_roles", None):
+            g = game
+            break
+    if g is None:
+        await safe_q_answer(q, "بازیِ فعالی یافت نشد.", show_alert=True)
+        return
+    mid = q.message.message_id if q.message else None
+    if data == "nburn_open":
+        await safe_q_answer(q)
+        g.burn_tmp = sorted(g.night_burned or set())
+        store.save()
+        await _safe_pm(ctx, uid, "🔥 اکتِ چه کسانی سوزانده شود؟ (تا پایانِ همین شب اعتبار دارد)",
+                       _burn_kb(g))
+        return
+    if data == "nburn_ok":
+        await safe_q_answer(q)
+        newly = [s for s in (g.burn_tmp or []) if s not in (g.night_burned or set())]
+        g.night_burned = set(g.burn_tmp or [])
+        g.night_burned_uids = {g.seats[s][0] for s in g.night_burned if s in g.seats}
+        g.burn_tmp = []
+        store.save()
+        # پیویِ بازِ سوخته‌ها بسته شود تا دکمه‌ای برایشان نماند
+        for s in newly:
+            _u = g.seats.get(s, (None,))[0]
+            _pm = (g.night_pm_msgs or {}).get(_u)
+            if _u and _pm:
+                try:
+                    await _close_pm(ctx, _u, _pm, "🔥 گاد اکتِ امشبت را سوزاند.")
+                except Exception:
+                    pass
+        names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sorted(g.night_burned)) or "—"
+        await _close_pm(ctx, uid, mid, f"🔥 اکتِ این‌ها تا پایانِ شب سوخته: {names}")
+        await _night_report(ctx, g, f"🔥 سوزوندنِ اکت: <b>{escape(names, quote=False)}</b>")
+        return
+    await safe_q_answer(q)
+    s = int(data.rsplit("_", 1)[1])
+    tmp = list(g.burn_tmp or [])
+    if s in tmp:
+        tmp.remove(s)
+    else:
+        tmp.append(s)
+    g.burn_tmp = tmp
+    store.save()
+    await _edit_pm(ctx, uid, mid,
+                   "🔥 اکتِ چه کسانی سوزانده شود؟ (تا پایانِ همین شب اعتبار دارد)", _burn_kb(g))
 
 
 def _nem_reps_kb(g, tmp):
@@ -4829,6 +4927,13 @@ async def handle_baazpors_callback(update, ctx):
             return
         g.baazpors_used = True
         g.night_baz_targets = list(sel)   # اگر یکی امشب کشته شود، حقِ بازپرسی برمی‌گردد
+        # 🏅 حداقل یک مافیا در احضارشده‌ها = اکتِ درست؛ هر دو شهروند = −۵
+        _bz = _seat_of_uid(g, uid)
+        _mf = [x for x in sel if _sc_side(g, x) == "مافیا"]
+        if _mf:
+            _sc_add(g, _bz, "act", 15, f"بازپرسیِ درست ({len(_mf)} مافیا)")
+        else:
+            _sc_add(g, _bz, "act", -5, "بازپرسیِ هر دو شهروند")
         names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sel)
         await _close_pm(ctx, uid, mid, f"🧑‍⚖️ بازپرسی: {names}")
         await _night_report(ctx, g, f"🧑‍⚖️ بازپرس → احضار به بازپرسی: <b>{escape(names, quote=False)}</b>")
@@ -7681,6 +7786,12 @@ async def handle_night_kick_callback(update, ctx):
     await safe_q_answer(q)
     mid = q.message.message_id if q.message else None
 
+    if data == "nkick_open":
+        await _safe_pm(ctx, uid, "👢 چه کسی کیکِ شب می‌شود؟",
+                       _kb_night_seats(_alive_seats(g), g, "nkick_",
+                                       selected=g.night_sel.get(uid), confirm_cb="nkick_ok"))
+        return
+
     if data == "nkick_no":
         await _close_pm(ctx, uid, mid, "👢 امشب کیکِ شب نداریم.")
         return
@@ -7739,6 +7850,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🎯 حدسِ ۳ مافیا (شهروندِ خروجیِ روز ۱ — پیوی)
     if _q and _q.data and _q.data.startswith("d1g_"):
         await handle_d1_guess_callback(update, ctx)
+        return
+
+    # 🔥 سوزوندنِ اکت (گاد — پیوی)
+    if _q and _q.data and _q.data.startswith("nburn_"):
+        await handle_burn_callback(update, ctx)
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
@@ -9233,6 +9349,44 @@ async def shuffle_and_assign(
         else:
             g.seat_sides[_seat] = "شهر"
 
+    # 🔄 نقش‌های جدید = صفرشدنِ هرچه به نقش/سایدِ قبلی وابسته بود
+    #    (بارِ اول همه‌چیز خالی است و بی‌اثر؛ در رندوم/پخشِ مجدد ریستِ واقعی است)
+    g.score_events = {}
+    g.score_kicked = set()
+    g.score_act_impossible = set()
+    g.score_day_initial = False
+    g.score_day_final = False
+    g.score_farib_days = set()
+    g.d1_guess_seat = None
+    g.d1_guess_picks = []
+    g.d1_guess_done = False
+    g.defense_history = {}
+    g.nem_reps = []
+    g.nem_reps_tmp = []
+    g.nem_ding = None
+    g.nem_ding_used = False
+    g.nem_awaiting_reps = False
+    g.nem_awaiting_ding = False
+
+    # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
+    if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
+        try:
+            for _u in list(g.mafia_room_members or set()):
+                if _u == g.god_id:
+                    continue
+                await _room_kick(ctx, g, _u)
+                g.mafia_room_members.discard(_u)
+            await _room_rotate_link(ctx, g)
+        except Exception as _e:
+            print("⚠️ reroll room reset err:", _e)
+        g.maarefe_done = False
+        try:
+            await ctx.bot.send_message(chat_id,
+                "🔄 نقش‌ها از نو پخش شد — اعضای قبلیِ اتاق مافیا حذف و لینک باطل شد؛ دوباره «🎭 معارفه» بزن.")
+        except Exception:
+            pass
+    store.save()
+
     # 6) ارسال نقش‌ها به بازیکن‌ها (اختیاری) و ساخت لاگ برای گاد
     log, unreachable = [], []
     stickers = load_stickers()
@@ -10515,6 +10669,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if uid == g.god_id:
             await _do_room_close(ctx, chat_id, g)
         return
+
 
     # تغییر موضوع رویداد (گاد/ادمین) — بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
