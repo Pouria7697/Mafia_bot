@@ -611,12 +611,17 @@ def format_player_stats(p: dict) -> str:
     ig, iw = p.get("indep_games", 0), p.get("indep_wins", 0)
 
     name = escape(p.get("name", "بازیکن"), quote=False)
+    _st = p.get("score_total", 0) or 0
+    try:
+        _st_txt = str(int(_st)) if float(_st).is_integer() else f"{float(_st):.1f}"
+    except Exception:
+        _st_txt = str(_st)
     lines = [
         f"📊 <b>آمار {name}</b>",
         "",
         f"🎮 کل بازی‌ها: <b>{games}</b>",
         f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
-        f"🏅 امتیاز کل: <b>{_sc_fmt(p.get('score_total', 0) or 0)}</b>",
+        f"🏅 امتیاز کل: <b>{_st_txt}</b>",
         "",
         f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
         f"◾️ مافیا: {mg} بازی | {mw} برد{pct(mw, mg)}",
