@@ -2561,7 +2561,17 @@ async def _finalize_final_vote(ctx, chat_id, g):
     rn = _seat_role_norm(g, exiter)
     protected = ((_is_takavar_scenario(g) and rn == _R_WATCHMAN
                   and not getattr(g, "tk_shield_lost", False))
-                 or (_is_neg_scenario(g) and rn == _R_ARMORED))
+                 or (_is_neg_scenario(g) and rn == _R_ARMORED
+                     and not getattr(g, "zereh_fallen", False)))
+    if protected:
+        # 🛡 افتادنِ خودکارِ زره/شیلد با همین رأی — بدونِ اعلامِ عمومی (نقش لو نمی‌رود)
+        if rn == _R_WATCHMAN:
+            g.tk_shield_lost = True
+        else:
+            g.zereh_fallen = True
+        store.save()
+        await _night_report(ctx, g,
+                            f"🛡 {exiter}. {nm} با رأی خارج نشد — زره/شیلدش از همین حالا افتاد (فقط تو می‌دانی).")
     if not protected:
         g.striked.add(exiter)
         store.save()
@@ -3618,9 +3628,8 @@ def _shot_outcome(g, seat):
     if kind == "rouin":
         return "rouin"
     if kind == "zereh":
-        # 🔒 افتادنِ خودکارِ زره فعلاً غیرفعال (گاد خودش مدیریت می‌کند):
-        # if getattr(g, "zereh_fallen", False):
-        #     return "kill"
+        if getattr(g, "zereh_fallen", False):
+            return "kill"   # زره با رأیِ روز افتاده → دیگر محافظتی ندارد
         return "zereh"
     return "kill"
 
@@ -5680,28 +5689,11 @@ async def _tk_send_hostage_notice(ctx, g):
 
 
 async def _tk_open_shield(ctx, chat_id, g):
-    # 🛡 فعلاً دستی: هر شب از گاد پرسیده می‌شود (تا دقتِ شمارشِ رأی تأیید شود)
-    #    اولین «خیر» = افتادنِ دائمیِ شیلد (دیگر نه سؤال، نه اکت)
-    watch = _find_seat_by_role(g, _R_WATCHMAN)
-    if not watch or getattr(g, "tk_shield_lost", False):
-        g.night_shield = False
-        g.night_done.add("shield")
-        store.save()
-        await _tk_open_first(ctx, chat_id, g)
-        return
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛡 بله، شیلد دارد", callback_data="tk_shield_yes")],
-        [InlineKeyboardButton("🚫 خیر", callback_data="tk_shield_no")],
-    ])
-    try:
-        m = await ctx.bot.send_message(g.god_id, f"🌙 شب {g.night_number}\nآیا نگهبان شیلد دارد؟", reply_markup=kb)
-        g.night_pm_msgs[g.god_id] = m.message_id
-        store.save()
-    except Exception:
-        g.night_shield = True
-        g.night_done.add("shield")
-        store.save()
-        await _tk_open_first(ctx, chat_id, g)
+    # 🛡 خودکار: شیلد فقط با اجماعِ رأی نهایی می‌افتد (tk_shield_lost) — سؤالی از گاد پرسیده نمی‌شود
+    g.night_shield = not getattr(g, "tk_shield_lost", False)
+    g.night_done.add("shield")
+    store.save()
+    await _tk_open_first(ctx, chat_id, g)
 
 
 async def _tk_open_first(ctx, chat_id, g):
