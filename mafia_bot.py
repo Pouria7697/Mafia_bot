@@ -7769,6 +7769,33 @@ async def handle_don_sentence_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         return
 
 
+async def _pass_shot_to_next_mafia(ctx, g, ks):
+    """👢→🔫 اگر کیک‌شده مافیای صاحبِ شات بود و هنوز شلیک نکرده، شات به مافیای بعدی می‌رسد."""
+    try:
+        if _sc_side(g, ks) != "مافیا" or getattr(g, "night_shot_target", None):
+            return
+        ku = g.seats[ks][0]
+        if ku not in (g.night_pm_msgs or {}):
+            return   # پرامپتِ بازی دستش نبود → شاتی معطل نیست
+        nxt = None
+        for s in sorted(_alive_seats(g)):
+            if s != ks and s not in (g.night_burned or set()) and _sc_side(g, s) == "مافیا":
+                nxt = s
+                break
+        if nxt is None:
+            return
+        nuid = g.seats[nxt][0]
+        targets = [x for x in _alive_seats(g) if x != nxt]
+        m = await _safe_pm(ctx, nuid, "🔫 شات به تو رسید (هم‌تیمی‌ات کیک شد) — هدف را انتخاب کن:",
+                           _kb_night_seats(targets, g, "night_shot_", confirm_cb="night_shot_confirm"))
+        if m:
+            g.night_pm_msgs[nuid] = m.message_id
+            store.save()
+            await _night_report(ctx, g, f"🔫 شات از {ks} به {nxt} منتقل شد (کیک شب).")
+    except Exception as e:
+        print("⚠️ pass shot err:", e)
+
+
 async def handle_night_kick_callback(update, ctx):
     """👢 کیک شب — انتخابِ گاد در پیوی (همه‌ی سناریوها)."""
     q = update.callback_query
@@ -7810,9 +7837,20 @@ async def handle_night_kick_callback(update, ctx):
         g.night_kick_seat = s
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
+        # 👢 کیک‌شده امشب اکت ندارد (مثل سوختن) + شاتِ معطلش به مافیای بعدی پاس می‌شود
+        await _pass_shot_to_next_mafia(ctx, g, s)   # قبل از بستنِ پیوی (به پرامپتِ باز نیاز دارد)
+        g.night_burned.add(s)
+        _ku = g.seats[s][0]
+        g.night_burned_uids.add(_ku)
+        _kpm = (g.night_pm_msgs or {}).get(_ku)
+        if _kpm:
+            try:
+                await _close_pm(ctx, _ku, _kpm, "👢 کیک شدی — امشب اکت نداری.")
+            except Exception:
+                pass
         await _close_pm(ctx, uid, mid,
                         f"👢 کیک شب ثبت شد: {s}. {_tn}\n"
-                        f"(امشب اکتش را انجام می‌دهد و هنگامِ روز خط می‌خورد)")
+                        f"(امشب اکت ندارد و هنگامِ روز خط می‌خورد)")
         await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b>")
         store.save()
         return
