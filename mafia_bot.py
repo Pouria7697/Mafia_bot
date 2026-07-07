@@ -684,6 +684,7 @@ def _weekly_delta(current: dict, snapshot: dict) -> dict:
         "mafia_games", "mafia_wins",
         "indep_games", "indep_wins",
         "god_games",
+        "score_total",
     ]
     delta = {}
     for uid, cur in current.items():
@@ -810,10 +811,29 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         out.append("")
         return out
 
+    # 🏅 میانگینِ امتیاز در هر بازی (حداقل ۳ بازی) — عادلانه: کیفیت، نه تعدادِ بازی
+    top_scores = sorted(
+        [(uid, d) for uid, d in current.items()
+         if d.get("games", 0) >= 3 and d.get("score_total", 0) > 0],
+        key=lambda it: (it[1].get("score_total", 0) / it[1].get("games", 1),
+                        it[1].get("games", 0), it[1].get("wins", 0)),
+        reverse=True,
+    )[:3]
+
     lines = ["👑 <b>برترین‌های کل دوران مافیا</b> 👑", ""]
     lines += block("🏅 <b>۱۰ بازیکن برتر کل</b>", overall, "wins", "games")
     lines += block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_wins", "citizen_games")
     lines += block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_wins", "mafia_games")
+    if top_scores:
+        sc_out = ["⭐ <b>میانگینِ امتیاز (هر بازی)</b>"]
+        for i, (_uid, d) in enumerate(top_scores):
+            nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
+            n = d.get("games", 1)
+            avg = d.get("score_total", 0) / n
+            avg_txt = str(int(avg)) if float(avg).is_integer() else f"{avg:.1f}"
+            sc_out.append(f"{_medal(i)} {nm} — {avg_txt} ({n} بازی)")
+        sc_out.append("")
+        lines += sc_out
     lines += block("🎩 <b>پرکارترین راوی‌ها (گاد)</b>", gods, "god_games", "god_games", unit="بازی")
 
     while lines and lines[-1] == "":
