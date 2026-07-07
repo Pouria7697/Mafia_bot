@@ -26,7 +26,10 @@ BTN_PLAYER  = "player_name"
 BTN_DELETE  = "delete_seat"      
 BTN_START   = "start_game"      
 BTN_CALL = "call_players"   
-BTN_REROLL = "reroll_roles" 
+BTN_REROLL = "reroll_roles"
+# 📣 لینک کانال (فوتر تبلیغی لیست‌ها)
+CHANNEL_LINK = "https://t.me/Mafiashow_games"
+CHANNEL_AD = f"📣 <a href='{CHANNEL_LINK}'>کانال مافیاشو | MafiaShow</a>"
 MAFIA_FILENAME = "mafia.json"
  
 
@@ -556,11 +559,15 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None):
             if won:
                 p["wins"] = p.get("wins", 0) + 1
 
-            # 🏅 امتیاز کل (انباشته در طول بازی‌ها)
+            # 🏅 امتیاز کل + تفکیکِ شهروندی/مافیایی (انباشته در طول بازی‌ها)
             if scores and seat in scores:
                 try:
-                    p["score_total"] = round(float(p.get("score_total", 0) or 0)
-                                             + float(scores[seat].get("total", 0) or 0), 1)
+                    _tot = float(scores[seat].get("total", 0) or 0)
+                    p["score_total"] = round(float(p.get("score_total", 0) or 0) + _tot, 1)
+                    if side == "مافیا":
+                        p["score_mafia"] = round(float(p.get("score_mafia", 0) or 0) + _tot, 1)
+                    elif side == "شهر":
+                        p["score_citizen"] = round(float(p.get("score_citizen", 0) or 0) + _tot, 1)
                 except Exception:
                     pass
 
@@ -684,7 +691,7 @@ def _weekly_delta(current: dict, snapshot: dict) -> dict:
         "mafia_games", "mafia_wins",
         "indep_games", "indep_wins",
         "god_games",
-        "score_total",
+        "score_total", "score_citizen", "score_mafia",
     ]
     delta = {}
     for uid, cur in current.items():
@@ -775,15 +782,38 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
     # حذف خط خالی انتهایی
     while lines and lines[-1] == "":
         lines.pop()
+    lines += ["", CHANNEL_AD]
 
     return "\n".join(lines)
 
 
 def build_alltime_leaderboard_text(current: dict) -> str | None:
     """لیدربرد کل دوران (تجمعی) — از همان داده‌ی player_stats.json."""
-    overall = _rank_block(current, "wins", "games", 10)
-    citizens = _rank_block(current, "citizen_wins", "citizen_games", 3)
-    mafias = _rank_block(current, "mafia_wins", "mafia_games", 3)
+    # 🏅 رتبه‌بندیِ اصلی بر اساسِ امتیازِ کل؛ درصدِ برد فقط نمایشی است
+    overall = sorted(
+        [(uid, d) for uid, d in current.items()
+         if d.get("games", 0) > 0 and d.get("score_total", 0) > 0],
+        key=lambda it: (it[1].get("score_total", 0), it[1].get("wins", 0)),
+        reverse=True,
+    )[:10]
+    if not overall:   # تا وقتی امتیازی ثبت نشده → مثل قبل بر اساسِ برد
+        overall = _rank_block(current, "wins", "games", 10)
+
+    # ◽️◾️ شهروند/مافیای برتر بر اساسِ میانگینِ امتیازِ همان ساید (حداقل ۳ بازی در آن ساید)
+    def _avg_rows(sc_key, g_key, min_g=3):
+        rows = [(uid, d) for uid, d in current.items()
+                if d.get(g_key, 0) >= min_g and d.get(sc_key, 0) > 0]
+        rows.sort(key=lambda it: (it[1].get(sc_key, 0) / it[1].get(g_key, 1),
+                                  it[1].get(g_key, 0)), reverse=True)
+        return rows[:3]
+
+    citizens = _avg_rows("score_citizen", "citizen_games")
+    mafias = _avg_rows("score_mafia", "mafia_games")
+    cit_by_score, maf_by_score = bool(citizens), bool(mafias)
+    if not citizens:
+        citizens = _rank_block(current, "citizen_wins", "citizen_games", 3)
+    if not mafias:
+        mafias = _rank_block(current, "mafia_wins", "mafia_games", 3)
     gods = sorted(
         [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
         key=lambda it: it[1].get("god_games", 0),
@@ -811,33 +841,53 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         out.append("")
         return out
 
-    # 🏅 میانگینِ امتیاز در هر بازی (حداقل ۳ بازی) — عادلانه: کیفیت، نه تعدادِ بازی
-    top_scores = sorted(
-        [(uid, d) for uid, d in current.items()
-         if d.get("games", 0) >= 3 and d.get("score_total", 0) > 0],
-        key=lambda it: (it[1].get("score_total", 0) / it[1].get("games", 1),
-                        it[1].get("games", 0), it[1].get("wins", 0)),
-        reverse=True,
-    )[:3]
+    def _fmt_lat(v):
+        try:
+            f = float(v)
+            return str(int(f)) if f.is_integer() else f"{f:.1f}"
+        except Exception:
+            return str(v)
 
     lines = ["👑 <b>برترین‌های کل دوران مافیا</b> 👑", ""]
-    lines += block("🏅 <b>۱۰ بازیکن برتر کل</b>", overall, "wins", "games")
-    lines += block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_wins", "citizen_games")
-    lines += block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_wins", "mafia_games")
-    if top_scores:
-        sc_out = ["⭐ <b>میانگینِ امتیاز (هر بازی)</b>"]
-        for i, (_uid, d) in enumerate(top_scores):
+
+    out10 = ["🏅 <b>۱۰ بازیکن برتر کل</b>"]
+    for i, (_uid, d) in enumerate(overall):
+        nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
+        w, n = d.get("wins", 0), d.get("games", 0)
+        st = d.get("score_total", 0)
+        if st > 0:
+            out10.append(f"{_medal(i)} {nm} — {_fmt_lat(st)} امتیاز | {w} برد{pct(w, n)}")
+        else:
+            out10.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
+    if not overall:
+        out10.append("—")
+    out10.append("")
+    lines += out10
+
+    def side_block(title, rows, by_score, sc_key, g_key, w_key):
+        sb = [title]
+        for i, (_uid, d) in enumerate(rows):
             nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
-            n = d.get("games", 1)
-            avg = d.get("score_total", 0) / n
-            avg_txt = str(int(avg)) if float(avg).is_integer() else f"{avg:.1f}"
-            sc_out.append(f"{_medal(i)} {nm} — {avg_txt} ({n} بازی)")
-        sc_out.append("")
-        lines += sc_out
+            w, n = d.get(w_key, 0), d.get(g_key, 0)
+            if by_score and n:
+                avg = d.get(sc_key, 0) / n
+                sb.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(avg)} | {w} برد{pct(w, n)}")
+            else:
+                sb.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
+        if not rows:
+            sb.append("—")
+        sb.append("")
+        return sb
+
+    lines += side_block("◽️ <b>۳ شهروند برتر کل</b>", citizens, cit_by_score,
+                        "score_citizen", "citizen_games", "citizen_wins")
+    lines += side_block("◾️ <b>۳ مافیای برتر کل</b>", mafias, maf_by_score,
+                        "score_mafia", "mafia_games", "mafia_wins")
     lines += block("🎩 <b>پرکارترین راوی‌ها (گاد)</b>", gods, "god_games", "god_games", unit="بازی")
 
     while lines and lines[-1] == "":
         lines.pop()
+    lines += ["", CHANNEL_AD]
 
     return "\n".join(lines)
 
@@ -2322,6 +2372,8 @@ def _score_card_lines(g, scores):
                 det += f" | حدس {_sc_fmt(p['guess'])}"
         det += f" | انضباط {_sc_fmt(p['enz'])}"
         lines.append(f"{mark}{seat}. {name} — <b>{_sc_fmt(sc['total'])}</b> ({det})")
+    lines.append("")
+    lines.append(CHANNEL_AD)
     return lines
 _SC_SHOOTER_ROLES = ("دن‌کارلئونه", "دن‌مافیا", "دن", "جلاد", "کاپو", "رئیس‌مافیا", "پدرخوانده")
 _SC_SNIPER_ROLES = ("تک‌تیرانداز", "اسنایپر", "ریک‌گرایمز", "تکاور", "هانتر", "شکارچی")
@@ -2866,6 +2918,8 @@ async def announce_winner(ctx, update, g: GameState):
     if getattr(g, "chaos_mode", False):
         result_line += " (کی‌آس)"
     lines.append(result_line)
+    lines.append("")
+    lines.append(CHANNEL_AD)
 
     # ✅ افزایش شماره ایونت (کش + Gist)
     nums[key] = event_num + 1
