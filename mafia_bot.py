@@ -806,18 +806,50 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
                                   require_weekly: bool = True) -> str | None:
     delta = _weekly_delta(current, snapshot)
 
-    # ── این هفته ──
-    w_overall = _rank_block(delta, "wins", "games", 10)
-    w_citizens = _rank_block(delta, "citizen_wins", "citizen_games", 3)
-    w_mafias = _rank_block(delta, "mafia_wins", "mafia_games", 3)
+    # ── این هفته — ترکیبی: مجموعِ امتیازِ هفته + میانگینِ هفته ──
+    def _wk_total(d):
+        lg = max(0, d.get("games", 0) - d.get("score_games", 0))
+        lw = max(0, d.get("wins", 0) - d.get("score_wins", 0))
+        return d.get("score_total", 0) + 15.0 * lg + 25.0 * lw
+
+    def _wk_side_total(d, sc_key, sg_key, g_key, w_key, sw_key):
+        n = d.get(g_key, 0)
+        if not n:
+            return 0.0
+        lg = max(0, n - d.get(sg_key, 0))
+        lw = max(0, d.get(w_key, 0) - d.get(sw_key, 0))
+        return d.get(sc_key, 0) + 15.0 * lg + 25.0 * lw
+
+    def _hyb_rows(src, total_fn, g_key, top_n):
+        rows = [(uid, d, total_fn(d)) for uid, d in src.items()]
+        rows = [r for r in rows if r[2] > 0]
+        rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get(g_key, 1)),
+                                  it[1].get(g_key, 0)), reverse=True)
+        return rows[:top_n]
+
+    w_overall = _hyb_rows(delta, _wk_total, "games", 10)
+    if not w_overall:
+        w_overall = [(u, d, None) for u, d in _rank_block(delta, "wins", "games", 10)]
+    w_citizens = _hyb_rows(delta, lambda d: _wk_side_total(
+        d, "score_citizen", "score_citizen_games", "citizen_games",
+        "citizen_wins", "score_citizen_wins"), "citizen_games", 3)
+    if not w_citizens:
+        w_citizens = [(u, d, None) for u, d in _rank_block(delta, "citizen_wins", "citizen_games", 3)]
+    w_mafias = _hyb_rows(delta, lambda d: _wk_side_total(
+        d, "score_mafia", "score_mafia_games", "mafia_games",
+        "mafia_wins", "score_mafia_wins"), "mafia_games", 3)
+    if not w_mafias:
+        w_mafias = [(u, d, None) for u, d in _rank_block(delta, "mafia_wins", "mafia_games", 3)]
     w_gods = sorted(
         [(uid, d) for uid, d in delta.items() if d.get("god_games", 0) > 0],
         key=lambda it: it[1].get("god_games", 0),
         reverse=True,
     )[:2]
 
-    # ── کل دوران (تجمعی) ──
-    c_overall = _rank_block(current, "wins", "games", 10)
+    # ── کل دوران (تجمعی) — همان ترکیبی ──
+    c_overall = _hyb_rows(current, _wk_total, "games", 10)
+    if not c_overall:
+        c_overall = [(u, d, None) for u, d in _rank_block(current, "wins", "games", 10)]
 
     weekly_active = bool(w_overall or w_citizens or w_mafias or w_gods)
 
@@ -833,17 +865,32 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
     def pct(w, n):
         return f" ({round(w * 100 / n)}٪)" if n > 0 else ""
 
+    def _fl(v):
+        try:
+            f = float(v)
+            return str(int(f)) if f.is_integer() else f"{f:.1f}"
+        except Exception:
+            return str(v)
+
     def block(title, rows, win_key, game_key, unit="برد"):
         out = [title]
         if rows:
-            for i, (_uid, d) in enumerate(rows):
+            for i, item in enumerate(rows):
+                if len(item) == 3:
+                    _uid, d, val = item
+                else:
+                    (_uid, d), val = item, None
                 nm = escape(d["name"], quote=False)
                 # نام قابل‌کلیک → پروفایل بازیکن (بدون نمایش آیدی)
                 nm = f"<a href='tg://user?id={_uid}'>{nm}</a>"
                 w = d.get(win_key, 0)
                 n = d.get(game_key, 0)
                 suffix = pct(w, n) if unit == "برد" else ""
-                out.append(f"{_medal(i)} {nm} — {w} {unit}{suffix}")
+                if val is not None and n:
+                    out.append(f"{_medal(i)} {nm} — {_fl(val)} امتیاز | "
+                               f"میانگین {_fl(val / n)} | {w} {unit}{suffix}")
+                else:
+                    out.append(f"{_medal(i)} {nm} — {w} {unit}{suffix}")
         else:
             out.append("—")
         out.append("")
