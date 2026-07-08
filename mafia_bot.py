@@ -281,7 +281,8 @@ class GameState:
         self.night_mine_sacrifice = getattr(self, "night_mine_sacrifice", None)
         # ── حالت شبِ خودکار (سناریو تکاور) ──
         self.night_shield = getattr(self, "night_shield", False)
-        self.tk_shield_lost = getattr(self, "tk_shield_lost", False)   # افتادنِ شیلد دائمی است
+        self.tk_shield_lost = getattr(self, "tk_shield_lost", False)
+        self.tk_com_burned = getattr(self, "tk_com_burned", False)   # 🎖 تیرِ تکاور سوخته؟   # افتادنِ شیلد دائمی است
         self.night_guard_seats = getattr(self, "night_guard_seats", []) or []
         self.night_guard_sel = getattr(self, "night_guard_sel", {}) or {}
         self.tk_guard_need = getattr(self, "tk_guard_need", 1)
@@ -4024,6 +4025,13 @@ async def _resolve_takavar(ctx, chat_id, g):
     countered = (st is not None and st == com and g.night_commando_target is not None)
 
     if st and st in g.seats:
+        if st == com and not getattr(g, "tk_com_burned", False):
+            # 🎖 فرصتِ ضدشلیک ایجاد شد → تیر می‌سوزد؛ چه بزند چه نزند —
+            #    حتی اگر سیوِ پزشک نجاتش دهد، فردا شب دیگر تیر ندارد
+            g.tk_com_burned = True
+            store.save()
+            if not countered:
+                await _night_report(ctx, g, "🎖 تکاور از ضدشلیک استفاده نکرد — تیرش سوخت.")
         if countered:
             ct = g.night_commando_target
             if ct in _mafia_seats(g) and _seat_role_norm(g, ct) != _R_GODFATHER:
@@ -6061,9 +6069,10 @@ async def _tk_open_citizens(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[duid] = m.message_id
 
-    # 🎖 تکاور — فقط اگر مافیا او را «شات» کرده باشد و بلاک نشده باشد
+    # 🎖 تکاور — فقط اگر مافیا او را «شات» کرده باشد، بلاک نباشد و تیرش نسوخته باشد
     com = _find_seat_by_role(g, _R_COMMANDO)
-    if com and g.night_shot_target == com and not _tk_blocked(g, com):
+    if (com and g.night_shot_target == com and not _tk_blocked(g, com)
+            and not getattr(g, "tk_com_burned", False)):
         cuid = g.seats[com][0]
         targets = [s for s in _alive_seats(g) if s != com]
         m = await _safe_pm(ctx, cuid, "🎖 شما شات شدید! می‌توانید یک نفر را بزنید (یک‌بار):",
@@ -6072,6 +6081,8 @@ async def _tk_open_citizens(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[cuid] = m.message_id
     else:
+        if com and g.night_shot_target == com and getattr(g, "tk_com_burned", False):
+            await _night_report(ctx, g, "🎖 تکاور دوباره شات شد، اما تیرش قبلاً سوخته — ضدشلیکی ندارد.")
         g.night_done.add("commando")
     store.save()
     await _tk_check_open_gunman(ctx, chat_id, g)
@@ -9659,6 +9670,9 @@ async def shuffle_and_assign(
     g.nem_ding_used = False
     g.nem_awaiting_reps = False
     g.nem_awaiting_ding = False
+    g.tk_shield_lost = False
+    g.tk_com_burned = False
+    g.zereh_fallen = False
 
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
