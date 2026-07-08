@@ -880,10 +880,10 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         n = d.get("games", 0)
         return (_ov_total(d) / n) if n else 0.0
 
+    # رتبه‌بندیِ ترکیبی: مجموع (تجربه) + میانگین (کیفیت — تعیین‌کننده بینِ نزدیک‌ها)
     overall = sorted(
-        [(uid, d) for uid, d in current.items()
-         if d.get("games", 0) >= 3 and _ov_total(d) > 0],
-        key=lambda it: (_ov_val(it[1]), it[1].get("games", 0), it[1].get("wins", 0)),
+        [(uid, d) for uid, d in current.items() if _ov_total(d) > 0],
+        key=lambda it: (_ov_total(it[1]) + _ov_val(it[1]), it[1].get("wins", 0)),
         reverse=True,
     )[:10]
     ov_by_avg = bool(overall)
@@ -898,18 +898,21 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
 
     # ◽️◾️ شهروند/مافیای برتر — همان فرمول ولی فقط با بازی‌های همان ساید:
     #    (۱۵ × بازی‌های قدیمیِ ساید + ۲۵ × بردهای قدیمیِ ساید + امتیازهای ثبت‌شده‌ی ساید) ÷ کلِ بازی‌های ساید
-    def _side_val(d, sc_key, sg_key, g_key, w_key, sw_key):
+    def _side_total(d, sc_key, sg_key, g_key, w_key, sw_key):
         n = d.get(g_key, 0)
         if not n:
             return 0.0
         lg = max(0, n - d.get(sg_key, 0))
         lw = max(0, d.get(w_key, 0) - d.get(sw_key, 0))
-        return (d.get(sc_key, 0) + 15.0 * lg + 25.0 * lw) / n
+        return d.get(sc_key, 0) + 15.0 * lg + 25.0 * lw
 
-    def _avg_rows(sc_key, sg_key, g_key, w_key, sw_key, min_g=3):
-        rows = [(uid, d, _side_val(d, sc_key, sg_key, g_key, w_key, sw_key))
+    def _avg_rows(sc_key, sg_key, g_key, w_key, sw_key, min_g=1):
+        rows = [(uid, d, _side_total(d, sc_key, sg_key, g_key, w_key, sw_key))
                 for uid, d in current.items() if d.get(g_key, 0) >= min_g]
-        rows.sort(key=lambda it: (it[2], it[1].get(g_key, 0)), reverse=True)
+        rows = [r for r in rows if r[2] > 0]
+        # ترکیبی: مجموعِ سایدی + میانگینِ سایدی
+        rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get(g_key, 1)),
+                                  it[1].get(g_key, 0)), reverse=True)
         return rows[:3]
 
     citizens = _avg_rows("score_citizen", "score_citizen_games",
@@ -961,11 +964,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
     for i, (_uid, d) in enumerate(overall):
         nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
         w, n = d.get("wins", 0), d.get("games", 0)
-        st = d.get("score_total", 0)
         if ov_by_avg and n:
-            out10.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(_ov_val(d))} | {w} برد{pct(w, n)}")
-        elif st > 0:
-            out10.append(f"{_medal(i)} {nm} — {_fmt_lat(st)} امتیاز | {w} برد{pct(w, n)}")
+            out10.append(f"{_medal(i)} {nm} — {_fmt_lat(_ov_total(d))} امتیاز | "
+                         f"میانگین {_fmt_lat(_ov_val(d))} | {w} برد{pct(w, n)}")
         else:
             out10.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
     if not overall:
@@ -978,8 +979,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         for i, (_uid, d, val) in enumerate(rows):
             nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
             w, n = d.get(w_key, 0), d.get(g_key, 0)
-            if val is not None:
-                sb.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(val)} | {w} برد{pct(w, n)}")
+            if val is not None and n:
+                sb.append(f"{_medal(i)} {nm} — {_fmt_lat(val)} امتیاز | "
+                          f"میانگین {_fmt_lat(val / n)} | {w} برد{pct(w, n)}")
             else:
                 sb.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
         if not rows:
