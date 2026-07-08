@@ -8825,7 +8825,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if data == "vote_done_initial" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
-        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست زمان‌بندی داخل گروه
+        # await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست — شمارش تأیید شد، غیرفعال
         await _offer_auto_defense(ctx, chat, g)        # 🧍 پیشنهادِ دفاعیه‌ی خودکار (قبل از پاک شدن آرا)
         _score_votes_initial(g)                        # 🏅 تشخیصِ رأی اولیه (قبل از پاک شدن آرا)
         g.votes_cast = {}
@@ -8842,7 +8842,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "vote_done_final" and uid == g.god_id:
         await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
-        await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست (پیوی سازنده)
+        # await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست — شمارش تأیید شد، غیرفعال
         await _finalize_final_vote(ctx, chat, g)       # 🚪 خروج/سابقه/افتادنِ زره و شیلد
         g.votes_cast = {}
         g.vote_logs = {}
