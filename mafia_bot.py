@@ -567,10 +567,19 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                 try:
                     _tot = float(scores[seat].get("total", 0) or 0)
                     p["score_total"] = round(float(p.get("score_total", 0) or 0) + _tot, 1)
+                    p["score_games"] = int(p.get("score_games", 0) or 0) + 1
+                    if won:
+                        p["score_wins"] = int(p.get("score_wins", 0) or 0) + 1
                     if side == "مافیا":
                         p["score_mafia"] = round(float(p.get("score_mafia", 0) or 0) + _tot, 1)
+                        p["score_mafia_games"] = int(p.get("score_mafia_games", 0) or 0) + 1
+                        if won:
+                            p["score_mafia_wins"] = int(p.get("score_mafia_wins", 0) or 0) + 1
                     elif side == "شهر":
                         p["score_citizen"] = round(float(p.get("score_citizen", 0) or 0) + _tot, 1)
+                        p["score_citizen_games"] = int(p.get("score_citizen_games", 0) or 0) + 1
+                        if won:
+                            p["score_citizen_wins"] = int(p.get("score_citizen_wins", 0) or 0) + 1
                 except Exception:
                     pass
 
@@ -678,17 +687,25 @@ def format_player_stats(p: dict) -> str:
     ig, iw = p.get("indep_games", 0), p.get("indep_wins", 0)
 
     name = escape(p.get("name", "بازیکن"), quote=False)
-    _st = p.get("score_total", 0) or 0
-    try:
-        _st_txt = str(int(_st)) if float(_st).is_integer() else f"{float(_st):.1f}"
-    except Exception:
-        _st_txt = str(_st)
+    # 🏅 امتیاز کل = ۱۵ × بازی‌های قدیمی + ۲۵ × بردهای قدیمی + امتیازهای ثبت‌شده؛ میانگین = ÷ تمامِ بازی‌ها
+    _lgames = max(0, games - int(p.get("score_games", 0) or 0))
+    _lwins = max(0, wins - int(p.get("score_wins", 0) or 0))
+    _st = float(p.get("score_total", 0) or 0) + 15.0 * _lgames + 25.0 * _lwins
+
+    def _lat(v):
+        try:
+            f = float(v)
+            return str(int(f)) if f.is_integer() else f"{f:.1f}"
+        except Exception:
+            return str(v)
+
+    _avg = (_st / games) if games else 0
     lines = [
         f"📊 <b>آمار {name}</b>",
         "",
         f"🎮 کل بازی‌ها: <b>{games}</b>",
         f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
-        f"🏅 امتیاز کل: <b>{_st_txt}</b>",
+        f"🏅 امتیاز کل: <b>{_lat(_st)}</b> | میانگین: <b>{_lat(_avg)}</b>",
         "",
         f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
         f"◾️ مافیا: {mg} بازی | {mw} برد{pct(mw, mg)}",
@@ -752,6 +769,8 @@ def _weekly_delta(current: dict, snapshot: dict) -> dict:
         "indep_games", "indep_wins",
         "god_games",
         "score_total", "score_citizen", "score_mafia",
+        "score_citizen_games", "score_mafia_games", "score_games", "score_wins",
+        "score_citizen_wins", "score_mafia_wins",
     ]
     delta = {}
     for uid, cur in current.items():
@@ -849,31 +868,59 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
 
 def build_alltime_leaderboard_text(current: dict) -> str | None:
     """لیدربرد کل دوران (تجمعی) — از همان داده‌ی player_stats.json."""
-    # 🏅 رتبه‌بندیِ اصلی بر اساسِ امتیازِ کل؛ درصدِ برد فقط نمایشی است
+    # 🏅 رتبه‌بندیِ اصلی:
+    #    امتیازِ کل = ۱۵ × بازی‌های قبل از امتیازدهی + ۲۵ × بردهای قبل از امتیازدهی + امتیازهای ثبت‌شده
+    #    میانگین  = امتیازِ کل ÷ تمامِ بازی‌ها — حداقل ۳ بازی
+    def _ov_total(d):
+        lg = max(0, d.get("games", 0) - d.get("score_games", 0))   # بازی‌های قدیمی
+        lw = max(0, d.get("wins", 0) - d.get("score_wins", 0))     # بردهای قدیمی
+        return d.get("score_total", 0) + 15.0 * lg + 25.0 * lw
+
+    def _ov_val(d):
+        n = d.get("games", 0)
+        return (_ov_total(d) / n) if n else 0.0
+
     overall = sorted(
         [(uid, d) for uid, d in current.items()
-         if d.get("games", 0) > 0 and d.get("score_total", 0) > 0],
-        key=lambda it: (it[1].get("score_total", 0), it[1].get("wins", 0)),
+         if d.get("games", 0) >= 3 and _ov_total(d) > 0],
+        key=lambda it: (_ov_val(it[1]), it[1].get("games", 0), it[1].get("wins", 0)),
         reverse=True,
     )[:10]
-    if not overall:   # تا وقتی امتیازی ثبت نشده → مثل قبل بر اساسِ برد
+    ov_by_avg = bool(overall)
+    if not overall:   # داده‌ی کافی نیست → مجموعِ امتیاز؛ اگر آن هم نبود → برد
+        overall = sorted(
+            [(uid, d) for uid, d in current.items() if d.get("score_total", 0) > 0],
+            key=lambda it: (it[1].get("score_total", 0), it[1].get("wins", 0)),
+            reverse=True,
+        )[:10]
+    if not overall:
         overall = _rank_block(current, "wins", "games", 10)
 
-    # ◽️◾️ شهروند/مافیای برتر بر اساسِ میانگینِ امتیازِ همان ساید (حداقل ۳ بازی در آن ساید)
-    def _avg_rows(sc_key, g_key, min_g=3):
-        rows = [(uid, d) for uid, d in current.items()
-                if d.get(g_key, 0) >= min_g and d.get(sc_key, 0) > 0]
-        rows.sort(key=lambda it: (it[1].get(sc_key, 0) / it[1].get(g_key, 1),
-                                  it[1].get(g_key, 0)), reverse=True)
+    # ◽️◾️ شهروند/مافیای برتر — همان فرمول ولی فقط با بازی‌های همان ساید:
+    #    (۱۵ × بازی‌های قدیمیِ ساید + ۲۵ × بردهای قدیمیِ ساید + امتیازهای ثبت‌شده‌ی ساید) ÷ کلِ بازی‌های ساید
+    def _side_val(d, sc_key, sg_key, g_key, w_key, sw_key):
+        n = d.get(g_key, 0)
+        if not n:
+            return 0.0
+        lg = max(0, n - d.get(sg_key, 0))
+        lw = max(0, d.get(w_key, 0) - d.get(sw_key, 0))
+        return (d.get(sc_key, 0) + 15.0 * lg + 25.0 * lw) / n
+
+    def _avg_rows(sc_key, sg_key, g_key, w_key, sw_key, min_g=3):
+        rows = [(uid, d, _side_val(d, sc_key, sg_key, g_key, w_key, sw_key))
+                for uid, d in current.items() if d.get(g_key, 0) >= min_g]
+        rows.sort(key=lambda it: (it[2], it[1].get(g_key, 0)), reverse=True)
         return rows[:3]
 
-    citizens = _avg_rows("score_citizen", "citizen_games")
-    mafias = _avg_rows("score_mafia", "mafia_games")
+    citizens = _avg_rows("score_citizen", "score_citizen_games",
+                         "citizen_games", "citizen_wins", "score_citizen_wins")
+    mafias = _avg_rows("score_mafia", "score_mafia_games",
+                       "mafia_games", "mafia_wins", "score_mafia_wins")
     cit_by_score, maf_by_score = bool(citizens), bool(mafias)
     if not citizens:
-        citizens = _rank_block(current, "citizen_wins", "citizen_games", 3)
+        citizens = [(u, d, None) for u, d in _rank_block(current, "citizen_wins", "citizen_games", 3)]
     if not mafias:
-        mafias = _rank_block(current, "mafia_wins", "mafia_games", 3)
+        mafias = [(u, d, None) for u, d in _rank_block(current, "mafia_wins", "mafia_games", 3)]
     gods = sorted(
         [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
         key=lambda it: it[1].get("god_games", 0),
@@ -915,7 +962,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
         w, n = d.get("wins", 0), d.get("games", 0)
         st = d.get("score_total", 0)
-        if st > 0:
+        if ov_by_avg and n:
+            out10.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(_ov_val(d))} | {w} برد{pct(w, n)}")
+        elif st > 0:
             out10.append(f"{_medal(i)} {nm} — {_fmt_lat(st)} امتیاز | {w} برد{pct(w, n)}")
         else:
             out10.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
@@ -924,14 +973,13 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
     out10.append("")
     lines += out10
 
-    def side_block(title, rows, by_score, sc_key, g_key, w_key):
+    def side_block(title, rows, g_key, w_key):
         sb = [title]
-        for i, (_uid, d) in enumerate(rows):
+        for i, (_uid, d, val) in enumerate(rows):
             nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
             w, n = d.get(w_key, 0), d.get(g_key, 0)
-            if by_score and n:
-                avg = d.get(sc_key, 0) / n
-                sb.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(avg)} | {w} برد{pct(w, n)}")
+            if val is not None:
+                sb.append(f"{_medal(i)} {nm} — میانگین {_fmt_lat(val)} | {w} برد{pct(w, n)}")
             else:
                 sb.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
         if not rows:
@@ -939,10 +987,8 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         sb.append("")
         return sb
 
-    lines += side_block("◽️ <b>۳ شهروند برتر کل</b>", citizens, cit_by_score,
-                        "score_citizen", "citizen_games", "citizen_wins")
-    lines += side_block("◾️ <b>۳ مافیای برتر کل</b>", mafias, maf_by_score,
-                        "score_mafia", "mafia_games", "mafia_wins")
+    lines += side_block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_games", "citizen_wins")
+    lines += side_block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_games", "mafia_wins")
     lines += block("🎩 <b>پرکارترین راوی‌ها (گاد)</b>", gods, "god_games", "god_games", unit="بازی")
 
     while lines and lines[-1] == "":
@@ -2384,6 +2430,15 @@ def _score_compute(g):
     for seat in sorted(g.seats or {}):
         side = _sc_side(g, seat)
         sev = ev.get(seat, []) or []
+
+        # 👢 کیک‌شده: همه‌ی امتیازها صفر (برد، تشخیص/فریب/پوش، حدس، انضباط — همه)
+        if seat in kicked:
+            if side == "مافیا":
+                parts = {"win": 0.0, "farib": 0.0, "push": 0.0, "enz": 0.0}
+            else:
+                parts = {"win": 0.0, "tash": 0.0, "guess": 0.0, "enz": 0.0}
+            out[seat] = {"side": side, "total": 0.0, "parts": parts}
+            continue
 
         def _sum(cat):
             return sum(p for c, p, _r in sev if c == cat)
@@ -5313,15 +5368,30 @@ async def _nem_check_open_rest(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[gduid] = m.message_id
     store.save()
-    # اگر راهنمایی زنده نیست، همین‌جا مین را بررسی کن (آخرین اکت گرفته شده)
-    if not gd:
-        await _nem_trigger_mine(ctx, chat_id, g)
+    # ⏳ نگهبانِ مین: هر ۳ ثانیه چک می‌کند و فقط وقتی «همه‌ی اکت‌ها» تمام شد اعلام می‌کند
+    asyncio.create_task(_nem_mine_watch(ctx, chat_id, g))
+
+
+async def _nem_mine_watch(ctx, chat_id, g, timeout=1800):
+    """💥 تا وقتی همه‌ی اکت‌های شب تمام نشده، اعلامِ مین را نگه می‌دارد."""
+    try:
+        for _ in range(timeout // 3):
+            if getattr(g, "night_mine_handled", False) or not getattr(g, "night_active", False):
+                return
+            if _night_all_done(g):
+                await _nem_trigger_mine(ctx, chat_id, g)
+                return
+            await asyncio.sleep(3)
+    except Exception as e:
+        print("⚠️ mine watch err:", e)
 
 
 async def _nem_trigger_mine(ctx, chat_id, g):
-    """بعد از اکت راهنما (آخرین اکت): اگر مین فعال شده باشد، به همه اعلام و از دن‌مافیا فدا می‌خواهد."""
+    """فقط بعد از تمام‌شدنِ همه‌ی اکت‌ها: اگر مین فعال شده باشد، به همه اعلام و از دن‌مافیا فدا می‌خواهد."""
     if getattr(g, "night_mine_handled", False):
         return
+    if not _night_all_done(g):
+        return   # ⏳ هنوز اکتی باز است — نگهبانِ مین بعداً دوباره صدا می‌زند
     target = None
     if g.night_don_act == "shot":
         target = g.night_shot_target
@@ -7980,10 +8050,19 @@ async def handle_night_kick_callback(update, ctx):
                 await _close_pm(ctx, _ku, _kpm, "👢 کیک شدی — امشب اکت نداری.")
             except Exception:
                 pass
+        _kside = _sc_side(g, s)
         await _close_pm(ctx, uid, mid,
-                        f"👢 کیک شب ثبت شد: {s}. {_tn}\n"
+                        f"👢 کیک شب ثبت شد: {s}. {_tn} ({_kside})\n"
                         f"(امشب اکت ندارد و هنگامِ روز خط می‌خورد)")
-        await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b>")
+        await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b> ({_kside})")
+        # 📢 اعلامِ عمومی در گروه — با ساید
+        try:
+            await ctx.bot.send_message(
+                chat_id,
+                f"👢 {s}. {escape(_tn, quote=False)} کیک شد — ساید: <b>{_kside}</b>",
+                parse_mode="HTML")
+        except Exception:
+            pass
         store.save()
         return
 
