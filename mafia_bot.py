@@ -2390,13 +2390,13 @@ def _score_votes_final(g, targets, exit_seat, exited):
                             _sc_add(g, vs, "push", -10, "رأی منجر به خروجِ هم‌تیمی")
                         else:
                             _sc_add(g, vs, "push", -5, "رأی خروج به هم‌تیمیِ مافیا")
-        # فریب بخش ۱: مافیای زنده‌ای که امروز به دفاع نیامد (هر روز فقط یک‌بار)
-        _day = int(getattr(g, "night_number", 0) or 0)
-        if _day not in (g.score_farib_days or set()):
-            for m in _alive_seats(g):
-                if _sc_side(g, m) == "مافیا" and m not in targets:
-                    _sc_add(g, m, "farib1", 5, "به دفاع نیامد")
-            g.score_farib_days.add(_day)
+        # فریب (کسرشونده از ۴۰): حضورِ مافیا در دفاعِ امروز −۵؛ اگر با رأی خارج شد −۱۰ (جایگزین)
+        for t in targets:
+            if t in g.seats and _sc_side(g, t) == "مافیا":
+                if exited and t == exit_seat:
+                    _sc_add(g, t, "farib1", -10, "خروج با رأی")
+                else:
+                    _sc_add(g, t, "farib1", -5, "حضور در دفاع")
         g.score_day_final = True
         store.save()
     except Exception as e:
@@ -2404,15 +2404,8 @@ def _score_votes_final(g, targets, exit_seat, exited):
 
 
 def _score_day_rollover(g):
-    """مرزِ روز→شب: اگر روزی دفاعیه نداشت، فریبِ همه‌ی مافیاهای زنده +۵."""
+    """مرزِ روز→شب: ریستِ پرچم‌های روز (فریب کسرشونده است؛ روزِ بدونِ دفاع = بدونِ کسر)."""
     try:
-        if getattr(g, "score_day_initial", False) and not getattr(g, "score_day_final", False):
-            _day = int(getattr(g, "night_number", 0) or 0)
-            if _day not in (g.score_farib_days or set()):
-                for m in _alive_seats(g):
-                    if _sc_side(g, m) == "مافیا":
-                        _sc_add(g, m, "farib1", 5, "روزِ بدون دفاعیه")
-                g.score_farib_days.add(_day)
         g.score_day_initial = False
         g.score_day_final = False
         store.save()
@@ -2447,7 +2440,8 @@ def _score_compute(g):
         win = 25.0 if side == getattr(g, "winner_side", None) else 0.0
         enz = 0.0 if seat in kicked else max(0.0, 15.0 - 5.0 * int(warns.get(seat, 0) or 0))
         if side == "مافیا":
-            farib = min(40.0, _sum("farib1"))
+            # فریب: پایه‌ی ۴۰ منهای کسرها (حضور در دفاع −۵، خروج −۱۰) — بازه [۰، ۴۰]
+            farib = max(0.0, min(40.0, 40.0 + _sum("farib1")))
             push = max(0.0, min(20.0, _sum("push")))   # کف ۰ (رأی به هم‌تیمی منفی دارد)
             parts = {"win": win, "farib": farib, "push": push, "enz": enz}
             total = win + farib + push + enz
