@@ -516,10 +516,12 @@ def save_player_stats(stats: dict):
         print("❌ save_player_stats error:", e)
 
 
-def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None):
-    """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل)."""
+def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
+                        group_title=None, date_str=None):
+    """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل + تاریخچه)."""
     try:
         stats = load_player_stats()
+        hist_rows = []
 
         for seat in sorted(g.seats):
             uid, name = g.seats[seat]
@@ -545,6 +547,7 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None):
             # برد فقط بر اساس ساید واقعی هر بازیکن (شهر/مافیا/مستقل) تعیین می‌شود
             # کی‌آس هیچ تأثیری روی برد ندارد؛ مافیای داخل کی‌آس هم اگر مافیا ببرد برنده است
             won = (side == g.winner_side)
+            hist_rows.append((uid, side, won))
 
             key = str(uid)
             p = stats.get(key, {
@@ -602,8 +605,65 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None):
             stats[god_key] = gp
 
         save_player_stats(stats)
+
+        # 🎮 ثبتِ تاریخچه‌ی بازی برای «بازی من» (تاریخ + گروه + ساید + نتیجه)
+        if hist_rows and (group_title or date_str):
+            try:
+                hist = load_game_history()
+                for _u, _s, _w in hist_rows:
+                    k = str(_u)
+                    lst = hist.get(k, [])
+                    lst.append({"d": date_str or "—", "g": group_title or "—",
+                                "s": _s, "w": 1 if _w else 0})
+                    hist[k] = lst[-50:]   # سقفِ ۵۰ بازیِ اخیر برای هر نفر
+                save_game_history(hist)
+            except Exception as _e:
+                print("❌ game history save:", _e)
     except Exception as e:
         print("❌ update_player_stats error:", e)
+
+
+# ─── 🎮 تاریخچه‌ی بازی‌ها (برای «بازی من») ───────────────────
+HISTORY_FILENAME = "game_history.json"
+
+
+def load_game_history() -> dict:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        f = (r.json().get("files", {}) or {}).get(HISTORY_FILENAME)
+        if not f:
+            return {}
+        import json as _json
+        return _json.loads(f.get("content") or "{}") or {}
+    except Exception as e:
+        print("❌ load_game_history:", e)
+        return {}
+
+
+def save_game_history(h: dict) -> bool:
+    try:
+        import json as _json
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        data = {"files": {HISTORY_FILENAME: {"content": _json.dumps(h, ensure_ascii=False)}}}
+        httpx.patch(url, headers=headers, json=data)
+        return True
+    except Exception as e:
+        print("❌ save_game_history:", e)
+        return False
+
+
+def format_game_history(rows: list) -> str:
+    """فهرست بازی‌های یک بازیکن — جدیدترین اول."""
+    side_ico = {"مافیا": "◾️", "شهر": "◽️", "مستقل": "♦️"}
+    lines = ["🎮 <b>بازی‌های شما</b>", ""]
+    for i, r in enumerate(reversed(rows[-30:]), 1):
+        res = "✅ برد" if r.get("w") else "❌ باخت"
+        lines.append(f"{i}. {r.get('d', '—')} — {escape(str(r.get('g', '—')), quote=False)} — "
+                     f"{side_ico.get(r.get('s'), '▫️')} {r.get('s', '—')} — {res}")
+    return "\n".join(lines)
 
 
 def format_player_stats(p: dict) -> str:
@@ -2935,7 +2995,8 @@ async def announce_winner(ctx, update, g: GameState):
         game_scores = {}
 
     # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل)
-    update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores)
+    update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
+                        group_title=group_title, date_str=date_str)
 
     g.phase = "ended"
     store.save()
@@ -10223,6 +10284,12 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
         else:
             await msg.reply_text(board, parse_mode="HTML")
+    elif text == "بازی من":
+        rows = load_game_history().get(str(uid), [])
+        if not rows:
+            await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
+        else:
+            await msg.reply_text(format_game_history(rows), parse_mode="HTML")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -10792,6 +10859,15 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_player_stats(p), parse_mode="HTML")
+        return
+
+    # 🎮 بازی من — تاریخچه‌ی بازی‌های خودِ شخص (در گروه هم فعال)
+    if text == "بازی من":
+        rows = load_game_history().get(str(uid), [])
+        if not rows:
+            await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
+        else:
+            await msg.reply_text(format_game_history(rows), parse_mode="HTML")
         return
 
     # 📊 آمار کل — لیدربرد بهترین‌های کل دوران (برای همه در هر گروه فعال)
@@ -11576,7 +11652,7 @@ async def main():
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & filters.Regex(r"^\s*(آمار من|آمار کل)\s*$"),
+            filters.ChatType.PRIVATE & filters.TEXT & filters.Regex(r"^\s*(آمار من|آمار کل|بازی من)\s*$"),
             handle_stats_pm
         )
     )
