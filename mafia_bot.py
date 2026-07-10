@@ -253,6 +253,14 @@ class GameState:
         self.score_day_initial = getattr(self, "score_day_initial", False)
         self.score_day_final = getattr(self, "score_day_final", False)
         self.score_farib_days = getattr(self, "score_farib_days", set()) or set()  # هر روز فقط یک‌بار فریب
+        # 🧑‍⚖️ بازپرس: تصمیمِ روز (ادامه/ملغی) + دوئلِ رأی ۱/۲
+        self.baz_day_choice = getattr(self, "baz_day_choice", None)
+        self.baz_awaiting_decision = getattr(self, "baz_awaiting_decision", False)
+        self.baz_duel_active = getattr(self, "baz_duel_active", False)
+        self.baz_duel_votes = getattr(self, "baz_duel_votes", {}) or {}
+        self.baz_duel_pair = getattr(self, "baz_duel_pair", []) or []
+        self.baz_duel_unread = getattr(self, "baz_duel_unread", set()) or set()
+        self.pending_kicks = getattr(self, "pending_kicks", set()) or set()   # 👢 کیکِ روز (حالتِ انتخاب)
         # 🔥 سوزوندنِ اکت (گاد)
         self.night_burned = getattr(self, "night_burned", set()) or set()
         self.night_burned_uids = getattr(self, "night_burned_uids", set()) or set()
@@ -1696,6 +1704,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         night_row.append(InlineKeyboardButton("🎭 معارفه", callback_data="ctl_maarefe"))
     night_row.append(InlineKeyboardButton("🌙 شب", callback_data="ctl_night"))
     night_row.append(InlineKeyboardButton("☀️ روز", callback_data="ctl_day"))
+    night_row.append(InlineKeyboardButton("👢 کیک", callback_data="ctl_kick"))
     rows.append(night_row)
 
     # 🔒/🔓 یک دکمه‌ی toggle برای چت اتاق مافیا (فقط وقتی اتاق فعال است)
@@ -1990,8 +1999,9 @@ async def publish_seating(
                     # قبل از بازی: حالت اصلی با تاج
                     line = f"♚{i}  {name_link}{warn_suffix}"
                 elif i in g.striked:
-                    # مرده: دایرهٔ قرمز، خط روی شماره و اسم، فونت عادی
-                    line = f"🔴<s>{i}  {name_link}</s>{warn_suffix}"
+                    # مرده: دایرهٔ قرمز، خط روی شماره و اسم، فونت عادی (+ نشانِ کیک)
+                    _kick_mark = " ✖️کیک" if i in (getattr(g, "score_kicked", set()) or set()) else ""
+                    line = f"🔴<s>{i}  {name_link}</s>{_kick_mark}{warn_suffix}"
                 else:
                     # زنده: دایرهٔ سبز، فونت بولد
                     line = f"🟢<b>{i}  {name_link}</b>{warn_suffix}"
@@ -2020,6 +2030,8 @@ async def publish_seating(
                 kb = text_seating_keyboard(g)
             elif mode == "strike":
                 kb = strike_button_markup(g)
+            elif mode == "kick":
+                kb = kick_button_markup(g)
             elif mode == "status":
                 kb = status_button_markup(g)
             elif mode == "delete":
@@ -2425,7 +2437,10 @@ def _score_votes_final(g, targets, exit_seat, exited):
                 vside = _sc_side(g, vs)
                 if vside == "شهر":
                     if tside == "مافیا":
-                        _sc_add(g, vs, "tash", 10, "رأی خروج به مافیا")
+                        if exited and t == exit_seat:
+                            _sc_add(g, vs, "tash", 15, "رأی منجر به خروجِ مافیا")
+                        else:
+                            _sc_add(g, vs, "tash", 10, "رأی خروج به مافیا")
                     elif tside == "شهر":
                         if exited and t == exit_seat:
                             _sc_add(g, vs, "tash", -10, "رأی خروج منجر به خروجِ شهروند")
@@ -3534,7 +3549,14 @@ async def start_night(ctx, chat_id, g):
             chat_id, "🎭 الان شبِ معارفه است و اکت‌گیری ندارد — اول «☀️ روز» را بزن تا معارفه تمام شود.")
         return
 
-    _score_day_rollover(g)   # 🏅 فریبِ روزِ بدونِ دفاعیه + ریستِ پرچم‌های روز
+    _score_day_rollover(g)   # 🏅 ریستِ پرچم‌های روزِ امتیازی
+    # 🧑‍⚖️ ریستِ تصمیم/دوئلِ بازپرسی برای روزِ بعد
+    g.baz_day_choice = None
+    g.baz_awaiting_decision = False
+    g.baz_duel_active = False
+    g.baz_duel_votes = {}
+    g.baz_duel_unread = set()
+    store.save()
 
     g.night_active = True
     g.maarefe_active = False
@@ -4213,6 +4235,24 @@ async def _do_room_open(ctx, chat_id, g):
             if m:
                 await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
 
+    # 🧑‍⚖️ بازپرس: اگر بازپرسیِ معتبری در جریان است، از بازپرس بپرس «ادامه یا ملغی؟»
+    if (_is_baazpors_scenario(g) and getattr(g, "baazpors_used", False)
+            and getattr(g, "baz_day_choice", None) is None):
+        bt = [t for t in (getattr(g, "night_baz_targets", []) or [])
+              if t in g.seats and t not in (g.striked or set())]
+        bz = _find_seat_by_role(g, _R_BAAZPORS)
+        if bz is not None and len(bt) == 2:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("▶️ ادامه", callback_data="bzd_cont"),
+                InlineKeyboardButton("🚫 ملغی", callback_data="bzd_cancel"),
+            ]])
+            names = " و ".join(f"{t}. {g.seats[t][1]}" for t in bt)
+            m = await _safe_pm(ctx, g.seats[bz][0],
+                               f"🧑‍⚖️ بازپرسیِ {names} — ادامه یا ملغی؟", kb)
+            if m:
+                g.baz_awaiting_decision = True
+                store.save()
+
     # 🗡 نماینده — دنگ خیانت (فقط روزِ ۱: بعد از معارفه، قبل از اولین شب)
     if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
             and g.night_number == 0 and not getattr(g, "nem_ding_used", False)):
@@ -4235,6 +4275,123 @@ async def _do_room_open(ctx, chat_id, g):
             await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
         except Exception:
             pass
+
+
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _baz_duel_parse(text, pair) -> int | None:
+    """عدد (فارسی/انگلیسی/عربی، با «.» و «+» و صفرِ اول) → شماره صندلیِ یکی از دو طرفِ بازپرسی."""
+    digits = "".join(ch for ch in str(text).translate(_FA_DIGITS) if ch.isdigit())
+    if not digits or len(digits) > 3:
+        return None
+    try:
+        v = int(digits)
+    except Exception:
+        return None
+    return v if v in (pair or ()) else None
+
+
+async def handle_baz_duel_callback(update, ctx):
+    """🧑‍⚖️ تصمیمِ بازپرس (ادامه/ملغی) + پایانِ شمارشِ دوئل (گاد)."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if not _is_baazpors_scenario(game) or game.phase in ("idle", "ended"):
+            continue
+        if data == "bzd_end" and game.god_id == uid and getattr(game, "baz_duel_active", False):
+            g, chat_id = game, cid
+            break
+        if data in ("bzd_cont", "bzd_cancel") and getattr(game, "baz_awaiting_decision", False):
+            bz = _find_seat_by_role(game, _R_BAAZPORS)
+            if bz is not None and game.seats[bz][0] == uid:
+                g, chat_id = game, cid
+                break
+    if g is None:
+        await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    if data == "bzd_cancel":
+        g.baz_awaiting_decision = False
+        g.baz_day_choice = "cancel"
+        store.save()
+        await _close_pm(ctx, uid, mid, "🚫 ملغی ثبت شد.")
+        await ctx.bot.send_message(chat_id, "🧑‍⚖️ بازپرس رأی به <b>ملغیِ</b> بازپرسی داد.",
+                                   parse_mode="HTML")
+        return
+
+    if data == "bzd_cont":
+        g.baz_awaiting_decision = False
+        g.baz_day_choice = "cont"
+        bt = [t for t in (getattr(g, "night_baz_targets", []) or [])
+              if t in g.seats and t not in (g.striked or set())]
+        store.save()
+        await _close_pm(ctx, uid, mid, "▶️ ادامه ثبت شد.")
+        await ctx.bot.send_message(chat_id, "🧑‍⚖️ بازپرس رأی به <b>ادامه‌ی</b> بازپرسی داد.",
+                                   parse_mode="HTML")
+        if len(bt) == 2:
+            g.baz_duel_active = True
+            g.baz_duel_votes = {}
+            g.baz_duel_unread = set()
+            g.baz_duel_pair = list(bt)
+            store.save()
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
+            await ctx.bot.send_message(
+                chat_id,
+                f"🗳 <b>رأی‌گیری بازپرسی</b> — شماره‌ی صندلیِ یکی از این دو را بفرستید "
+                f"(فارسی یا انگلیسی):\n"
+                f"• <b>{bt[0]}</b> = {escape(g.seats[bt[0]][1], quote=False)}\n"
+                f"• <b>{bt[1]}</b> = {escape(g.seats[bt[1]][1], quote=False)}\n"
+                f"(هر بازیکن یک رأی — آخرین عددش ملاک است)",
+                parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "bzd_end":
+        g.baz_duel_active = False
+        votes = dict(g.baz_duel_votes or {})
+        unread_u = [u for u in (getattr(g, "baz_duel_unread", set()) or set()) if u not in votes]
+        pair = list(getattr(g, "baz_duel_pair", []) or [])
+        g.baz_duel_votes = {}
+        g.baz_duel_unread = set()
+        store.save()
+        if len(pair) != 2:
+            return
+        c1 = sum(1 for v in votes.values() if v == pair[0])
+        c2 = sum(1 for v in votes.values() if v == pair[1])
+        n1 = escape(g.seats[pair[0]][1], quote=False) if pair[0] in g.seats else "?"
+        n2 = escape(g.seats[pair[1]][1], quote=False) if pair[1] in g.seats else "?"
+        lines = [f"🗳 نتیجه‌ی بازپرسی:",
+                 f"• {pair[0]}. {n1} — <b>{c1}</b> رأی",
+                 f"• {pair[1]}. {n2} — <b>{c2}</b> رأی"]
+        # ⚠️ رأیِ ناخوانا → شمارش و تعیینِ خروجی با خودِ گاد، بات دخالت نمی‌کند
+        _nm = []
+        for u in unread_u:
+            s_ = _seat_of_uid(g, u)
+            if s_ is not None and s_ not in (g.striked or set()):
+                _nm.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
+        if _nm:
+            lines.append("⚠️ رأیِ این افراد خوانده نشد: " + "، ".join(_nm))
+            lines.append("🧮 گاد خودش آرا را بشمارد و فردِ خروجی را تعیین کند.")
+            await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+            return
+        if c1 == c2:
+            lines.append("⚖️ تساوی — کسی خارج نشد.")
+            await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+            return
+        loser = pair[0] if c1 > c2 else pair[1]
+        lines.append(f"🚪 {loser}. {escape(g.seats[loser][1], quote=False)} از بازی خارج شد.")
+        g.striked.add(loser)
+        store.save()
+        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)
+        except Exception:
+            pass
+        return
 
 
 def _burn_kb(g):
@@ -8160,6 +8317,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_burn_callback(update, ctx)
         return
 
+    # 🧑‍⚖️ بازپرس: ادامه/ملغی + پایانِ دوئل
+    if _q and _q.data and _q.data.startswith("bzd_"):
+        await handle_baz_duel_callback(update, ctx)
+        return
+
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_")):
         _dt = _q.data
@@ -8580,9 +8743,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
-    if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock"):
+    if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if data == "ctl_kick":
+            # 👢 کیکِ روز — دکمه‌های پنل عوض می‌شوند (مثلِ خط‌زدن)
+            g.pending_kicks = set()
+            store.save()
+            await publish_seating(ctx, chat, g, mode="kick")
             return
         if data == "ctl_maarefe":
             await do_maarefe(ctx, chat, g)
@@ -9080,6 +9249,43 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.pending_strikes.add(seat)
         store.save()
         await publish_seating(ctx, chat, g, mode="strike")
+        return
+
+    # 👢 کیکِ روز — دقیقاً مثلِ خط‌زدن (تأیید = خطِ فوری + امتیازِ صفر + اعلامِ ساید)
+    if data == "kick_toggle_done" and uid == g.god_id:
+        picks = {s for s in (getattr(g, "pending_kicks", set()) or set())
+                 if s in g.seats and s not in (g.striked or set())}
+        g.pending_kicks = set()
+        for s in sorted(picks):
+            _kside = _sc_side(g, s)
+            g.score_kicked.add(s)
+            g.striked.add(s)
+            try:
+                await ctx.bot.send_message(
+                    chat, f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_kside}</b>",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+            await _night_report(ctx, g, f"👢 کیکِ روز: <b>{s}. {escape(g.seats[s][1], quote=False)}</b> ({_kside})")
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
+    if data == "kick_back" and uid == g.god_id:
+        g.pending_kicks = set()
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        return
+
+    if data.startswith("kick_toggle_") and uid == g.god_id:
+        seat = int(data.split("_")[2])
+        if seat in g.seats and seat not in (g.striked or set()):
+            if seat in g.pending_kicks:
+                g.pending_kicks.discard(seat)
+            else:
+                g.pending_kicks.add(seat)
+            store.save()
+            await publish_seating(ctx, chat, g, mode="kick")
         return
 
     if data == BTN_REROLL:
@@ -9593,6 +9799,21 @@ def strike_button_markup(g: GameState) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def kick_button_markup(g: GameState) -> InlineKeyboardMarkup:
+    """👢 کیکِ روز — دقیقاً مثلِ خط‌زدن: فقط زنده‌ها، با تأیید و بازگشت."""
+    rows = []
+    for i in sorted(g.seats):
+        if i in (g.striked or set()):
+            continue
+        label = f"{i} 👢" if i in (getattr(g, "pending_kicks", set()) or set()) else f"{i}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"kick_toggle_{i}")])
+    rows.append([
+        InlineKeyboardButton("✅ تایید کیک", callback_data="kick_toggle_done"),
+        InlineKeyboardButton("↩️ بازگشت", callback_data="kick_back"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 async def shuffle_and_assign(
     ctx,
     chat_id: int,
@@ -9820,6 +10041,31 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
     if _try_capture_vote(g, msg, uid, text):
         return
+
+    # 🧑‍⚖️ دوئلِ بازپرسی: شمارشِ شماره‌صندلی + اعلامِ رأیِ ناخوانا (فقط یک تذکر به هر نفر)
+    if getattr(g, "baz_duel_active", False):
+        _vs = _seat_of_uid(g, uid)
+        if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
+            _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
+            if _bv is not None:
+                g.baz_duel_votes[uid] = _bv
+                g.baz_duel_unread.discard(uid)
+                store.save()
+                return
+            if uid not in (g.baz_duel_votes or {}):
+                _first = uid not in (g.baz_duel_unread or set())
+                g.baz_duel_unread.add(uid)
+                store.save()
+                if _first:
+                    _p = list(getattr(g, "baz_duel_pair", []) or [])
+                    try:
+                        await msg.reply_text(
+                            f"⚠️ {_vs}. {g.seats[_vs][1]} رأیت خوانده نشد — "
+                            f"دوباره فقط عدد بنویس ({_p[0]} یا {_p[1]}).")
+                    except Exception:
+                        pass
+                return
+        # گاد، تماشاچی‌ها و رأی‌داده‌ها → عبور به هندلرهای عادی
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -10937,6 +11183,31 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     # (قبل از هر شرط دیگری، تا هیچ هندلری پیامِ رأی را ندزدد)
     if _try_capture_vote(g, msg, uid, text):
         return
+
+    # 🧑‍⚖️ دوئلِ بازپرسی: شمارشِ شماره‌صندلی + اعلامِ رأیِ ناخوانا (فقط یک تذکر به هر نفر)
+    if getattr(g, "baz_duel_active", False):
+        _vs = _seat_of_uid(g, uid)
+        if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
+            _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
+            if _bv is not None:
+                g.baz_duel_votes[uid] = _bv
+                g.baz_duel_unread.discard(uid)
+                store.save()
+                return
+            if uid not in (g.baz_duel_votes or {}):
+                _first = uid not in (g.baz_duel_unread or set())
+                g.baz_duel_unread.add(uid)
+                store.save()
+                if _first:
+                    _p = list(getattr(g, "baz_duel_pair", []) or [])
+                    try:
+                        await msg.reply_text(
+                            f"⚠️ {_vs}. {g.seats[_vs][1]} رأیت خوانده نشد — "
+                            f"دوباره فقط عدد بنویس ({_p[0]} یا {_p[1]}).")
+                    except Exception:
+                        pass
+                return
+        # گاد، تماشاچی‌ها و رأی‌داده‌ها → عبور به هندلرهای عادی
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
