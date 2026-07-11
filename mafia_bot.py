@@ -4252,6 +4252,12 @@ async def _do_room_open(ctx, chat_id, g):
             if m:
                 g.baz_awaiting_decision = True
                 store.save()
+        elif (bz is None and len(bt) == 2
+                and _find_seat_by_role(g, _R_BAAZPORS, alive_only=False) is not None):
+            # ⚰️ بازپرس مُرده → ادامه‌ی خودکار (ملغی ممکن نیست) با ۳۰ ثانیه تأخیرِ ضدلورفتن
+            g.baz_day_choice = "cont"   # قفل، که «باز»های بعدی دوباره تایمر نگذارند
+            store.save()
+            asyncio.create_task(_baz_dead_auto_continue(ctx, chat_id, g))
 
     # 🗡 نماینده — دنگ خیانت (فقط روزِ ۱: بعد از معارفه، قبل از اولین شب)
     if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
@@ -4290,6 +4296,41 @@ def _baz_duel_parse(text, pair) -> int | None:
     except Exception:
         return None
     return v if v in (pair or ()) else None
+
+
+async def _baz_dead_auto_continue(ctx, chat_id, g, delay=30):
+    """⚰️ بازپرسِ مرده: بعد از ۳۰ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
+    همه‌چیز عینِ جریانِ زنده‌بودنش دیده می‌شود تا کسی نفهمد بازپرس مرده."""
+    try:
+        await asyncio.sleep(delay)
+        if g.phase in ("idle", "ended") or getattr(g, "night_active", False):
+            return
+        if getattr(g, "baz_duel_active", False):
+            return
+        bt = [t for t in (getattr(g, "night_baz_targets", []) or [])
+              if t in g.seats and t not in (g.striked or set())]
+        if len(bt) != 2:
+            return
+        await ctx.bot.send_message(chat_id, "🧑‍⚖️ بازپرس رأی به <b>ادامه‌ی</b> بازپرسی داد.",
+                                   parse_mode="HTML")
+        g.baz_duel_active = True
+        g.baz_duel_votes = {}
+        g.baz_duel_unread = set()
+        g.baz_duel_pair = list(bt)
+        store.save()
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
+        await ctx.bot.send_message(
+            chat_id,
+            f"🗳 <b>رأی‌گیری بازپرسی</b> — شماره‌ی صندلیِ یکی از این دو را بفرستید "
+            f"(فارسی یا انگلیسی):\n"
+            f"• <b>{bt[0]}</b> = {escape(g.seats[bt[0]][1], quote=False)}\n"
+            f"• <b>{bt[1]}</b> = {escape(g.seats[bt[1]][1], quote=False)}\n"
+            f"(هر بازیکن یک رأی — آخرین عددش ملاک است)",
+            parse_mode="HTML", reply_markup=kb)
+        await _do_room_close(ctx, chat_id, g)   # 🔒 با همان پیامِ همیشگیِ «بسته»
+        await _night_report(ctx, g, "⚰️ بازپرس مرده بود — بازپرسی خودکار ادامه یافت (فقط تو می‌دانی).")
+    except Exception as e:
+        print("⚠️ baz dead auto err:", e)
 
 
 async def handle_baz_duel_callback(update, ctx):
