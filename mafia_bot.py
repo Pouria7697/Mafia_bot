@@ -4353,13 +4353,29 @@ async def handle_baz_duel_callback(update, ctx):
     if data == "bzd_end":
         g.baz_duel_active = False
         votes = dict(g.baz_duel_votes or {})
-        unread_u = [u for u in (getattr(g, "baz_duel_unread", set()) or set()) if u not in votes]
         pair = list(getattr(g, "baz_duel_pair", []) or [])
         g.baz_duel_votes = {}
         g.baz_duel_unread = set()
         store.save()
         if len(pair) != 2:
             return
+
+        # ✅ شرطِ اعلامِ آمار: همه‌ی زنده‌ها «به‌جز دو طرفِ بازپرسی» رأیِ خوانا داده باشند
+        missing = []
+        for s_ in sorted(_alive_seats(g)):
+            if s_ in pair:
+                continue
+            if g.seats[s_][0] not in votes:
+                missing.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
+        if missing:
+            await ctx.bot.send_message(
+                chat_id,
+                "⚠️ این افراد رأی ندادند یا رأیشان قابل‌شمارش نبود:\n• "
+                + "\n• ".join(missing)
+                + "\n🧮 آمار اعلام نمی‌شود — شمارش و تصمیم با خودِ گاد.",
+                parse_mode="HTML")
+            return
+
         c1 = sum(1 for v in votes.values() if v == pair[0])
         c2 = sum(1 for v in votes.values() if v == pair[1])
         n1 = escape(g.seats[pair[0]][1], quote=False) if pair[0] in g.seats else "?"
@@ -4367,23 +4383,13 @@ async def handle_baz_duel_callback(update, ctx):
         lines = [f"🗳 نتیجه‌ی بازپرسی:",
                  f"• {pair[0]}. {n1} — <b>{c1}</b> رأی",
                  f"• {pair[1]}. {n2} — <b>{c2}</b> رأی"]
-        # ⚠️ رأیِ ناخوانا → شمارش و تعیینِ خروجی با خودِ گاد، بات دخالت نمی‌کند
-        _nm = []
-        for u in unread_u:
-            s_ = _seat_of_uid(g, u)
-            if s_ is not None and s_ not in (g.striked or set()):
-                _nm.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
-        if _nm:
-            lines.append("⚠️ رأیِ این افراد خوانده نشد: " + "، ".join(_nm))
-            lines.append("🧮 گاد خودش آرا را بشمارد و فردِ خروجی را تعیین کند.")
-            await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
-            return
         if c1 == c2:
             lines.append("⚖️ تساوی — کسی خارج نشد.")
             await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
             return
         loser = pair[0] if c1 > c2 else pair[1]
-        lines.append(f"🚪 {loser}. {escape(g.seats[loser][1], quote=False)} از بازی خارج شد.")
+        lines.append(f"🚪 {loser}. {escape(g.seats[loser][1], quote=False)} از بازی خارج شد — "
+                     f"ساید: <b>{_sc_side(g, loser)}</b>")
         g.striked.add(loser)
         store.save()
         await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
@@ -4970,7 +4976,11 @@ async def _bzp_open_hunter(ctx, chat_id, g):
     if not h:
         g.night_done.add("hunter")
         store.save()
-        await _bzp_open_gf_shiad(ctx, chat_id, g)
+        if _dead_priority_delay(g, _R_HUNTER):
+            # ⏳ هانترِ مرده — اکتِ مافیا/شیاد با ۱ دقیقه تأخیر (شیاد نفهمد هانتر نیست)
+            _open_next_delayed(ctx, chat_id, g, _bzp_open_gf_shiad)
+        else:
+            await _bzp_open_gf_shiad(ctx, chat_id, g)
         return
     huid, _hn = g.seats[h]
     targets = [s for s in _alive_seats(g) if s != h]
@@ -7498,6 +7508,30 @@ async def _gm_prompt(ctx, g, seat, key, text, kb=None):
     return m
 
 
+def _dead_priority_delay(g, role_norm) -> bool:
+    """⏳ آیا نقشِ اولویت‌دار «مُرده» است؟ (در ترکیب هست ولی خط خورده) → تأخیرِ ضدلو‌رفتن لازم است."""
+    try:
+        any_seat = _find_seat_by_role(g, role_norm, alive_only=False)
+        alive_seat = _find_seat_by_role(g, role_norm)
+        return any_seat is not None and alive_seat is None
+    except Exception:
+        return False
+
+
+def _open_next_delayed(ctx, chat_id, g, opener, delay=60):
+    """⏳ بازکردنِ مرحله‌ی بعد با تأخیر — تا زنده‌ها از سرعتِ بازشدن، مرگِ نقشِ قبلی را نفهمند."""
+    night_no = g.night_number
+
+    async def _t():
+        try:
+            await asyncio.sleep(delay)
+            if getattr(g, "night_active", False) and g.night_number == night_no:
+                await opener(ctx, chat_id, g)
+        except Exception as e:
+            print("⚠️ delayed open err:", e)
+    asyncio.create_task(_t())
+
+
 def _gm_yesno_kb(yes_cb, no_cb):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ بله", callback_data=yes_cb)],
@@ -7511,7 +7545,11 @@ async def _gm_open_robin(ctx, chat_id, g):
     if not rb or g.gm_robin_uses >= 2:
         g.night_done.add("robin")
         store.save()
-        await _gm_open_holmes(ctx, chat_id, g)
+        if _dead_priority_delay(g, _R_ROBIN):
+            # ⏳ رابینِ مرده — مرحله‌ی بعد با ۱ دقیقه تأخیر تا غیبتش لو نرود
+            _open_next_delayed(ctx, chat_id, g, _gm_open_holmes)
+        else:
+            await _gm_open_holmes(ctx, chat_id, g)
         return
     await _gm_prompt(ctx, g, rb, "robin",
                      f"🏹 شب {g.night_number} — می‌خواهی راهزنی کنی؟ (باقی‌مانده: {2 - g.gm_robin_uses})",
@@ -7524,7 +7562,11 @@ async def _gm_open_holmes(ctx, chat_id, g):
     if not hs or g.gm_holmes_uses >= 3 or _gm_own_act_skipped(g, hs):
         g.night_done.add("holmes")
         store.save()
-        await _gm_open_mafia(ctx, chat_id, g)
+        if _dead_priority_delay(g, _R_HOLMES):
+            # ⏳ هلمزِ مرده — مافیا با ۱ دقیقه تأخیر باز شود
+            _open_next_delayed(ctx, chat_id, g, _gm_open_mafia)
+        else:
+            await _gm_open_mafia(ctx, chat_id, g)
         return
     actor = _gm_actor_for(g, hs)
     await _gm_prompt(ctx, g, actor, "holmes",
@@ -10107,6 +10149,8 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🧑‍⚖️ دوئلِ بازپرسی: شمارشِ شماره‌صندلی + اعلامِ رأیِ ناخوانا (فقط یک تذکر به هر نفر)
     if getattr(g, "baz_duel_active", False):
         _vs = _seat_of_uid(g, uid)
+        if _vs in (getattr(g, "baz_duel_pair", []) or []):
+            return   # 🧑‍⚖️ دو طرفِ بازپرسی حقِ رأی ندارند
         if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
             _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
             if _bv is not None:
@@ -11249,6 +11293,8 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     # 🧑‍⚖️ دوئلِ بازپرسی: شمارشِ شماره‌صندلی + اعلامِ رأیِ ناخوانا (فقط یک تذکر به هر نفر)
     if getattr(g, "baz_duel_active", False):
         _vs = _seat_of_uid(g, uid)
+        if _vs in (getattr(g, "baz_duel_pair", []) or []):
+            return   # 🧑‍⚖️ دو طرفِ بازپرسی حقِ رأی ندارند
         if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
             _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
             if _bv is not None:
