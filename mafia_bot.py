@@ -4404,15 +4404,75 @@ def _burn_kb(g):
     return InlineKeyboardMarkup(rows)
 
 
+async def _burn_advance(ctx, chat_id, g):
+    """🔥 بعد از سوختنِ اکت وسطِ شب: کلیدِ صفِ نقش‌های سوخته زده می‌شود و مرحله‌ی بعدی باز می‌شود."""
+    if not getattr(g, "night_active", False):
+        return
+    try:
+        burned = {s for s in (g.night_burned or set()) if s in g.seats}
+        if not burned:
+            return
+        role_keys = {
+            _R_DETECTIVE: "detective", _R_DOCTOR: "doctor", _R_GUARD: "guard",
+            _R_GUIDE: "guide", _R_LAWYER: "lawyer", _R_BAAZPORS: "baazpors",
+            _R_REPORTER: "reporter", _R_COMMANDO: "commando",
+        }
+        for s in burned:
+            rn = _seat_role_norm(g, s)
+            k = role_keys.get(rn)
+            if k:
+                g.night_done.add(k)
+        try:
+            snp = _find_sniper(g)
+            if snp in burned:
+                g.night_done.add("sniper")
+        except Exception:
+            pass
+        # تصمیم‌گیرِ تیمِ مافیا و نقش‌های کلیدیِ تیمی
+        shooter = _sc_find_role(g, _SC_SHOOTER_ROLES)
+        if shooter in burned:
+            g.night_done.add("mafia")
+        for _rn, _key in ((_R_HACKER, "hacker"), (_R_SHIAD, "shiad")):
+            try:
+                if _find_seat_by_role(g, _rn) in burned:
+                    g.night_done.add(_key)
+            except Exception:
+                pass
+        if _is_takavar_scenario(g):
+            _dec = (_find_seat_by_role(g, _R_GODFATHER) or _find_seat_by_role(g, _R_NATO)
+                    or _find_seat_by_role(g, _R_HOSTAGE))
+            if _dec in burned:
+                g.night_done.add("mafia")
+        store.save()
+
+        # ⛓ زنجیره‌های اولویت‌دار
+        if _is_nemayande_scenario(g):
+            # مین‌گذارِ سوخته → مرحله‌ی مافیا/هکر باز شود (فقط اگر مین هنوز ثبت نشده)
+            ml = _find_seat_by_role(g, _nz("مین‌گذار"))
+            if (ml in burned and getattr(g, "night_mine_target", None) is None
+                    and "mafia" not in (g.night_done or set())
+                    and "burn_mine_advanced" not in g.night_done):
+                g.night_done.add("burn_mine_advanced")
+                store.save()
+                await _nem_open_mafia(ctx, chat_id, g)
+        elif _is_takavar_scenario(g):
+            # چک‌کننده‌های تکاور idempotent هستند (با مارکرِ opened) — امن برای صدازدن
+            await _tk_check_open_mafia(ctx, chat_id, g)
+            await _tk_check_open_citizens(ctx, chat_id, g)
+            await _tk_check_open_gunman(ctx, chat_id, g)
+    except Exception as e:
+        print("⚠️ burn advance err:", e)
+
+
 async def handle_burn_callback(update, ctx):
     """🔥 انتخاب و تأییدِ سوزوندنِ اکت توسط گاد (در پیوی)."""
     q = update.callback_query
     data = q.data
     uid = q.from_user.id
-    g = None
+    g = None; burn_chat_id = None
     for cid, game in store.games.items():
         if game.god_id == uid and game.phase not in ("idle", "ended") and getattr(game, "assigned_roles", None):
-            g = game
+            g, burn_chat_id = game, cid
             break
     if g is None:
         await safe_q_answer(q, "بازیِ فعالی یافت نشد.", show_alert=True)
@@ -4444,6 +4504,7 @@ async def handle_burn_callback(update, ctx):
         names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sorted(g.night_burned)) or "—"
         await _close_pm(ctx, uid, mid, f"🔥 اکتِ این‌ها تا پایانِ شب سوخته: {names}")
         await _night_report(ctx, g, f"🔥 سوزوندنِ اکت: <b>{escape(names, quote=False)}</b>")
+        await _burn_advance(ctx, burn_chat_id, g)   # ⛓ صفِ اولویت‌دار جلو برود
         return
     await safe_q_answer(q)
     s = int(data.rsplit("_", 1)[1])
@@ -8261,6 +8322,7 @@ async def handle_night_kick_callback(update, ctx):
                 await _close_pm(ctx, _ku, _kpm, "👢 کیک شدی — امشب اکت نداری.")
             except Exception:
                 pass
+        await _burn_advance(ctx, chat_id, g)   # ⛓ کیک هم صفِ اولویت‌دار را جلو ببرد
         _kside = _sc_side(g, s)
         await _close_pm(ctx, uid, mid,
                         f"👢 کیک شب ثبت شد: {s}. {_tn} ({_kside})\n"
