@@ -3910,6 +3910,17 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     for s in dead:
         g.striked.add(s)
     store.save()
+
+    # 👢 اعلامِ عمومیِ کیکِ شب — حالا که روز شده، با ساید
+    for s in sorted(dead):
+        if "کیک" in str(reasons.get(s, "")):
+            try:
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_sc_side(g, s)}</b>",
+                    parse_mode="HTML")
+            except Exception:
+                pass
     if dead:
         def _why(s):
             return reasons.get(s) or reasons.get(str(s)) or ""
@@ -4363,6 +4374,7 @@ async def handle_baz_duel_callback(update, ctx):
         await _close_pm(ctx, uid, mid, "🚫 ملغی ثبت شد.")
         await ctx.bot.send_message(chat_id, "🧑‍⚖️ بازپرس رأی به <b>ملغیِ</b> بازپرسی داد.",
                                    parse_mode="HTML")
+        await _do_room_close(ctx, chat_id, g)   # 🔒 بستنِ خودکار — گاد لازم نیست «بسته» بزند
         return
 
     if data == "bzd_cont":
@@ -4389,6 +4401,7 @@ async def handle_baz_duel_callback(update, ctx):
                 f"• <b>{bt[1]}</b> = {escape(g.seats[bt[1]][1], quote=False)}\n"
                 f"(هر بازیکن یک رأی — آخرین عددش ملاک است)",
                 parse_mode="HTML", reply_markup=kb)
+        await _do_room_close(ctx, chat_id, g)   # 🔒 بستنِ خودکار — گاد لازم نیست «بسته» بزند
         return
 
     if data == "bzd_end":
@@ -4429,8 +4442,8 @@ async def handle_baz_duel_callback(update, ctx):
             await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
             return
         loser = pair[0] if c1 > c2 else pair[1]
-        lines.append(f"🚪 {loser}. {escape(g.seats[loser][1], quote=False)} از بازی خارج شد — "
-                     f"ساید: <b>{_sc_side(g, loser)}</b>")
+        _lname = escape(g.seats[loser][1], quote=False)
+        lines.append(f"🚪 {loser}. {_lname} از بازی خارج شد — وصیت کند.")
         g.striked.add(loser)
         store.save()
         await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
@@ -4438,6 +4451,20 @@ async def handle_baz_duel_callback(update, ctx):
             await publish_seating(ctx, chat_id, g, mode=CTRL)
         except Exception:
             pass
+
+        # ⏳ ساید بعد از وصیت اعلام می‌شود (۱ دقیقه بعد)
+        _lside = _sc_side(g, loser)
+
+        async def _side_after_will():
+            try:
+                await asyncio.sleep(60)
+                if g.phase in ("idle", "ended"):
+                    return
+                await ctx.bot.send_message(
+                    chat_id, f"ساید {loser}. {_lname}: <b>{_lside}</b>", parse_mode="HTML")
+            except Exception as e:
+                print("⚠️ duel side announce err:", e)
+        asyncio.create_task(_side_after_will())
         return
 
 
@@ -8411,14 +8438,7 @@ async def handle_night_kick_callback(update, ctx):
                         f"👢 کیک شب ثبت شد: {s}. {_tn} ({_kside})\n"
                         f"(امشب اکت ندارد و هنگامِ روز خط می‌خورد)")
         await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b> ({_kside})")
-        # 📢 اعلامِ عمومی در گروه — با ساید
-        try:
-            await ctx.bot.send_message(
-                chat_id,
-                f"👢 {s}. {escape(_tn, quote=False)} کیک شد — ساید: <b>{_kside}</b>",
-                parse_mode="HTML")
-        except Exception:
-            pass
+        # 📢 اعلامِ عمومی (با ساید) موقعِ «روز» فرستاده می‌شود، نه الان — که شب چیزی لو نرود
         store.save()
         return
 
