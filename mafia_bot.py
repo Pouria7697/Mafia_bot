@@ -246,6 +246,18 @@ class GameState:
         self.nem_ding_used = getattr(self, "nem_ding_used", False)
         self.nem_awaiting_reps = getattr(self, "nem_awaiting_reps", False)
         self.nem_awaiting_ding = getattr(self, "nem_awaiting_ding", False)
+        # 🗳 شمارشِ دنگِ نمایندگی (نماینده — روز ۱)
+        self.nem_deng_button_used = getattr(self, "nem_deng_button_used", False)
+        self.nem_deng_round = getattr(self, "nem_deng_round", 1)   # جهتِ متناوب (فرد=از۱، زوج=از۱۰)
+        self.nem_deng_kb_mid = getattr(self, "nem_deng_kb_mid", None)   # پیامِ راندِ جاری (برای حذفِ دکمه‌ی کهنه)
+        self.nem_deng_active = getattr(self, "nem_deng_active", False)
+        self.nem_deng_stage = getattr(self, "nem_deng_stage", 0)          # ۱=راند اول، ۲=دوم، ۳+=حذفی
+        self.nem_deng_votes = getattr(self, "nem_deng_votes", {}) or {}   # uid → (seat, seq)
+        self.nem_deng_seq = getattr(self, "nem_deng_seq", 0)
+        self.nem_deng_unread = getattr(self, "nem_deng_unread", set()) or set()
+        self.nem_deng_first = getattr(self, "nem_deng_first", None)
+        self.nem_deng_cands = getattr(self, "nem_deng_cands", []) or []
+        self.nem_deng_result = getattr(self, "nem_deng_result", None)     # [اول، دوم] منتظرِ تأیید در «باز»
         # ── 🏅 امتیازدهی (نسخه‌ی تستی) ──
         self.score_events = getattr(self, "score_events", {}) or {}          # seat → [(cat, pts, reason)]
         self.score_kicked = getattr(self, "score_kicked", set()) or set()
@@ -255,6 +267,7 @@ class GameState:
         self.score_farib_days = getattr(self, "score_farib_days", set()) or set()  # هر روز فقط یک‌بار فریب
         # 🧑‍⚖️ بازپرس: تصمیمِ روز (ادامه/ملغی) + دوئلِ رأی ۱/۲
         self.baz_day_choice = getattr(self, "baz_day_choice", None)
+        self.baz_button_used = getattr(self, "baz_button_used", False)   # 🧑‍⚖️ دکمه‌ی یک‌بارمصرف
         self.baz_awaiting_decision = getattr(self, "baz_awaiting_decision", False)
         self.baz_duel_active = getattr(self, "baz_duel_active", False)
         self.baz_duel_votes = getattr(self, "baz_duel_votes", {}) or {}
@@ -1706,6 +1719,18 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
     night_row.append(InlineKeyboardButton("☀️ روز", callback_data="ctl_day"))
     night_row.append(InlineKeyboardButton("👢 کیک", callback_data="ctl_kick"))
     rows.append(night_row)
+
+    # 🧑‍⚖️ دکمه‌ی یک‌بارمصرفِ بازپرسی — بعد از معارفه ظاهر و تا استفاده‌ی گاد می‌ماند
+    #    (حتی اگر بازپرس مرده/بی‌اکت باشد — که از بود‌ونبودِ دکمه چیزی لو نرود)
+    if (_is_baazpors_scenario(g) and getattr(g, "maarefe_done", False)
+            and not getattr(g, "baz_button_used", False)):
+        rows.append([InlineKeyboardButton("🧑‍⚖️ بازپرسی", callback_data="ctl_bazparsi")])
+
+    # 🗳 دکمه‌ی یک‌بارمصرفِ دنگِ نمایندگی — نماینده، بعد از معارفه، فقط روز ۱
+    if (_is_nemayande_scenario(g) and getattr(g, "maarefe_done", False)
+            and getattr(g, "night_number", 0) == 0
+            and not getattr(g, "nem_deng_button_used", False)):
+        rows.append([InlineKeyboardButton("🗳 نماینده", callback_data="ctl_nemayande")])
 
     # 🔒/🔓 یک دکمه‌ی toggle برای چت اتاق مافیا (فقط وقتی اتاق فعال است)
     if getattr(g, "mafia_room_id", None):
@@ -3556,6 +3581,10 @@ async def start_night(ctx, chat_id, g):
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    # 🗳 شمارشِ دنگِ نیمه‌کاره با آمدنِ شب بسته می‌شود (نتیجه‌ی ثبت‌شده می‌ماند)
+    g.nem_deng_active = False
+    g.nem_deng_votes = {}
+    g.nem_deng_unread = set()
     store.save()
 
     g.night_active = True
@@ -4246,34 +4275,25 @@ async def _do_room_open(ctx, chat_id, g):
             if m:
                 await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
 
-    # 🧑‍⚖️ بازپرس: اگر بازپرسیِ معتبری در جریان است، از بازپرس بپرس «ادامه یا ملغی؟»
-    if (_is_baazpors_scenario(g) and getattr(g, "baazpors_used", False)
-            and getattr(g, "baz_day_choice", None) is None):
-        bt = [t for t in (getattr(g, "night_baz_targets", []) or [])
-              if t in g.seats and t not in (g.striked or set())]
-        bz = _find_seat_by_role(g, _R_BAAZPORS)
-        if bz is not None and len(bt) == 2:
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("▶️ ادامه", callback_data="bzd_cont"),
-                InlineKeyboardButton("🚫 ملغی", callback_data="bzd_cancel"),
-            ]])
-            names = " و ".join(f"{t}. {g.seats[t][1]}" for t in bt)
-            m = await _safe_pm(ctx, g.seats[bz][0],
-                               f"🧑‍⚖️ بازپرسیِ {names} — ادامه یا ملغی؟", kb)
-            if m:
-                g.baz_awaiting_decision = True
-                store.save()
-        elif (bz is None and len(bt) == 2
-                and _find_seat_by_role(g, _R_BAAZPORS, alive_only=False) is not None):
-            # ⚰️ بازپرس مُرده → ادامه‌ی خودکار (ملغی ممکن نیست) با ۳۰ ثانیه تأخیرِ ضدلورفتن
-            g.baz_day_choice = "cont"   # قفل، که «باز»های بعدی دوباره تایمر نگذارند
-            store.save()
-            asyncio.create_task(_baz_dead_auto_continue(ctx, chat_id, g))
+    # 🧑‍⚖️ بازپرسی دیگر به «باز» وابسته نیست — دکمه‌ی اختصاصیِ «بازپرسی» در پنل
 
     # 🗡 نماینده — دنگ خیانت (فقط روزِ ۱: بعد از معارفه، قبل از اولین شب)
     if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
             and g.night_number == 0 and not getattr(g, "nem_ding_used", False)):
-        if not g.nem_reps and not getattr(g, "nem_awaiting_reps", False):
+        _pend = [s for s in (getattr(g, "nem_deng_result", None) or [])
+                 if s in g.seats and s not in (g.striked or set())]
+        if not g.nem_reps and not getattr(g, "nem_awaiting_reps", False) and len(_pend) == 2:
+            # 🗳 نتیجه‌ی شمارشِ دنگ در حافظه → تأییدِ گاد (بعدش دنگِ خیانت مستقیم به دن)
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ تأیید", callback_data="nemc_yes"),
+                InlineKeyboardButton("✏️ خودم انتخاب می‌کنم", callback_data="nemc_no"),
+            ]])
+            await _safe_pm(ctx, g.god_id,
+                           f"🗳 نتیجه‌ی شمارشِ دنگ:\n"
+                           f"نماینده اول: {_pend[0]}. {g.seats[_pend[0]][1]}\n"
+                           f"نماینده دوم: {_pend[1]}. {g.seats[_pend[1]][1]}\n"
+                           f"تأیید می‌کنید؟", kb)
+        elif not g.nem_reps and not getattr(g, "nem_awaiting_reps", False):
             g.nem_awaiting_reps = True
             g.nem_reps_tmp = []
             store.save()
@@ -4309,6 +4329,38 @@ def _baz_duel_parse(text, pair) -> int | None:
     return v if v in (pair or ()) else None
 
 
+async def _baz_trigger(ctx, chat_id, g):
+    """🧑‍⚖️ دکمه‌ی «بازپرسی»: پرامپتِ ادامه/ملغی به بازپرسِ زنده، یا ادامه‌ی خودکار برای بازپرسِ مرده."""
+    # ⚠️ هیچ پیامِ عمومی برای حالت‌های نامعتبر — که وضعیتِ بازپرس لو نرود
+    if not (_is_baazpors_scenario(g) and getattr(g, "baazpors_used", False)):
+        await _night_report(ctx, g, "🧑‍⚖️ بازپرسیِ فعالی وجود ندارد (بازپرس اکتی نداده) — فقط تو می‌دانی.")
+        return
+    bt = [t for t in (getattr(g, "night_baz_targets", []) or [])
+          if t in g.seats and t not in (g.striked or set())]
+    if len(bt) != 2:
+        await _night_report(ctx, g, "🧑‍⚖️ بازپرسی معتبر نیست (احضارشده‌ای در بازی نیست) — فقط تو می‌دانی.")
+        return
+    bz = _find_seat_by_role(g, _R_BAAZPORS)
+    if bz is not None:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("▶️ ادامه", callback_data="bzd_cont"),
+            InlineKeyboardButton("🚫 ملغی", callback_data="bzd_cancel"),
+        ]])
+        names = " و ".join(f"{t}. {g.seats[t][1]}" for t in bt)
+        m = await _safe_pm(ctx, g.seats[bz][0],
+                           f"🧑‍⚖️ بازپرسیِ {names} — ادامه یا ملغی؟", kb)
+        if m:
+            g.baz_awaiting_decision = True
+            store.save()
+        else:
+            await ctx.bot.send_message(chat_id, "⚠️ پیویِ بازپرس بسته است.")
+    elif _find_seat_by_role(g, _R_BAAZPORS, alive_only=False) is not None:
+        # ⚰️ بازپرس مُرده → ادامه‌ی خودکار (ملغی ممکن نیست) با ۳۰ ثانیه تأخیرِ ضدلورفتن
+        g.baz_day_choice = "cont"
+        store.save()
+        asyncio.create_task(_baz_dead_auto_continue(ctx, chat_id, g))
+
+
 async def _baz_dead_auto_continue(ctx, chat_id, g, delay=30):
     """⚰️ بازپرسِ مرده: بعد از ۳۰ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
     همه‌چیز عینِ جریانِ زنده‌بودنش دیده می‌شود تا کسی نفهمد بازپرس مرده."""
@@ -4338,7 +4390,6 @@ async def _baz_dead_auto_continue(ctx, chat_id, g, delay=30):
             f"• <b>{bt[1]}</b> = {escape(g.seats[bt[1]][1], quote=False)}\n"
             f"(هر بازیکن یک رأی — آخرین عددش ملاک است)",
             parse_mode="HTML", reply_markup=kb)
-        await _do_room_close(ctx, chat_id, g)   # 🔒 با همان پیامِ همیشگیِ «بسته»
         await _night_report(ctx, g, "⚰️ بازپرس مرده بود — بازپرسی خودکار ادامه یافت (فقط تو می‌دانی).")
     except Exception as e:
         print("⚠️ baz dead auto err:", e)
@@ -4374,7 +4425,6 @@ async def handle_baz_duel_callback(update, ctx):
         await _close_pm(ctx, uid, mid, "🚫 ملغی ثبت شد.")
         await ctx.bot.send_message(chat_id, "🧑‍⚖️ بازپرس رأی به <b>ملغیِ</b> بازپرسی داد.",
                                    parse_mode="HTML")
-        await _do_room_close(ctx, chat_id, g)   # 🔒 بستنِ خودکار — گاد لازم نیست «بسته» بزند
         return
 
     if data == "bzd_cont":
@@ -4401,7 +4451,6 @@ async def handle_baz_duel_callback(update, ctx):
                 f"• <b>{bt[1]}</b> = {escape(g.seats[bt[1]][1], quote=False)}\n"
                 f"(هر بازیکن یک رأی — آخرین عددش ملاک است)",
                 parse_mode="HTML", reply_markup=kb)
-        await _do_room_close(ctx, chat_id, g)   # 🔒 بستنِ خودکار — گاد لازم نیست «بسته» بزند
         return
 
     if data == "bzd_end":
@@ -4591,6 +4640,338 @@ async def handle_burn_callback(update, ctx):
     store.save()
     await _edit_pm(ctx, uid, mid,
                    "🔥 اکتِ چه کسانی سوزانده شود؟ (تا پایانِ همین شب اعتبار دارد)", _burn_kb(g))
+
+
+# ═══════════════ 🗳 موتورِ شمارشِ دنگِ نمایندگی (نماینده — روز ۱) ═══════════════
+def _nem_deng_end_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش دنگ", callback_data="nemd_end")]])
+
+
+def _deng_parse_strict(text, cands):
+    """فقط پیامی که «صرفاً یک عدد» است رأی حساب می‌شود (۵، 05، ۵.، +۵…)؛
+    چتِ عادیِ عدددار (مثل «۲ دقیقه صبر کن») رأی نیست."""
+    s = str(text).translate(_FA_DIGITS)
+    for ch in " .+=-_()[]،٫‌":
+        s = s.replace(ch, "")
+    if not s or len(s) > 2 or not s.isdigit():
+        return None
+    v = int(s)
+    return v if v in (cands or ()) else None
+
+
+async def _deng_round_msg(ctx, chat_id, g, text):
+    """پیامِ راندِ جدید: دکمه‌ی راندِ قبلی برداشته می‌شود که دکمه‌ی کهنه‌ی زنده نماند."""
+    old = getattr(g, "nem_deng_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    m = await ctx.bot.send_message(chat_id, text, parse_mode="HTML",
+                                   reply_markup=_nem_deng_end_kb())
+    g.nem_deng_kb_mid = m.message_id
+    store.save()
+
+
+async def _deng_manual_fallback(ctx, chat_id, g, first, note):
+    """وقتی حذفی رأی‌دهنده ندارد: موتور می‌ایستد و انتخاب (با پیش‌پُرشدنِ نماینده اول اگر بود) دستِ گاد."""
+    old = getattr(g, "nem_deng_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    g.nem_deng_kb_mid = None
+    g.nem_deng_active = False
+    g.nem_deng_stage = 0
+    g.nem_deng_cands = []
+    g.nem_deng_first = None
+    g.nem_deng_result = None
+    g.nem_awaiting_reps = True
+    g.nem_reps_tmp = [first] if first else []
+    store.save()
+    if note:
+        await ctx.bot.send_message(chat_id, note, parse_mode="HTML")
+    await _safe_pm(ctx, g.god_id,
+                   "🗳 چه کسانی نماینده شدند؟ (به ترتیب: اولین انتخاب = نماینده اول)",
+                   _nem_reps_kb(g, list(g.nem_reps_tmp)))
+
+
+def _nem_deng_roles(g):
+    """(رأی‌دهندگانِ مجاز، کاندیدهای مجاز) برای راندِ جاری.
+    stage: ۱=راندِ اولِ کامل | ۴=حذفیِ نماینده اول | ۲=راندِ کاملِ دوم | ۳=حذفیِ نماینده دوم"""
+    alive = set(_alive_seats(g))
+    st = int(getattr(g, "nem_deng_stage", 0) or 0)
+    first = getattr(g, "nem_deng_first", None)
+    if st <= 1:
+        return alive, alive
+    if st == 4:
+        cands = set(getattr(g, "nem_deng_cands", []) or []) & alive
+        return alive - cands, cands          # تساوی‌آورده‌ها رأی نمی‌دهند
+    if st == 2:
+        v = alive - {first}
+        return v, v
+    cands = set(getattr(g, "nem_deng_cands", []) or []) & alive
+    return alive - {first} - cands, cands
+
+
+def _nem_deng_tally(votes):
+    """شمارش + ترتیبِ رسیدن: (counts, tops_sorted_by_reach) — tops همه‌ی صدرنشین‌ها به ترتیبِ زمانِ رسیدن به سقف."""
+    events = sorted(votes.values(), key=lambda t: t[1])   # (seat, seq) به ترتیبِ زمان
+    run, reach = {}, {}
+    for seat, seq in events:
+        run[seat] = run.get(seat, 0) + 1
+        reach[(seat, run[seat])] = seq
+    if not run:
+        return {}, []
+    m = max(run.values())
+    tops = sorted([s for s, c in run.items() if c == m], key=lambda s: reach[(s, m)])
+    return run, tops
+
+
+async def _nem_deng_capture(ctx, g, msg, uid, text) -> bool:
+    """ثبتِ دنگ از چتِ گروه. True یعنی پیام مصرف شد."""
+    vs = _seat_of_uid(g, uid)
+    if vs is None or vs in (g.striked or set()) or uid == g.god_id:
+        return False
+    voters, cands = _nem_deng_roles(g)
+    if vs not in voters:
+        return True   # نماینده اول / کاندیدهای حذفی: رأی ندارند — بی‌صدا
+    v = _deng_parse_strict(text, tuple(c for c in cands if c != vs))   # فقط پیامِ صرفاً-عددی؛ عددِ خودش نامعتبر
+    if v is not None:
+        g.nem_deng_seq = int(getattr(g, "nem_deng_seq", 0) or 0) + 1
+        g.nem_deng_votes[uid] = (v, g.nem_deng_seq)
+        g.nem_deng_unread.discard(uid)
+        store.save()
+        # ✅ همه‌ی رأی‌دهندگانِ مجاز رأی دادند → شمارشِ خودکار
+        if all(g.seats[s][0] in g.nem_deng_votes for s in voters):
+            await _nem_deng_count(ctx, msg.chat.id, g)
+        return True
+    if uid not in (g.nem_deng_votes or {}):
+        _first = uid not in (g.nem_deng_unread or set())
+        g.nem_deng_unread.add(uid)
+        store.save()
+        if _first:
+            try:
+                await msg.reply_text(f"⚠️ {vs}. {g.seats[vs][1]} دنگت خوانده نشد — "
+                                     f"فقط شماره‌ی یکی از صندلی‌ها را بنویس (به‌جز خودت).")
+            except Exception:
+                pass
+        return True
+    return False   # قبلاً رأی داده → چتِ عادیش آزاد
+
+
+async def _nem_deng_count(ctx, chat_id, g):
+    """پایانِ راند (خودکار یا با دکمه‌ی گاد): شمارش بدونِ احتسابِ رأی‌ندادگان."""
+    if not getattr(g, "nem_deng_active", False):
+        return
+    # 🧹 فقط رأی‌های «هنوز معتبر»: رأی‌دهنده زنده و مجاز، هدف زنده و کاندید (کیک/خطِ وسطِ راند خنثی می‌شود)
+    voters_now, cands_now = _nem_deng_roles(g)
+    votes = {}
+    for u, (seat, seq) in dict(g.nem_deng_votes or {}).items():
+        vs = _seat_of_uid(g, u)
+        if vs is None or vs not in voters_now:
+            continue
+        if seat == vs or seat not in cands_now:
+            continue
+        votes[u] = (seat, seq)
+    counts, tops = _nem_deng_tally(votes)
+    st = int(getattr(g, "nem_deng_stage", 0) or 0)
+    if not tops:
+        # ⏸ رأیِ معتبری نیست → راند بازمی‌ماند (دابل‌تپ/دکمه‌ی کهنه بی‌خطر؛ نماینده اول از دست نمی‌رود)
+        await ctx.bot.send_message(chat_id, "🗳 هنوز دنگِ معتبری ثبت نشده — رأی‌گیری ادامه دارد.")
+        return
+    # راند مصرف شد
+    g.nem_deng_votes = {}
+    g.nem_deng_unread = set()
+    store.save()
+
+    def _frm_next():
+        # 🔄 جهتِ متناوب: هر راندِ جدید از سمتِ مخالفِ راندِ قبلی (جایی که آخرین نفر رأی داده)
+        g.nem_deng_round = int(getattr(g, "nem_deng_round", 1) or 1) + 1
+        return "۱" if (g.nem_deng_round % 2 == 1) else "۱۰"
+
+    lst = "، ".join(str(s) for s in tops)
+    alive = set(_alive_seats(g))
+
+    if st == 1:
+        if len(tops) == 2:
+            # تساویِ دقیقاً دو نفره: زودتررسیده = اول، بعدی = دوم — تمام
+            await _nem_deng_finish(ctx, chat_id, g, tops[0], tops[1], counts)
+        elif len(tops) == 1:
+            g.nem_deng_first = tops[0]
+            g.nem_deng_stage = 2
+            store.save()
+            frm = _frm_next()
+            await _deng_round_msg(
+                ctx, chat_id, g,
+                f"🗳 نماینده اول: <b>{tops[0]}. {escape(g.seats[tops[0]][1], quote=False)}</b> "
+                f"({counts[tops[0]]} دنگ)\n"
+                f"🗳 رأی‌گیریِ نماینده دوم — از صندلی {frm}: همه به‌جز {tops[0]} یک عدد بنویسند (به‌جز خودشان).")
+        else:
+            # ۳+ نفرِ مساوی → حذفیِ خودِ نماینده اول
+            if not (alive - set(tops)):
+                await _deng_manual_fallback(
+                    ctx, chat_id, g, None,
+                    "⚖️ تساوی بینِ همه و حذفی رأی‌دهنده ندارد — تعیینِ نماینده‌ها با گاد.")
+                return
+            g.nem_deng_cands = list(tops)
+            g.nem_deng_stage = 4
+            store.save()
+            frm = _frm_next()
+            await _deng_round_msg(
+                ctx, chat_id, g,
+                f"⚖️ تساوی بینِ: <b>{lst}</b>\n"
+                f"🗳 حذفیِ نماینده اول — از صندلی {frm}: فقط شماره‌ی یکی از همین‌ها را بنویسید "
+                f"(خودِ این افراد رأی نمی‌دهند).")
+        return
+
+    if st == 4:
+        # حذفیِ نماینده اول
+        if len(tops) == 1:
+            first = tops[0]
+            if not (alive - {first}):
+                await _deng_manual_fallback(
+                    ctx, chat_id, g, first,
+                    "🗳 نماینده اول مشخص شد اما رأی‌دهنده‌ای برای نماینده دوم نمانده — تعیین با گاد.")
+                return
+            g.nem_deng_first = first
+            g.nem_deng_cands = []
+            g.nem_deng_stage = 2
+            store.save()
+            frm = _frm_next()
+            await _deng_round_msg(
+                ctx, chat_id, g,
+                f"🗳 نماینده اول: <b>{first}. {escape(g.seats[first][1], quote=False)}</b>\n"
+                f"🗳 رأی‌گیریِ نماینده دوم — از صندلی {frm}: همه به‌جز {first} یک عدد بنویسند (به‌جز خودشان).")
+        else:
+            # هر تساوی‌ای (حتی دو نفره) → حذفیِ دوباره از سمتِ مخالف
+            if not (alive - set(tops)):
+                await _deng_manual_fallback(
+                    ctx, chat_id, g, None,
+                    "⚖️ حذفی رأی‌دهنده ندارد — تعیینِ نماینده‌ها با گاد.")
+                return
+            g.nem_deng_cands = list(tops)
+            store.save()
+            frm = _frm_next()
+            await _deng_round_msg(
+                ctx, chat_id, g,
+                f"⚖️ باز هم تساوی بینِ: <b>{lst}</b>\n"
+                f"🗳 حذفیِ نماینده اول — از صندلی {frm}: فقط شماره‌ی یکی از همین‌ها "
+                f"(خودشان رأی نمی‌دهند).")
+        return
+
+    # st == 2 یا 3 — تعیینِ نماینده دوم
+    if len(tops) == 1:
+        await _nem_deng_finish(ctx, chat_id, g, g.nem_deng_first, tops[0], counts)
+        return
+    first = getattr(g, "nem_deng_first", None)
+    if not (alive - ({first} if first else set()) - set(tops)):
+        await _deng_manual_fallback(
+            ctx, chat_id, g, first,
+            "⚖️ حذفیِ نماینده دوم رأی‌دهنده ندارد — نماینده دوم را گاد تعیین می‌کند.")
+        return
+    g.nem_deng_cands = list(tops)
+    g.nem_deng_stage = 3
+    store.save()
+    frm = _frm_next()
+    await _deng_round_msg(
+        ctx, chat_id, g,
+        f"⚖️ تساوی بینِ: <b>{lst}</b>\n"
+        f"🗳 حذفیِ نماینده دوم — از صندلی {frm}: فقط شماره‌ی یکی از همین‌ها را بنویسید "
+        f"(خودِ این افراد رأی نمی‌دهند).")
+
+
+async def _nem_deng_finish(ctx, chat_id, g, a, b, counts):
+    old = getattr(g, "nem_deng_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    g.nem_deng_kb_mid = None
+    g.nem_deng_result = [a, b]
+    g.nem_deng_active = False
+    g.nem_deng_stage = 0
+    g.nem_deng_first = None
+    g.nem_deng_cands = []
+    store.save()
+    na = escape(g.seats[a][1], quote=False) if a in g.seats else "?"
+    nb = escape(g.seats[b][1], quote=False) if b in g.seats else "?"
+    await ctx.bot.send_message(
+        chat_id,
+        f"🗳 نماینده اول: <b>{a}. {na}</b>\n🗳 نماینده دوم: <b>{b}. {nb}</b>",
+        parse_mode="HTML")
+    await _night_report(ctx, g,
+                        f"🗳 دنگِ نمایندگی: اول {a}، دوم {b} — با «باز» ازت تأیید می‌گیرم.")
+
+
+async def handle_nem_deng_callback(update, ctx):
+    """🗳 پایانِ شمارش (گاد) + تأیید/ردِ نتیجه در «باز»."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    if data == "nemd_end":
+        # 🔒 دکمه‌ی گروهی → بازی از همان چتی که دکمه در آن است (نه اولین بازیِ این گاد)
+        chat_id = q.message.chat.id if q.message else None
+        g = store.games.get(chat_id) if chat_id is not None else None
+        if (g is None or g.god_id != uid or not _is_nemayande_scenario(g)
+                or g.phase in ("idle", "ended")):
+            await safe_q_answer(q, "بازیِ معتبری یافت نشد.", show_alert=True)
+            return
+        if not getattr(g, "nem_deng_active", False):
+            await safe_q_answer(q, "شمارشِ فعالی نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        await _nem_deng_count(ctx, chat_id, g)
+        return
+
+    # nemc_*: دکمه‌ی پیوی → بازی‌ای که نتیجه‌ی معلق دارد (نه اولین بازیِ این گاد)
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if (game.god_id == uid and game.phase not in ("idle", "ended")
+                and _is_nemayande_scenario(game)
+                and getattr(game, "nem_deng_result", None) and not game.nem_reps):
+            g, chat_id = game, cid
+            break
+    if g is None:
+        await safe_q_answer(q, "درخواستِ معتبری یافت نشد.", show_alert=True)
+        return
+    mid = q.message.message_id if q.message else None
+
+    if data == "nemc_yes":
+        res = [s for s in (getattr(g, "nem_deng_result", None) or [])
+               if s in g.seats and s not in (g.striked or set())]
+        if len(res) != 2 or g.nem_reps:
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        g.nem_reps = res
+        g.nem_deng_result = None
+        g.nem_awaiting_reps = False
+        g.nem_awaiting_ding = True
+        store.save()
+        await _close_pm(ctx, uid, mid,
+                        f"✅ نماینده‌ها ثبت شدند: اول {res[0]}. {g.seats[res[0]][1]} — "
+                        f"دوم {res[1]}. {g.seats[res[1]][1]}")
+        await _nem_ding_prompt_don(ctx, g)
+        return
+
+    if data == "nemc_no":
+        # 🔒 همان گاردِ nemc_yes — پیامِ تأییدِ کهنه بعد از ثبت، بی‌اثر است
+        if g.nem_reps or not getattr(g, "nem_deng_result", None):
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        g.nem_deng_result = None
+        g.nem_awaiting_reps = True
+        g.nem_reps_tmp = []
+        store.save()
+        await _edit_pm(ctx, uid, mid,
+                       "🗳 چه کسانی نماینده شدند؟ (به ترتیب: اولین انتخاب = نماینده اول)",
+                       _nem_reps_kb(g, []))
+        return
+# ═══════════════ پایانِ موتورِ دنگ ═══════════════
 
 
 def _nem_reps_kb(g, tmp):
@@ -8487,6 +8868,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_baz_duel_callback(update, ctx)
         return
 
+    # 🗳 دنگِ نمایندگی: پایانِ شمارش + تأیید/ردِ نتیجه
+    if _q and _q.data and _q.data.startswith(("nemd_", "nemc_")):
+        await handle_nem_deng_callback(update, ctx)
+        return
+
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_")):
@@ -8908,9 +9294,52 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
-    if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick"):
+    if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
+                "ctl_bazparsi", "ctl_nemayande"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if data == "ctl_nemayande":
+            if getattr(g, "nem_deng_button_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            # 🔒 ری‌چکِ گیت‌های کیبورد (دکمه‌ی کهنه‌ی پنلِ قدیمی در روز ۲+ بی‌اثر)
+            if not (_is_nemayande_scenario(g) and getattr(g, "maarefe_done", False)
+                    and getattr(g, "night_number", 0) == 0):
+                await safe_q_answer(q, "فقط روزِ ۱ سناریوی نماینده.", show_alert=True)
+                return
+            g.nem_deng_button_used = True   # ♻️ یک‌بارمصرف
+            g.nem_deng_active = True
+            g.nem_deng_stage = 1
+            g.nem_deng_round = 1
+            g.nem_deng_votes = {}
+            g.nem_deng_seq = 0
+            g.nem_deng_unread = set()
+            g.nem_deng_first = None
+            g.nem_deng_cands = []
+            g.nem_deng_result = None
+            store.save()
+            await _deng_round_msg(
+                ctx, chat, g,
+                "🗳 <b>شمارشِ دنگِ نمایندگی</b> — از صندلی ۱ به‌ترتیب: "
+                "شماره‌ی صندلیِ موردِ نظرت را بنویس (به‌جز خودت).")
+            try:
+                await publish_seating(ctx, chat, g, mode=CTRL)
+            except Exception:
+                pass
+            return
+        if data == "ctl_bazparsi":
+            if getattr(g, "baz_button_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            g.baz_button_used = True   # ♻️ یک‌بارمصرف — دکمه از پنل غیب می‌شود
+            g.baz_day_choice = None
+            store.save()
+            await _baz_trigger(ctx, chat, g)
+            try:
+                await publish_seating(ctx, chat, g, mode=CTRL)
+            except Exception:
+                pass
             return
         if data == "ctl_kick":
             # 👢 کیکِ روز — دکمه‌های پنل عوض می‌شوند (مثلِ خط‌زدن)
@@ -10059,6 +10488,23 @@ async def shuffle_and_assign(
     g.tk_shield_lost = False
     g.tk_com_burned = False
     g.zereh_fallen = False
+    g.baz_button_used = False
+    g.baz_day_choice = None
+    g.baz_awaiting_decision = False
+    g.baz_duel_active = False
+    g.baz_duel_votes = {}
+    g.baz_duel_unread = set()
+    g.nem_deng_button_used = False
+    g.nem_deng_active = False
+    g.nem_deng_stage = 0
+    g.nem_deng_round = 1
+    g.nem_deng_votes = {}
+    g.nem_deng_seq = 0
+    g.nem_deng_unread = set()
+    g.nem_deng_first = None
+    g.nem_deng_cands = []
+    g.nem_deng_result = None
+    g.nem_deng_kb_mid = None
 
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
@@ -10233,6 +10679,11 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         pass
                 return
         # گاد، تماشاچی‌ها و رأی‌داده‌ها → عبور به هندلرهای عادی
+
+    # 🗳 شمارشِ دنگِ نمایندگی
+    if getattr(g, "nem_deng_active", False):
+        if await _nem_deng_capture(ctx, g, msg, uid, text):
+            return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -11377,6 +11828,11 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                         pass
                 return
         # گاد، تماشاچی‌ها و رأی‌داده‌ها → عبور به هندلرهای عادی
+
+    # 🗳 شمارشِ دنگِ نمایندگی
+    if getattr(g, "nem_deng_active", False):
+        if await _nem_deng_capture(ctx, g, msg, uid, text):
+            return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
