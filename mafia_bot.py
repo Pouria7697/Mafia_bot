@@ -2480,11 +2480,11 @@ def _score_votes_final(g, targets, exit_seat, exited):
                             _sc_add(g, vs, "push", -10, "رأی منجر به خروجِ هم‌تیمی")
                         else:
                             _sc_add(g, vs, "push", -5, "رأی خروج به هم‌تیمیِ مافیا")
-        # فریب (کسرشونده از ۴۰): حضورِ مافیا در دفاعِ امروز −۵؛ اگر با رأی خارج شد −۱۰ (جایگزین)
+        # فریب (کسرشونده از ۴۰): حضور در دفاع −۵؛ خروج با رأی → فریب کلاً صفر (کسی را فریب نداده)
         for t in targets:
             if t in g.seats and _sc_side(g, t) == "مافیا":
                 if exited and t == exit_seat:
-                    _sc_add(g, t, "farib1", -10, "خروج با رأی")
+                    _sc_add(g, t, "farib1", -100, "خروج با رأی — فریب صفر")
                 else:
                     _sc_add(g, t, "farib1", -5, "حضور در دفاع")
         g.score_day_final = True
@@ -4361,8 +4361,8 @@ async def _baz_trigger(ctx, chat_id, g):
         asyncio.create_task(_baz_dead_auto_continue(ctx, chat_id, g))
 
 
-async def _baz_dead_auto_continue(ctx, chat_id, g, delay=30):
-    """⚰️ بازپرسِ مرده: بعد از ۳۰ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
+async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
+    """⚰️ بازپرسِ مرده: بعد از ۱۵ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
     همه‌چیز عینِ جریانِ زنده‌بودنش دیده می‌شود تا کسی نفهمد بازپرس مرده."""
     try:
         await asyncio.sleep(delay)
@@ -4494,6 +4494,9 @@ async def handle_baz_duel_callback(update, ctx):
         _lname = escape(g.seats[loser][1], quote=False)
         lines.append(f"🚪 {loser}. {_lname} از بازی خارج شد — وصیت کند.")
         g.striked.add(loser)
+        # 🏅 مافیای خارج‌شده با رأیِ بازپرسی هم فریبش صفر می‌شود
+        if _sc_side(g, loser) == "مافیا":
+            _sc_add(g, loser, "farib1", -100, "خروج با رأی بازپرسی — فریب صفر")
         store.save()
         await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
         try:
@@ -4506,7 +4509,7 @@ async def handle_baz_duel_callback(update, ctx):
 
         async def _side_after_will():
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(75)
                 if g.phase in ("idle", "ended"):
                     return
                 await ctx.bot.send_message(
@@ -10659,7 +10662,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if _vs in (getattr(g, "baz_duel_pair", []) or []):
             return   # 🧑‍⚖️ دو طرفِ بازپرسی حقِ رأی ندارند
         if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
-            _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
+            _bv = _deng_parse_strict(text, tuple(getattr(g, "baz_duel_pair", []) or []))
             if _bv is not None:
                 g.baz_duel_votes[uid] = _bv
                 g.baz_duel_unread.discard(uid)
@@ -11808,7 +11811,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if _vs in (getattr(g, "baz_duel_pair", []) or []):
             return   # 🧑‍⚖️ دو طرفِ بازپرسی حقِ رأی ندارند
         if _vs is not None and _vs not in (g.striked or set()) and uid != g.god_id:
-            _bv = _baz_duel_parse(text, tuple(getattr(g, "baz_duel_pair", []) or []))
+            _bv = _deng_parse_strict(text, tuple(getattr(g, "baz_duel_pair", []) or []))
             if _bv is not None:
                 g.baz_duel_votes[uid] = _bv
                 g.baz_duel_unread.discard(uid)
