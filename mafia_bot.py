@@ -265,6 +265,8 @@ class GameState:
         self.score_day_initial = getattr(self, "score_day_initial", False)
         self.score_day_final = getattr(self, "score_day_final", False)
         self.score_farib_days = getattr(self, "score_farib_days", set()) or set()  # هر روز فقط یک‌بار فریب
+        self.score_yakuza_sac = getattr(self, "score_yakuza_sac", set()) or set()  # فدای یاکوزایی (فریب صفر نمی‌شود)
+        self.buy_link_seat = getattr(self, "buy_link_seat", None)                  # 🔗 پرسشِ لینک بعد از خریداری
         # 🧑‍⚖️ بازپرس: تصمیمِ روز (ادامه/ملغی) + دوئلِ رأی ۱/۲
         self.baz_day_choice = getattr(self, "baz_day_choice", None)
         self.baz_button_used = getattr(self, "baz_button_used", False)   # 🧑‍⚖️ دکمه‌ی یک‌بارمصرف
@@ -2440,6 +2442,8 @@ def _score_votes_initial(g):
                     continue
                 if tside == "مافیا":
                     _sc_add(g, vs, "tash", 5, "رأی اولیه به مافیا")
+                    # 🎭 فریبِ مافیا: هر رأیِ اولیه‌ای که از «شهروند» می‌خورد −۲.۵
+                    _sc_add(g, t, "farib1", -2.5, "رأی اولیه از شهروند")
                 elif tside == "شهر":
                     _sc_add(g, vs, "tash", -2.5, "رأی اولیه به شهروند")
         g.score_day_initial = True
@@ -2463,7 +2467,7 @@ def _score_votes_final(g, targets, exit_seat, exited):
                 if vside == "شهر":
                     if tside == "مافیا":
                         if exited and t == exit_seat:
-                            _sc_add(g, vs, "tash", 15, "رأی منجر به خروجِ مافیا")
+                            _sc_add(g, vs, "tash", 20, "رأی منجر به خروجِ مافیا")
                         else:
                             _sc_add(g, vs, "tash", 10, "رأی خروج به مافیا")
                     elif tside == "شهر":
@@ -2486,7 +2490,7 @@ def _score_votes_final(g, targets, exit_seat, exited):
                 if exited and t == exit_seat:
                     _sc_add(g, t, "farib1", -100, "خروج با رأی — فریب صفر")
                 else:
-                    _sc_add(g, t, "farib1", -5, "حضور در دفاع")
+                    _sc_add(g, t, "farib1", -10, "حضور در دفاع")
         g.score_day_final = True
         store.save()
     except Exception as e:
@@ -2530,8 +2534,12 @@ def _score_compute(g):
         win = 25.0 if side == getattr(g, "winner_side", None) else 0.0
         enz = 0.0 if seat in kicked else max(0.0, 15.0 - 5.0 * int(warns.get(seat, 0) or 0))
         if side == "مافیا":
-            # فریب: پایه‌ی ۴۰ منهای کسرها (حضور در دفاع −۵، خروج −۱۰) — بازه [۰، ۴۰]
+            # فریب: پایه‌ی ۴۰ منهای کسرها (رأی اولیه از شهروند −۲.۵، حضور در دفاع −۱۰) — بازه [۰، ۴۰]
             farib = max(0.0, min(40.0, 40.0 + _sum("farib1")))
+            # 🚪 به هر نحوی از بازی خارج شده (شات، رأی، دوئل…) → فریب صفر — جز فدای یاکوزایی
+            if (seat in (g.striked or set())
+                    and seat not in (getattr(g, "score_yakuza_sac", set()) or set())):
+                farib = 0.0
             push = max(0.0, min(20.0, _sum("push")))   # کف ۰ (رأی به هم‌تیمی منفی دارد)
             parts = {"win": win, "farib": farib, "push": push, "enz": enz}
             total = win + farib + push + enz
@@ -2622,6 +2630,9 @@ def _score_night_acts(g, dead, reasons):
             if s not in g.seats:
                 continue
             rn = _nz(str(r))
+            # 🥷 فدای یاکوزایی: تنها خروجی که فریبش صفر «نمی‌شود»
+            if "یاکوزایی" in rn and "فدا" in rn:
+                g.score_yakuza_sac.add(s)
             if any(k in rn for k in ("تکتیر", "اسنایپ", "شکار", "تیرِریک", "تیرریک")):
                 sn = _sc_find_role(g, _SC_SNIPER_ROLES)
                 if sn is not None:
@@ -4393,6 +4404,41 @@ async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
         await _night_report(ctx, g, "⚰️ بازپرس مرده بود — بازپرسی خودکار ادامه یافت (فقط تو می‌دانی).")
     except Exception as e:
         print("⚠️ baz dead auto err:", e)
+
+
+async def handle_buy_link_callback(update, ctx):
+    """🔗 بعد از خریداری: ارسال (یا نه)ی لینکِ اتاق مافیا به فردِ خریداری‌شده — تصمیمِ گاد."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None
+    for cid, game in store.games.items():
+        if (game.god_id == uid and game.phase not in ("idle", "ended")
+                and getattr(game, "buy_link_seat", None) is not None):
+            g = game
+            break
+    if g is None:
+        await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+        return
+    mid = q.message.message_id if q.message else None
+    seat = g.buy_link_seat
+    g.buy_link_seat = None
+    store.save()
+
+    if data == "buylink_no" or seat not in g.seats:
+        await safe_q_answer(q)
+        await _close_pm(ctx, uid, mid, "🚫 لینک ارسال نشد.")
+        return
+
+    await safe_q_answer(q)
+    tuid, tname = g.seats[seat]
+    try:
+        await _room_send_link(ctx, g, tuid)
+        await _close_pm(ctx, uid, mid, f"🔗 لینکِ اتاق مافیا برای {seat}. {tname} ارسال شد.")
+        await _night_report(ctx, g, f"🔗 لینکِ اتاق مافیا برای خریداری‌شده ({seat}. "
+                                    f"{escape(tname, quote=False)}) ارسال شد.")
+    except Exception as e:
+        await _close_pm(ctx, uid, mid, f"⚠️ ارسالِ لینک ناموفق: {e}")
 
 
 async def _baz_duel_count(ctx, chat_id, g):
@@ -8884,6 +8930,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_nem_deng_callback(update, ctx)
         return
 
+    # 🔗 لینکِ اتاق مافیا برای خریداری‌شده (پیوی گاد)
+    if _q and _q.data and _q.data.startswith("buylink_"):
+        await handle_buy_link_callback(update, ctx)
+        return
+
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_")):
@@ -9543,6 +9594,17 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
         store.save()
+
+        # 🔗 اگر اتاق مافیا فعال است: از گاد بپرس لینک برای خریداری‌شده برود یا نه
+        if getattr(g, "mafia_room_id", None):
+            g.buy_link_seat = seat
+            store.save()
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ بله، لینک برود", callback_data="buylink_yes"),
+                InlineKeyboardButton("🚫 خیر", callback_data="buylink_no"),
+            ]])
+            await _safe_pm(ctx, g.god_id,
+                           f"🔗 لینکِ گروه مافیا برای {seat}. {name_target} ارسال شود؟", kb)
         return
 
     # ─── بازگشت از خریداری ─────────────────────────────────────
