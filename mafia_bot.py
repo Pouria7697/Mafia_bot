@@ -4395,6 +4395,75 @@ async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
         print("⚠️ baz dead auto err:", e)
 
 
+async def _baz_duel_count(ctx, chat_id, g):
+    """🧑‍⚖️ شمارشِ دوئل — خودکار (همه رأی دادند) یا با دکمه‌ی گاد (بدونِ غایب‌ها آمار نمی‌دهد)."""
+    if not getattr(g, "baz_duel_active", False):
+        return
+    g.baz_duel_active = False
+    votes = dict(g.baz_duel_votes or {})
+    pair = list(getattr(g, "baz_duel_pair", []) or [])
+    g.baz_duel_votes = {}
+    g.baz_duel_unread = set()
+    store.save()
+    if len(pair) != 2:
+        return
+
+    # ✅ شرطِ اعلامِ آمار: همه‌ی زنده‌ها «به‌جز دو طرفِ بازپرسی» رأیِ خوانا داده باشند
+    missing = []
+    for s_ in sorted(_alive_seats(g)):
+        if s_ in pair:
+            continue
+        if g.seats[s_][0] not in votes:
+            missing.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
+    if missing:
+        await ctx.bot.send_message(
+            chat_id,
+            "⚠️ این افراد رأی ندادند یا رأیشان قابل‌شمارش نبود:\n• "
+            + "\n• ".join(missing)
+            + "\n🧮 آمار اعلام نمی‌شود — شمارش و تصمیم با خودِ گاد.",
+            parse_mode="HTML")
+        return
+
+    c1 = sum(1 for v in votes.values() if v == pair[0])
+    c2 = sum(1 for v in votes.values() if v == pair[1])
+    n1 = escape(g.seats[pair[0]][1], quote=False) if pair[0] in g.seats else "?"
+    n2 = escape(g.seats[pair[1]][1], quote=False) if pair[1] in g.seats else "?"
+    lines = [f"🗳 نتیجه‌ی بازپرسی:",
+             f"• {pair[0]}. {n1} — <b>{c1}</b> رأی",
+             f"• {pair[1]}. {n2} — <b>{c2}</b> رأی"]
+    if c1 == c2:
+        lines.append("⚖️ تساوی — کسی خارج نشد.")
+        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        return
+    loser = pair[0] if c1 > c2 else pair[1]
+    _lname = escape(g.seats[loser][1], quote=False)
+    lines.append(f"🚪 {loser}. {_lname} از بازی خارج شد — وصیت کند.")
+    g.striked.add(loser)
+    # 🏅 مافیای خارج‌شده با رأیِ بازپرسی هم فریبش صفر می‌شود
+    if _sc_side(g, loser) == "مافیا":
+        _sc_add(g, loser, "farib1", -100, "خروج با رأی بازپرسی — فریب صفر")
+    store.save()
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
+    _lside = _sc_side(g, loser)
+
+    async def _side_after_will():
+        try:
+            await asyncio.sleep(50)
+            if g.phase in ("idle", "ended"):
+                return
+            await ctx.bot.send_message(
+                chat_id, f"ساید {loser}. {_lname}: <b>{_lside}</b>", parse_mode="HTML")
+        except Exception as e:
+            print("⚠️ duel side announce err:", e)
+    asyncio.create_task(_side_after_will())
+
+
 async def handle_baz_duel_callback(update, ctx):
     """🧑‍⚖️ تصمیمِ بازپرس (ادامه/ملغی) + پایانِ شمارشِ دوئل (گاد)."""
     q = update.callback_query
@@ -4454,69 +4523,7 @@ async def handle_baz_duel_callback(update, ctx):
         return
 
     if data == "bzd_end":
-        g.baz_duel_active = False
-        votes = dict(g.baz_duel_votes or {})
-        pair = list(getattr(g, "baz_duel_pair", []) or [])
-        g.baz_duel_votes = {}
-        g.baz_duel_unread = set()
-        store.save()
-        if len(pair) != 2:
-            return
-
-        # ✅ شرطِ اعلامِ آمار: همه‌ی زنده‌ها «به‌جز دو طرفِ بازپرسی» رأیِ خوانا داده باشند
-        missing = []
-        for s_ in sorted(_alive_seats(g)):
-            if s_ in pair:
-                continue
-            if g.seats[s_][0] not in votes:
-                missing.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
-        if missing:
-            await ctx.bot.send_message(
-                chat_id,
-                "⚠️ این افراد رأی ندادند یا رأیشان قابل‌شمارش نبود:\n• "
-                + "\n• ".join(missing)
-                + "\n🧮 آمار اعلام نمی‌شود — شمارش و تصمیم با خودِ گاد.",
-                parse_mode="HTML")
-            return
-
-        c1 = sum(1 for v in votes.values() if v == pair[0])
-        c2 = sum(1 for v in votes.values() if v == pair[1])
-        n1 = escape(g.seats[pair[0]][1], quote=False) if pair[0] in g.seats else "?"
-        n2 = escape(g.seats[pair[1]][1], quote=False) if pair[1] in g.seats else "?"
-        lines = [f"🗳 نتیجه‌ی بازپرسی:",
-                 f"• {pair[0]}. {n1} — <b>{c1}</b> رأی",
-                 f"• {pair[1]}. {n2} — <b>{c2}</b> رأی"]
-        if c1 == c2:
-            lines.append("⚖️ تساوی — کسی خارج نشد.")
-            await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
-            return
-        loser = pair[0] if c1 > c2 else pair[1]
-        _lname = escape(g.seats[loser][1], quote=False)
-        lines.append(f"🚪 {loser}. {_lname} از بازی خارج شد — وصیت کند.")
-        g.striked.add(loser)
-        # 🏅 مافیای خارج‌شده با رأیِ بازپرسی هم فریبش صفر می‌شود
-        if _sc_side(g, loser) == "مافیا":
-            _sc_add(g, loser, "farib1", -100, "خروج با رأی بازپرسی — فریب صفر")
-        store.save()
-        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
-        try:
-            await publish_seating(ctx, chat_id, g, mode=CTRL)
-        except Exception:
-            pass
-
-        # ⏳ ساید بعد از وصیت اعلام می‌شود (۱ دقیقه بعد)
-        _lside = _sc_side(g, loser)
-
-        async def _side_after_will():
-            try:
-                await asyncio.sleep(75)
-                if g.phase in ("idle", "ended"):
-                    return
-                await ctx.bot.send_message(
-                    chat_id, f"ساید {loser}. {_lname}: <b>{_lside}</b>", parse_mode="HTML")
-            except Exception as e:
-                print("⚠️ duel side announce err:", e)
-        asyncio.create_task(_side_after_will())
+        await _baz_duel_count(ctx, chat_id, g)
         return
 
 
@@ -4651,10 +4658,11 @@ def _nem_deng_end_kb():
 
 
 def _deng_parse_strict(text, cands):
-    """فقط پیامی که «صرفاً یک عدد» است رأی حساب می‌شود (۵، 05، ۵.، +۵…)؛
+    """فقط پیامی که «صرفاً یک عدد» است رأی حساب می‌شود (۵، 05، ۵.، +۵، 5️⃣…)؛
     چتِ عادیِ عدددار (مثل «۲ دقیقه صبر کن») رأی نیست."""
-    s = str(text).translate(_FA_DIGITS)
-    for ch in " .+=-_()[]،٫‌":
+    s = str(text).replace("🔟", "10").translate(_FA_DIGITS)
+    # ایموجی‌های عددی (1️⃣): رقم + VS16 + keycap — دو کاراکترِ نامرئی حذف می‌شوند
+    for ch in " .+=-_()[]،٫‌️⃣":
         s = s.replace(ch, "")
     if not s or len(s) > 2 or not s.isdigit():
         return None
@@ -10667,6 +10675,11 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 g.baz_duel_votes[uid] = _bv
                 g.baz_duel_unread.discard(uid)
                 store.save()
+                # ✅ همه‌ی زنده‌ها (به‌جز دو طرف) رأی دادند → شمارشِ خودکار، بدونِ نیاز به دکمه
+                _dp = getattr(g, "baz_duel_pair", []) or []
+                _need = [x for x in _alive_seats(g) if x not in _dp]
+                if _need and all(g.seats[x][0] in g.baz_duel_votes for x in _need):
+                    await _baz_duel_count(ctx, msg.chat.id, g)
                 return
             if uid not in (g.baz_duel_votes or {}):
                 _first = uid not in (g.baz_duel_unread or set())
@@ -11816,6 +11829,11 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 g.baz_duel_votes[uid] = _bv
                 g.baz_duel_unread.discard(uid)
                 store.save()
+                # ✅ همه‌ی زنده‌ها (به‌جز دو طرف) رأی دادند → شمارشِ خودکار، بدونِ نیاز به دکمه
+                _dp = getattr(g, "baz_duel_pair", []) or []
+                _need = [x for x in _alive_seats(g) if x not in _dp]
+                if _need and all(g.seats[x][0] in g.baz_duel_votes for x in _need):
+                    await _baz_duel_count(ctx, msg.chat.id, g)
                 return
             if uid not in (g.baz_duel_votes or {}):
                 _first = uid not in (g.baz_duel_unread or set())
