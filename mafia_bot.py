@@ -361,6 +361,8 @@ class GameState:
         # ── حالت شبِ خودکار (سناریو گیمر) ──
         self.gm_don_sentence = getattr(self, "gm_don_sentence", None)
         self.gm_awaiting_don_sentence = getattr(self, "gm_awaiting_don_sentence", False)
+        self.gm_holmes_sentence = getattr(self, "gm_holmes_sentence", None)
+        self.gm_awaiting_holmes_sentence = getattr(self, "gm_awaiting_holmes_sentence", False)
         self.gm_holmes_uses = getattr(self, "gm_holmes_uses", 0)
         self.gm_moriarty_uses = getattr(self, "gm_moriarty_uses", 0)
         self.gm_robin_uses = getattr(self, "gm_robin_uses", 0)
@@ -8540,7 +8542,7 @@ async def _gm_open_mafia(ctx, chat_id, g):
     # 🔫 شات — دزدیده‌شدنِ دن یا حدسِ درستِ هلمز = بدون شات برای مافیا
     don_robbed = (g.gm_gift_accepted and g.gm_robbed_seat == don and don is not None)
     if g.gm_holmes_correct:
-        decider = don or tf or mo
+        decider = don or mo or tf
         if decider:
             await _safe_pm(ctx, g.seats[decider][0], "😶 امشب مافیا توانِ شات ندارد.")
         await _night_report(ctx, g, "😶 مافیا امشب شات ندارد (حدسِ درستِ هلمز).")
@@ -8554,9 +8556,21 @@ async def _gm_open_mafia(ctx, chat_id, g):
         await _gm_prompt(ctx, g, actor, "shot", "🔫 (اکتِ هدیه) هدف شلیک را انتخاب کن:",
                          _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
     else:
-        decider = don or tf or mo
+        decider = don or mo or tf   # 🔫 وراثتِ شات: دن → موریارتی → تووفیس
+        odd_n = (g.night_number % 2 == 1)
+        tf_dual = (decider is not None and tf is not None and decider == tf
+                   and odd_n and not _gm_own_act_skipped(g, tf))
         if not decider:
             g.night_done.add("shot")
+        elif tf_dual:
+            # 🔀 شات به تووفیس رسیده و شبِ بمبش هم هست → فقط یکی از دو اکت
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("💣 بمب", callback_data="gm_tfc_bomb"),
+                InlineKeyboardButton("🔫 شات", callback_data="gm_tfc_shot"),
+            ]])
+            await _gm_prompt(ctx, g, tf, "tfchoice",
+                             "🔀 شات به تو رسیده و امشب شبِ بمب هم هست — فقط یکی: بمب یا شات؟",
+                             kb)
         else:
             targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
             await _gm_prompt(ctx, g, decider, "shot", "🔫 هدف شلیک را انتخاب کن:",
@@ -8564,7 +8578,10 @@ async def _gm_open_mafia(ctx, chat_id, g):
 
     # 💣 تووفیس — فقط شب‌های فرد
     odd = (g.night_number % 2 == 1)
-    if odd and tf and not _gm_own_act_skipped(g, tf):
+    if ("tfchoice" in (getattr(g, "gm_expected", set()) or set())
+            and "tfchoice" not in (g.night_done or set())):
+        pass   # 🔀 منتظرِ انتخابِ تووفیس — بعد از انتخابش، شات «یا» بمب باز می‌شود
+    elif odd and tf and not _gm_own_act_skipped(g, tf):
         actor = _gm_actor_for(g, tf)
         targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
         await _gm_prompt(ctx, g, actor, "bomb", "💣 جلوی چه کسی بمب می‌گذاری؟",
@@ -8643,6 +8660,49 @@ async def handle_gamer_callback(update, ctx):
     q = update.callback_query
     data = q.data
     uid = q.from_user.id
+
+    # 🔀 انتخابِ تووفیس (شات یا بمب) — وقتی شات از راهِ وراثت به او رسیده و شبِ فرد است
+    if data in ("gm_tfc_bomb", "gm_tfc_shot"):
+        g = None; chat_id = None
+        for cid, game in store.games.items():
+            if not getattr(game, "night_active", False) or not _is_gamer_scenario(game):
+                continue
+            tf = _find_seat_by_role(game, _R_TWOFACE)
+            if tf is None:
+                continue
+            actor = _gm_actor_for(game, tf)
+            if actor in game.seats and game.seats[actor][0] == uid:
+                g, chat_id = game, cid
+                break
+        if g is None:
+            await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+            return
+        if "tfchoice" in (g.night_done or set()):
+            await safe_q_answer(q, "قبلاً انتخاب شده.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        mid = q.message.message_id if q.message else None
+        tf = _find_seat_by_role(g, _R_TWOFACE)
+        g.night_done.add("tfchoice")
+        if data == "gm_tfc_shot":
+            g.night_done.add("bomb")
+            store.save()
+            await _close_pm(ctx, uid, mid, "🔫 شات انتخاب شد.")
+            await _night_report(ctx, g, "🔀 تووفیس: شات را انتخاب کرد — بمبِ امشب ندارد.")
+            targets = list(_alive_seats(g))
+            await _gm_prompt(ctx, g, tf, "shot", "🔫 هدف شلیک را انتخاب کن:",
+                             _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
+        else:
+            g.night_done.add("shot")
+            store.save()
+            await _close_pm(ctx, uid, mid, "💣 بمب انتخاب شد.")
+            await _night_report(ctx, g, "🔀 تووفیس: بمب را انتخاب کرد — شاتِ امشب ندارد.")
+            actor = _gm_actor_for(g, tf)
+            targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+            await _gm_prompt(ctx, g, actor, "bomb", "💣 جلوی چه کسی بمب می‌گذاری؟",
+                             _kb_night_seats(targets, g, "gm_tf_", confirm_cb="gm_tf_ok"))
+        await _gm_check_open_citizens(ctx, chat_id, g)
+        return
 
     # 💣 خنثی‌سازیِ روز (بعد از /باز) — خارج از شبِ فعال
     if data.startswith(("gm_bz_", "gm_bc_")):
@@ -9232,6 +9292,31 @@ async def handle_don_sentence_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         await _night_report(ctx, g, f"📩 جملهٔ دن‌کارلئونه → هلمز: «{escape(sentence, quote=False)}»")
         try:
             await msg.reply_text("✅ جمله‌ات ثبت و برای مسترهلمز ارسال شد.")
+        except Exception:
+            pass
+        return
+
+    # ✍️ جمله‌ی مسترهلمز → موریارتی (هم‌زمان با جمله‌ی دن در معارفه)
+    for cid, g in store.games.items():
+        if not getattr(g, "gm_awaiting_holmes_sentence", False):
+            continue
+        hs = _find_seat_by_role(g, _R_HOLMES)
+        if hs is None or g.seats[hs][0] != uid:
+            continue
+        sentence = msg.text.strip()[:200]
+        g.gm_holmes_sentence = sentence
+        g.gm_awaiting_holmes_sentence = False
+        store.save()
+        mo = _find_seat_by_role(g, _R_MORIARTY)
+        if mo:
+            try:
+                await ctx.bot.send_message(g.seats[mo][0],
+                                           f"📩 جمله‌ای به دستت رسید:\n«{sentence}»")
+            except Exception:
+                pass
+        await _night_report(ctx, g, f"📩 جملهٔ هلمز → موریارتی: «{escape(sentence, quote=False)}»")
+        try:
+            await msg.reply_text("✅ جمله‌ات ثبت و برای موریارتی ارسال شد.")
         except Exception:
             pass
         return
@@ -11082,6 +11167,10 @@ async def shuffle_and_assign(
     g.kp_gun_msg_id = None
     g.kp_gun_done = False
     g.kp_pair_tmp = []
+    g.gm_don_sentence = None
+    g.gm_awaiting_don_sentence = False
+    g.gm_holmes_sentence = None
+    g.gm_awaiting_holmes_sentence = False
 
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
@@ -12388,6 +12477,18 @@ async def do_maarefe(ctx, chat_id, g):
                     g.seats[don][0],
                     "✍️ شب معارفه — یک جمله بنویس و همین‌جا بفرست؛ "
                     "این جمله به مسترهلمز می‌رسد (اجباری).")
+            except Exception:
+                pass
+        # ✍️ هم‌زمان: جمله از مسترهلمز → برای موریارتی
+        _hs = _find_seat_by_role(g, _R_HOLMES)
+        if _hs and not getattr(g, "gm_holmes_sentence", None):
+            g.gm_awaiting_holmes_sentence = True
+            store.save()
+            try:
+                await ctx.bot.send_message(
+                    g.seats[_hs][0],
+                    "✍️ شب معارفه — یک جمله بنویس و همین‌جا بفرست؛ "
+                    "این جمله به موریارتی می‌رسد (اجباری).")
             except Exception:
                 pass
 
