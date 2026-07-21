@@ -305,7 +305,29 @@ class GameState:
         # ── حالت شبِ خودکار (سناریو تکاور) ──
         self.night_shield = getattr(self, "night_shield", False)
         self.tk_shield_lost = getattr(self, "tk_shield_lost", False)
-        self.tk_com_burned = getattr(self, "tk_com_burned", False)   # 🎖 تیرِ تکاور سوخته؟   # افتادنِ شیلد دائمی است
+        self.tk_com_burned = getattr(self, "tk_com_burned", False)   # 🎖 تیرِ تکاور سوخته؟
+        self.tk_day_guns = getattr(self, "tk_day_guns", {}) or {}    # 🔫 گان‌های قابل‌شلیک در روزِ بعد {seat: نوع}
+        self.tk_gun_aiming = getattr(self, "tk_gun_aiming", None)    # 🔫 چه کسی «گان» گفته و در حالِ نشانه‌گیری است
+        # 🤝 کاپو: انتخابِ معتمد (دنگ) + گان‌ها
+        self.kp_trust_button_used = getattr(self, "kp_trust_button_used", False)
+        self.kp_deng_active = getattr(self, "kp_deng_active", False)
+        self.kp_deng_stage = getattr(self, "kp_deng_stage", 0)       # ۱=راندِ کامل، ۲+=حذفی
+        self.kp_deng_votes = getattr(self, "kp_deng_votes", {}) or {}
+        self.kp_deng_seq = getattr(self, "kp_deng_seq", 0)
+        self.kp_deng_unread = getattr(self, "kp_deng_unread", set()) or set()
+        self.kp_deng_cands = getattr(self, "kp_deng_cands", []) or []
+        self.kp_deng_round = getattr(self, "kp_deng_round", 1)
+        self.kp_deng_result = getattr(self, "kp_deng_result", None)  # معتمدِ منتخب، منتظرِ تأیید در «باز»
+        self.kp_deng_kb_mid = getattr(self, "kp_deng_kb_mid", None)
+        self.kp_need_manual = getattr(self, "kp_need_manual", False)
+        self.kp_trust = getattr(self, "kp_trust", None)              # معتمدِ تأییدشده
+        self.kp_gun1_type = getattr(self, "kp_gun1_type", None)      # "war"/"blank" — دومی برعکس
+        self.kp_gun_stage = getattr(self, "kp_gun_stage", 0)         # ۰=هنوز، ۱=گان اول، ۲=گان دوم
+        self.kp_gun_used_opt = getattr(self, "kp_gun_used_opt", None)  # "t1"/"t2"/"air"
+        self.kp_gun_targets = getattr(self, "kp_gun_targets", []) or []  # [شخص۱, شخص۲]
+        self.kp_gun_msg_id = getattr(self, "kp_gun_msg_id", None)    # پیامِ دکمه‌ی «اکت گان»
+        self.kp_gun_done = getattr(self, "kp_gun_done", False)
+        self.kp_pair_tmp = getattr(self, "kp_pair_tmp", []) or []   # افتادنِ شیلد دائمی است
         self.night_guard_seats = getattr(self, "night_guard_seats", []) or []
         self.night_guard_sel = getattr(self, "night_guard_sel", {}) or {}
         self.tk_guard_need = getattr(self, "tk_guard_need", 1)
@@ -760,10 +782,11 @@ def load_weekly_meta() -> dict:
             gist_data = response.json()
             content = gist_data["files"].get(WEEKLY_META_FILENAME, {}).get("content", "{}")
             return json.loads(content) or {}
-        return {}
+        print("❌ load_weekly_meta bad status:", response.status_code)
+        return None   # ⚠️ خطا ≠ «فایل خالی» — نباید ساعتِ هفتگی صفر شود
     except Exception as e:
         print("❌ load_weekly_meta error:", e)
-        return {}
+        return None   # ⚠️ خطا ≠ «فایل خالی»
 
 def save_weekly_meta(meta: dict):
     try:
@@ -1362,14 +1385,18 @@ async def handle_selected_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 async def broadcast_weekly_stats(bot, force: bool = False):
     """در صورت رسیدن موعد هفتگی، لیدربرد را به همهٔ گروه‌های فعال می‌فرستد."""
     meta = load_weekly_meta()
+    if meta is None:
+        # ⚠️ خواندنِ متا خطا داد → این دور را رد کن؛ ساعتِ هفتگی دست نمی‌خورد
+        return {"sent": 0, "reason": "meta_load_failed"}
     now = datetime.now().timestamp()
     last_sent = meta.get("last_sent", 0)
     snapshot = meta.get("snapshot", {})
 
     current = load_player_stats()
 
-    # اولین اجرا: فقط خط مبنا را ثبت کن و صبر کن تا هفتهٔ بعد
+    # اولین اجرا (فایل واقعاً خالی): فقط خط مبنا را ثبت کن و صبر کن تا هفتهٔ بعد
     if not last_sent and not force:
+        print("📊 weekly baseline set (first run)")
         save_weekly_meta({"last_sent": now, "snapshot": current})
         return
 
@@ -1733,6 +1760,12 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and getattr(g, "night_number", 0) == 0
             and not getattr(g, "nem_deng_button_used", False)):
         rows.append([InlineKeyboardButton("🗳 نماینده", callback_data="ctl_nemayande")])
+
+    # 🤝 دکمه‌ی یک‌بارمصرفِ معتمدِ کاپو — کاپو، بعد از معارفه، فقط روز ۱
+    if (_is_kapu_scenario(g) and getattr(g, "maarefe_done", False)
+            and getattr(g, "night_number", 0) == 0
+            and not getattr(g, "kp_trust_button_used", False)):
+        rows.append([InlineKeyboardButton("🤝 کاپو", callback_data="ctl_kapu")])
 
     # 🔒/🔓 یک دکمه‌ی toggle برای چت اتاق مافیا (فقط وقتی اتاق فعال است)
     if getattr(g, "mafia_room_id", None):
@@ -3596,6 +3629,13 @@ async def start_night(ctx, chat_id, g):
     g.nem_deng_active = False
     g.nem_deng_votes = {}
     g.nem_deng_unread = set()
+    # 🔫 گانِ روزِ تکاور فقط تا پایانِ همان روز اعتبار دارد
+    g.tk_day_guns = {}
+    g.tk_gun_aiming = None
+    # 🤝 شمارشِ نیمه‌کاره‌ی معتمدِ کاپو با شب بسته می‌شود (نتیجه/معتمد/گان‌ها می‌مانند)
+    g.kp_deng_active = False
+    g.kp_deng_votes = {}
+    g.kp_deng_unread = set()
     store.save()
 
     g.night_active = True
@@ -4287,6 +4327,23 @@ async def _do_room_open(ctx, chat_id, g):
                 await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
 
     # 🧑‍⚖️ بازپرسی دیگر به «باز» وابسته نیست — دکمه‌ی اختصاصیِ «بازپرسی» در پنل
+
+    # 🤝 کاپو: تأیید/انتخابِ معتمد هنگامِ «باز»
+    if (_is_kapu_scenario(g) and getattr(g, "assigned_roles", None)
+            and not getattr(g, "kp_trust", None)):
+        _kres = getattr(g, "kp_deng_result", None)
+        if _kres is not None and _kres in g.seats and _kres not in (g.striked or set()):
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ تأیید", callback_data="kpc_yes"),
+                InlineKeyboardButton("✏️ خودم انتخاب می‌کنم", callback_data="kpc_no"),
+            ]])
+            await _safe_pm(ctx, g.god_id,
+                           f"🤝 {_kres}. {g.seats[_kres][1]} معتمدِ کاپو شده — تأیید می‌کنی؟", kb)
+        elif getattr(g, "kp_need_manual", False):
+            rows = [[InlineKeyboardButton(f"{s} {g.seats[s][1]}", callback_data=f"kpc_p_{s}")]
+                    for s in _alive_seats(g)]
+            await _safe_pm(ctx, g.god_id, "🤝 معتمدِ کاپو را انتخاب کن:",
+                           InlineKeyboardMarkup(rows))
 
     # 🗡 نماینده — دنگ خیانت (فقط روزِ ۱: بعد از معارفه، قبل از اولین شب)
     if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
@@ -5173,6 +5230,17 @@ async def _do_room_close(ctx, chat_id, g):
             pass
     else:
         await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
+
+    # 🤝 کاپو: بعد از «بسته»، دکمه‌ی اکتِ گان می‌آید (یک‌بار) — گاد بعدِ دفاعِ دو نفر می‌زند
+    if (_is_kapu_scenario(g) and getattr(g, "kp_trust", None)
+            and getattr(g, "kp_gun1_type", None) and not getattr(g, "kp_gun_done", False)
+            and not getattr(g, "kp_gun_msg_id", None)):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔫 اکت گان", callback_data="kpg_act")]])
+        m = await ctx.bot.send_message(
+            chat_id, "🔫 وقتی دفاعِ دو نفر تمام شد، گاد دکمه‌ی «اکت گان» را بزند.",
+            reply_markup=kb)
+        g.kp_gun_msg_id = m.message_id
+        store.save()
 
 
 async def handle_night_callback(update, ctx):
@@ -6900,8 +6968,387 @@ async def _tk_finalize_gunman(ctx, chat_id, g, uid, mid):
     parts = [_lbl(t, typ) for t, typ in recips] or ["—"]
     await _close_pm(ctx, uid, mid, "🔫 توزیع تفنگ ثبت شد.")
     await _night_report(ctx, g, "🔫 تفنگدار → " + " | ".join(parts))
+    # 🔫 گان‌ها فردا (روزِ بعد) با نوشتنِ «گان» در گروه قابلِ شلیک‌اند
+    g.tk_day_guns = {t: typ for t, typ in recips}
+    g.tk_gun_aiming = None
     g.night_done.add("gunman")
     store.save()
+
+
+async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
+    """🔫 شلیکِ گانِ روز: مشقی = هیچ؛ جنگی = خروج (نگهبانِ شیلددار → فقط افتادنِ شیلد)."""
+    typ = (g.tk_day_guns or {}).pop(shooter, None)
+    g.tk_gun_aiming = None
+    store.save()
+    if typ is None or target not in g.seats:
+        return
+    tname = escape(g.seats[target][1], quote=False)
+    sname = escape(g.seats[shooter][1], quote=False)
+    if typ != "war":
+        await ctx.bot.send_message(
+            chat_id, f"💨 تیر مشقی بود — {target}. {tname} وصیت نکند.", parse_mode="HTML")
+        await _night_report(ctx, g, f"💨 گانِ روز: {shooter}. {sname} → {target}. {tname} (مشقی)")
+        return
+    rn = _seat_role_norm(g, target)
+    if rn == _R_WATCHMAN and not getattr(g, "tk_shield_lost", False):
+        # 🛡 نگهبانِ شیلددار: نمی‌میرد، شیلدش می‌افتد و در شب دیگر اکتی ندارد
+        g.tk_shield_lost = True
+        store.save()
+        await ctx.bot.send_message(
+            chat_id,
+            f"🛡 تیر جنگی به {target}. {tname} خورد اما شیلد داشت — "
+            f"شیلدش افتاد و در بازی می‌ماند.",
+            parse_mode="HTML")
+        await _night_report(ctx, g, f"🔫 گانِ روز: {shooter}. {sname} → {target}. {tname} "
+                                    f"(جنگی — شیلدِ نگهبان افتاد)")
+        return
+    g.striked.add(target)
+    store.save()
+    await ctx.bot.send_message(
+        chat_id, f"💥 تیر جنگی — {target}. {tname} وصیت کند.", parse_mode="HTML")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _night_report(ctx, g, f"🔫 گانِ روز: {shooter}. {sname} → {target}. {tname} "
+                                f"(جنگی — خارج شد، {_sc_side(g, target)})")
+
+
+# ═══════════════ 🤝 موتورِ معتمدِ کاپو (کاپو — روز ۱) ═══════════════
+def _kp_deng_end_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="kpe_end")]])
+
+
+def _kp_deng_roles(g):
+    alive = set(_alive_seats(g))
+    if int(getattr(g, "kp_deng_stage", 0) or 0) <= 1:
+        return alive, alive
+    cands = set(getattr(g, "kp_deng_cands", []) or []) & alive
+    return alive - cands, cands
+
+
+async def _kp_round_msg(ctx, chat_id, g, text):
+    old = getattr(g, "kp_deng_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    m = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=_kp_deng_end_kb())
+    g.kp_deng_kb_mid = m.message_id
+    store.save()
+
+
+async def _kp_deng_capture(ctx, g, msg, uid, text) -> bool:
+    vs = _seat_of_uid(g, uid)
+    if vs is None or vs in (g.striked or set()) or uid == g.god_id:
+        return False
+    voters, cands = _kp_deng_roles(g)
+    if vs not in voters:
+        return True
+    v = _deng_parse_strict(text, tuple(c for c in cands if c != vs))
+    if v is not None:
+        g.kp_deng_seq = int(getattr(g, "kp_deng_seq", 0) or 0) + 1
+        g.kp_deng_votes[uid] = (v, g.kp_deng_seq)
+        g.kp_deng_unread.discard(uid)
+        store.save()
+        if all(g.seats[s][0] in g.kp_deng_votes for s in voters):
+            await _kp_deng_count(ctx, msg.chat.id, g)
+        return True
+    if uid not in (g.kp_deng_votes or {}):
+        _first = uid not in (g.kp_deng_unread or set())
+        g.kp_deng_unread.add(uid)
+        store.save()
+        if _first:
+            try:
+                await msg.reply_text(f"⚠️ {vs}. {g.seats[vs][1]} دنگت خوانده نشد — "
+                                     f"فقط شماره‌ی یکی از صندلی‌ها را بنویس (به‌جز خودت).")
+            except Exception:
+                pass
+        return True
+    return False
+
+
+async def _kp_deng_count(ctx, chat_id, g):
+    """شمارشِ معتمدِ کاپو — یک برنده؛ هر تساوی‌ای → حذفی (متناوب از ۱ و ۱۰) تا یکتا شدن."""
+    if not getattr(g, "kp_deng_active", False):
+        return
+    voters_now, cands_now = _kp_deng_roles(g)
+    votes = {}
+    for u, (seat, seq) in dict(g.kp_deng_votes or {}).items():
+        vs = _seat_of_uid(g, u)
+        if vs is None or vs not in voters_now or seat == vs or seat not in cands_now:
+            continue
+        votes[u] = (seat, seq)
+    counts, tops = _nem_deng_tally(votes)
+    if not tops:
+        await ctx.bot.send_message(chat_id, "🗳 هنوز دنگِ معتبری ثبت نشده — رأی‌گیری ادامه دارد.")
+        return
+    g.kp_deng_votes = {}
+    g.kp_deng_unread = set()
+    store.save()
+    alive = set(_alive_seats(g))
+
+    if len(tops) == 1:
+        w = tops[0]
+        old = getattr(g, "kp_deng_kb_mid", None)
+        if old:
+            try:
+                await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+            except Exception:
+                pass
+        g.kp_deng_kb_mid = None
+        g.kp_deng_result = w
+        g.kp_deng_active = False
+        g.kp_deng_stage = 0
+        g.kp_deng_cands = []
+        store.save()
+        await ctx.bot.send_message(
+            chat_id, f"🤝 معتمدِ کاپو: <b>{w}. {escape(g.seats[w][1], quote=False)}</b> "
+                     f"({counts[w]} دنگ)", parse_mode="HTML")
+        await _night_report(ctx, g, f"🤝 معتمدِ کاپو: {w} — با «باز» ازت تأیید می‌گیرم.")
+        return
+
+    # تساوی (هر اندازه) → حذفی
+    if not (alive - set(tops)):
+        old = getattr(g, "kp_deng_kb_mid", None)
+        if old:
+            try:
+                await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+            except Exception:
+                pass
+        g.kp_deng_kb_mid = None
+        g.kp_deng_active = False
+        g.kp_deng_stage = 0
+        g.kp_deng_cands = []
+        g.kp_need_manual = True
+        store.save()
+        await ctx.bot.send_message(chat_id, "⚖️ حذفی رأی‌دهنده ندارد — تعیینِ معتمد با گاد.")
+        return
+    g.kp_deng_cands = list(tops)
+    g.kp_deng_stage = max(2, int(getattr(g, "kp_deng_stage", 1) or 1))
+    g.kp_deng_round = int(getattr(g, "kp_deng_round", 1) or 1) + 1
+    store.save()
+    frm = "۱" if (g.kp_deng_round % 2 == 1) else "۱۰"
+    lst = "، ".join(str(s) for s in tops)
+    await _kp_round_msg(
+        ctx, chat_id, g,
+        f"⚖️ تساوی بینِ: <b>{lst}</b>\n"
+        f"🗳 حذفی — از صندلی {frm}: فقط شماره‌ی یکی از همین‌ها را بنویسید "
+        f"(خودِ این افراد رأی نمی‌دهند).")
+
+
+async def _kp_ask_gun_type(ctx, g):
+    """🔫 از کاپو (یا اگر مرده، از گاد): گانِ اول چه باشد؟ دومی خودکار برعکس."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔴 جنگی", callback_data="kpg_war"),
+        InlineKeyboardButton("⚪ مشقی", callback_data="kpg_blank"),
+    ]])
+    kapo = _sc_find_role(g, _SC_SHOOTER_ROLES)
+    target_uid = g.seats[kapo][0] if kapo is not None else g.god_id
+    m = await _safe_pm(ctx, target_uid,
+                       "🔫 گانِ اول چه باشد؟ (گانِ دوم خودکار برعکسِ آن است)", kb)
+    if not m and target_uid != g.god_id:
+        await _safe_pm(ctx, g.god_id,
+                       "🔫 پیویِ کاپو بسته بود — گانِ اول چه باشد؟ (دومی برعکس)", kb)
+
+
+async def _kp_gun_prompt(ctx, chat_id, g):
+    """🔫 پرامپتِ اکتِ گان برای معتمد — گزینه‌های عمومی (شخص اول/دوم/هوایی)، روی همان پیامِ گروهی."""
+    t = getattr(g, "kp_trust", None)
+    if t is None or t not in g.seats:
+        return
+    stage = int(getattr(g, "kp_gun_stage", 0) or 0)
+    used = getattr(g, "kp_gun_used_opt", None)
+    lbl = "اول" if stage == 1 else "دوم"
+    rows = []
+    if used != "t1":
+        rows.append([InlineKeyboardButton("شخص اول", callback_data="kpf_t1")])
+    if used != "t2":
+        rows.append([InlineKeyboardButton("شخص دوم", callback_data="kpf_t2")])
+    if used != "air":
+        rows.append([InlineKeyboardButton("🌫 هوایی", callback_data="kpf_air")])
+    txt = (f"🤝 معتمدِ کاپو {t}. {escape(g.seats[t][1], quote=False)} — "
+           f"گانِ {lbl} را چگونه استفاده می‌کنی؟")
+    mid = getattr(g, "kp_gun_msg_id", None)
+    try:
+        await ctx.bot.edit_message_text(chat_id=chat_id, message_id=mid, text=txt,
+                                        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+    except Exception:
+        m = await ctx.bot.send_message(chat_id, txt, parse_mode="HTML",
+                                       reply_markup=InlineKeyboardMarkup(rows))
+        g.kp_gun_msg_id = m.message_id
+        store.save()
+
+
+async def _kp_gun_resolve(ctx, chat_id, g, opt):
+    """🔫 شلیک: فقط اعلامِ نتیجه بر اساسِ نوعِ گان — خط‌زدن و اعلامِ ساید با خودِ گاد."""
+    stage = int(getattr(g, "kp_gun_stage", 0) or 0)
+    g1 = getattr(g, "kp_gun1_type", None) or "blank"
+    typ = g1 if stage == 1 else ("blank" if g1 == "war" else "war")
+    lbl = "اول" if stage == 1 else "دوم"
+    hit_person = opt in ("t1", "t2")
+    person = "شخصِ اول" if opt == "t1" else ("شخصِ دوم" if opt == "t2" else None)
+
+    if not hit_person:
+        await ctx.bot.send_message(chat_id, f"🌫 گانِ {lbl} هوایی شلیک شد.", parse_mode="HTML")
+        await _night_report(ctx, g, f"🔫 گانِ {lbl} ({'جنگی' if typ == 'war' else 'مشقی'}) → هوایی")
+    elif typ != "war":
+        await ctx.bot.send_message(chat_id, f"💨 تفنگ مشقی بود — {person} وصیت نکند.",
+                                   parse_mode="HTML")
+        await _night_report(ctx, g, f"🔫 گانِ {lbl} (مشقی) → {person}")
+    else:
+        await ctx.bot.send_message(chat_id, f"💥 گان جنگی — {person} وصیت کند.",
+                                   parse_mode="HTML")
+        await _night_report(ctx, g, f"🔫 گانِ {lbl} (جنگی) → {person} — "
+                                    f"خودت خط بزن و ساید را اعلام کن.")
+
+    # پایان یا گانِ دوم
+    if stage == 1 and not (typ == "war" and hit_person):
+        g.kp_gun_stage = 2
+        g.kp_gun_used_opt = opt
+        store.save()
+        await _kp_gun_prompt(ctx, chat_id, g)
+        return
+    # جنگیِ خورده به شخص در گانِ اول، یا پایانِ گانِ دوم
+    g.kp_gun_done = True
+    store.save()
+    mid = getattr(g, "kp_gun_msg_id", None)
+    try:
+        await ctx.bot.edit_message_text(chat_id=chat_id, message_id=mid,
+                                        text="🔫 اکتِ گان تمام شد.", parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def handle_kapu_trust_callback(update, ctx):
+    """🤝 کاپو: پایانِ شمارش، تأیید/انتخابِ معتمد، نوعِ گان، انتخابِ جفتِ دفاع، اکتِ گان."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+
+    # پایانِ شمارش — دکمه‌ی گروهی، چت-محور
+    if data == "kpe_end":
+        chat_id = q.message.chat.id if q.message else None
+        g = store.games.get(chat_id) if chat_id is not None else None
+        if (g is None or g.god_id != uid or not _is_kapu_scenario(g)
+                or not getattr(g, "kp_deng_active", False)):
+            await safe_q_answer(q, "شمارشِ فعالی نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        await _kp_deng_count(ctx, chat_id, g)
+        return
+
+    # اکتِ گان — دکمه‌ی گروهی
+    if data == "kpg_act":
+        chat_id = q.message.chat.id if q.message else None
+        g = store.games.get(chat_id) if chat_id is not None else None
+        if g is None or not _is_kapu_scenario(g) or getattr(g, "kp_gun_done", False):
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        if uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if getattr(g, "kp_gun_stage", 0):
+            await safe_q_answer(q, "اکتِ گان در جریان است.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        # گزینه‌ها عمومی‌اند (شخص اول/دوم/هوایی) — نیازی به انتخابِ جفت نیست
+        g.kp_gun_stage = 1
+        g.kp_gun_used_opt = None
+        store.save()
+        await _kp_gun_prompt(ctx, chat_id, g)
+        return
+
+    # بقیه: پیویِ گاد/کاپو/معتمد → بازیِ کاپوی فعالِ مرتبط
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if game.phase in ("idle", "ended") or not _is_kapu_scenario(game):
+            continue
+        if data.startswith("kpc_") and game.god_id == uid:
+            g, chat_id = game, cid
+            break
+        if data.startswith("kpg_"):
+            kapo = _sc_find_role(game, _SC_SHOOTER_ROLES)
+            if (game.god_id == uid or (kapo is not None and game.seats[kapo][0] == uid)) \
+                    and getattr(game, "kp_trust", None) and not getattr(game, "kp_gun1_type", None):
+                g, chat_id = game, cid
+                break
+        if data.startswith("kpf_"):
+            t = getattr(game, "kp_trust", None)
+            if (t is not None and t in game.seats and game.seats[t][0] == uid
+                    and getattr(game, "kp_gun_stage", 0)):
+                g, chat_id = game, cid
+                break
+    if g is None:
+        await safe_q_answer(q, "درخواستِ فعالی یافت نشد.", show_alert=True)
+        return
+    mid = q.message.message_id if q.message else None
+
+    if data == "kpc_yes":
+        res = getattr(g, "kp_deng_result", None)
+        if not res or res not in g.seats or res in (g.striked or set()) or getattr(g, "kp_trust", None):
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        g.kp_trust = res
+        g.kp_deng_result = None
+        store.save()
+        await _close_pm(ctx, uid, mid, f"✅ معتمدِ کاپو: {res}. {g.seats[res][1]}")
+        await _kp_ask_gun_type(ctx, g)
+        return
+
+    if data == "kpc_no":
+        if getattr(g, "kp_trust", None):
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        g.kp_deng_result = None
+        g.kp_need_manual = True
+        store.save()
+        rows = [[InlineKeyboardButton(f"{s} {g.seats[s][1]}", callback_data=f"kpc_p_{s}")]
+                for s in _alive_seats(g)]
+        await _edit_pm(ctx, uid, mid, "🤝 معتمدِ کاپو را انتخاب کن:", InlineKeyboardMarkup(rows))
+        return
+
+    if data.startswith("kpc_p_"):
+        if getattr(g, "kp_trust", None):
+            await safe_q_answer(q, "قبلاً ثبت شده.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        s = int(data.rsplit("_", 1)[1])
+        if s not in g.seats or s in (g.striked or set()):
+            return
+        g.kp_trust = s
+        g.kp_need_manual = False
+        store.save()
+        await _close_pm(ctx, uid, mid, f"✅ معتمدِ کاپو: {s}. {g.seats[s][1]}")
+        await _kp_ask_gun_type(ctx, g)
+        return
+
+    if data in ("kpg_war", "kpg_blank"):
+        if getattr(g, "kp_gun1_type", None):
+            await safe_q_answer(q, "قبلاً ثبت شده.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        g.kp_gun1_type = "war" if data == "kpg_war" else "blank"
+        store.save()
+        g2 = "مشقی" if g.kp_gun1_type == "war" else "جنگی"
+        g1 = "جنگی" if g.kp_gun1_type == "war" else "مشقی"
+        await _close_pm(ctx, uid, mid, f"🔫 گان اول: {g1} — گان دوم: {g2}")
+        await _night_report(ctx, g, f"🔫 گان‌های معتمد: اول {g1}، دوم {g2} — "
+                                    f"بعد از «بسته» دکمه‌ی اکتِ گان می‌آید.")
+        return
+
+    if data.startswith("kpf_"):
+        opt = data.rsplit("_", 1)[1]   # t1 / t2 / air
+        if opt == getattr(g, "kp_gun_used_opt", None) or opt not in ("t1", "t2", "air"):
+            await safe_q_answer(q, "گزینه معتبر نیست.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        await _kp_gun_resolve(ctx, chat_id, g, opt)
+        return
+# ═══════════════ پایانِ موتورِ کاپو ═══════════════
 
 
 async def handle_takavar_callback(update, ctx):
@@ -8935,6 +9382,16 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_buy_link_callback(update, ctx)
         return
 
+    # 🤝 کاپو: شمارش/تأیید/گان
+    if _q and _q.data and _q.data.startswith(("kpe_", "kpc_", "kpg_", "kpf_")):
+        await handle_kapu_trust_callback(update, ctx)
+        return
+
+    # ⏱ دکمه‌های تایمر
+    if _q and _q.data and _q.data.startswith("tmr_"):
+        await handle_timer_callback(update, ctx)
+        return
+
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_")):
@@ -9357,9 +9814,36 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
-                "ctl_bazparsi", "ctl_nemayande"):
+                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if data == "ctl_kapu":
+            if getattr(g, "kp_trust_button_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if not (_is_kapu_scenario(g) and getattr(g, "maarefe_done", False)
+                    and getattr(g, "night_number", 0) == 0):
+                await safe_q_answer(q, "فقط روزِ ۱ سناریوی کاپو.", show_alert=True)
+                return
+            g.kp_trust_button_used = True
+            g.kp_deng_active = True
+            g.kp_deng_stage = 1
+            g.kp_deng_round = 1
+            g.kp_deng_votes = {}
+            g.kp_deng_seq = 0
+            g.kp_deng_unread = set()
+            g.kp_deng_cands = []
+            g.kp_deng_result = None
+            store.save()
+            await _kp_round_msg(
+                ctx, chat, g,
+                "🤝 <b>انتخابِ معتمدِ کاپو</b> — از صندلی ۱ به‌ترتیب: "
+                "شماره‌ی صندلیِ موردِ نظرت را بنویس (به‌جز خودت).")
+            try:
+                await publish_seating(ctx, chat, g, mode=CTRL)
+            except Exception:
+                pass
             return
         if data == "ctl_nemayande":
             if getattr(g, "nem_deng_button_used", False):
@@ -10560,6 +11044,8 @@ async def shuffle_and_assign(
     g.nem_awaiting_ding = False
     g.tk_shield_lost = False
     g.tk_com_burned = False
+    g.tk_day_guns = {}
+    g.tk_gun_aiming = None
     g.zereh_fallen = False
     g.baz_button_used = False
     g.baz_day_choice = None
@@ -10578,6 +11064,25 @@ async def shuffle_and_assign(
     g.nem_deng_cands = []
     g.nem_deng_result = None
     g.nem_deng_kb_mid = None
+    g.kp_trust_button_used = False
+    g.kp_deng_active = False
+    g.kp_deng_stage = 0
+    g.kp_deng_votes = {}
+    g.kp_deng_seq = 0
+    g.kp_deng_unread = set()
+    g.kp_deng_cands = []
+    g.kp_deng_round = 1
+    g.kp_deng_result = None
+    g.kp_deng_kb_mid = None
+    g.kp_need_manual = False
+    g.kp_trust = None
+    g.kp_gun1_type = None
+    g.kp_gun_stage = 0
+    g.kp_gun_used_opt = None
+    g.kp_gun_targets = []
+    g.kp_gun_msg_id = None
+    g.kp_gun_done = False
+    g.kp_pair_tmp = []
 
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
@@ -10761,6 +11266,33 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🗳 شمارشِ دنگِ نمایندگی
     if getattr(g, "nem_deng_active", False):
         if await _nem_deng_capture(ctx, g, msg, uid, text):
+            return
+
+    # 🔫 گانِ روزِ تکاور: «گان» یا 🔫 → نشانه‌گیری؛ بعد یک عدد (به هر شکل) → شلیک
+    if (_is_takavar_scenario(g) and not getattr(g, "night_active", False)
+            and (getattr(g, "tk_day_guns", {}) or {})):
+        _gseat = _seat_of_uid(g, uid)
+        if (_gseat is not None and _gseat in g.tk_day_guns
+                and _gseat not in (g.striked or set())):
+            if _nz(text) == _nz("گان") or "🔫" in text:
+                g.tk_gun_aiming = _gseat
+                store.save()
+                try:
+                    await msg.reply_text(f"🔫 {_gseat}. {g.seats[_gseat][1]} — "
+                                         f"چه شخصی را شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                except Exception:
+                    pass
+                return
+            if getattr(g, "tk_gun_aiming", None) == _gseat:
+                _tv = _deng_parse_strict(
+                    text, tuple(x for x in _alive_seats(g) if x != _gseat))
+                if _tv is not None:
+                    await _tk_day_gun_fire(ctx, msg.chat.id, g, _gseat, _tv)
+                    return
+
+    # 🤝 شمارشِ دنگِ معتمدِ کاپو
+    if getattr(g, "kp_deng_active", False):
+        if await _kp_deng_capture(ctx, g, msg, uid, text):
             return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
@@ -11219,14 +11751,52 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(run_timer(ctx, chat, seconds))
 
 
+def _timer_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("۱۰", callback_data="tmr_10"),
+         InlineKeyboardButton("۳۰", callback_data="tmr_30"),
+         InlineKeyboardButton("۴۵", callback_data="tmr_45")],
+        [InlineKeyboardButton("۶۰", callback_data="tmr_60"),
+         InlineKeyboardButton("۷۵", callback_data="tmr_75"),
+         InlineKeyboardButton("۹۰", callback_data="tmr_90")],
+    ])
+
+
 async def run_timer(ctx, chat: int, seconds: int):
     try:
         await asyncio.sleep(seconds)
-        await ctx.bot.send_message(chat, "⏰ تایم تمام شد")
+        # ⏰ پایانِ تایم + دکمه‌های تایمرِ بعدی (گاد دیگر تایپ نمی‌کند)
+        await ctx.bot.send_message(chat, "⏰ تایم تمام شد", reply_markup=_timer_kb())
 #       await play_alarm_sound(ctx, chat)
 
     except Exception as e:
         print("⚠️ run_timer error:", e)
+
+
+async def handle_timer_callback(update, ctx):
+    """⏱ دکمه‌های ریزِ تایمر زیرِ «تایم تمام شد» — فقط گاد."""
+    q = update.callback_query
+    uid = q.from_user.id
+    chat = q.message.chat.id if q.message else None
+    if chat is None:
+        return
+    g = gs(chat)
+    if uid != g.god_id:
+        await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+        return
+    try:
+        seconds = int(q.data.rsplit("_", 1)[1])
+    except Exception:
+        return
+    await safe_q_answer(q)
+    # دکمه‌ها از پیامِ فعلی حذف شوند (بعدِ اتمامِ تایمرِ جدید دوباره می‌آیند)
+    try:
+        await ctx.bot.edit_message_reply_markup(chat_id=chat, message_id=q.message.message_id,
+                                                reply_markup=None)
+    except Exception:
+        pass
+    await ctx.bot.send_message(chat, f"⏳ تایمر {seconds} ثانیه‌ای شروع شد...")
+    asyncio.create_task(run_timer(ctx, chat, seconds))
 
 
 async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -11917,6 +12487,33 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if await _nem_deng_capture(ctx, g, msg, uid, text):
             return
 
+    # 🔫 گانِ روزِ تکاور: «گان» یا 🔫 → نشانه‌گیری؛ بعد یک عدد (به هر شکل) → شلیک
+    if (_is_takavar_scenario(g) and not getattr(g, "night_active", False)
+            and (getattr(g, "tk_day_guns", {}) or {})):
+        _gseat = _seat_of_uid(g, uid)
+        if (_gseat is not None and _gseat in g.tk_day_guns
+                and _gseat not in (g.striked or set())):
+            if _nz(text) == _nz("گان") or "🔫" in text:
+                g.tk_gun_aiming = _gseat
+                store.save()
+                try:
+                    await msg.reply_text(f"🔫 {_gseat}. {g.seats[_gseat][1]} — "
+                                         f"چه شخصی را شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                except Exception:
+                    pass
+                return
+            if getattr(g, "tk_gun_aiming", None) == _gseat:
+                _tv = _deng_parse_strict(
+                    text, tuple(x for x in _alive_seats(g) if x != _gseat))
+                if _tv is not None:
+                    await _tk_day_gun_fire(ctx, msg.chat.id, g, _gseat, _tv)
+                    return
+
+    # 🤝 شمارشِ دنگِ معتمدِ کاپو
+    if getattr(g, "kp_deng_active", False):
+        if await _kp_deng_capture(ctx, g, msg, uid, text):
+            return
+
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
         if await _is_god_or_admin(ctx, chat_id, uid, g):
@@ -12293,7 +12890,7 @@ async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     sent = 0
     failed = 0
-    pin = bool(ctx.args) and ctx.args[0].lower() in ("pin", "p", "سنجاق")
+    pin = True   # 📌 همیشه پین شود
     for chat_id in list(store.active_groups):
         try:
             msg = await ctx.bot.copy_message(
