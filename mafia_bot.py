@@ -1420,8 +1420,8 @@ async def broadcast_weekly_stats(bot, force: bool = False):
             except Exception as e:
                 print(f"⚠️ weekly send failed for {chat_id}:", e)
 
-    # 📋 دعوت ۱۰ نفر برتر هفته به لیست منتخب (فقط در اجرای خودکار)
-    if not force and text:
+    # 📋 دعوت ۱۰ نفر برتر هفته به لیست منتخب (دستی و خودکار — هر دو)
+    if text:
         try:
             delta = _weekly_delta(current, snapshot)
             rows = _rank_block(delta, "wins", "games", 10)
@@ -1431,9 +1431,8 @@ async def broadcast_weekly_stats(bot, force: bool = False):
         except Exception as e:
             print("⚠️ launch_selected_round error:", e)
 
-    # در اجرای دستی (force) اسنپ‌شات هفته را صفر نکن تا تست بعدی هم کار کند
-    if not force:
-        save_weekly_meta({"last_sent": now, "snapshot": current})
+    # ⏱ /weekly دستی هم مثل خودکار: ساعتِ هفته از همین لحظه ریست + اسنپ‌شاتِ تازه
+    save_weekly_meta({"last_sent": now, "snapshot": current})
 
     if not text:
         reason = "no_data" if not current else "no_activity"
