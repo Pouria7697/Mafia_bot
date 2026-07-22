@@ -12437,7 +12437,8 @@ async def do_maarefe(ctx, chat_id, g):
     mafia_seats = [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
     for s in mafia_seats:
         uid = g.seats[s][0]
-        mates = [f"{m}. {g.seats[m][1]}" for m in mafia_seats if m != s]
+        mates = [f"{m}. {g.seats[m][1]} — {g.assigned_roles.get(m, '—')}"
+                 for m in mafia_seats if m != s]
         text = "🎭 شب معارفه\n\n😈 یاران مافیای شما:\n" + ("\n".join(mates) if mates else "—")
         try:
             await ctx.bot.send_message(uid, text)
