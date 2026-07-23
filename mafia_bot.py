@@ -15,7 +15,8 @@ from telegram.ext import filters
 from telegram.error import RetryAfter, TimedOut, BadRequest
 group_filter = filters.ChatType.GROUPS
 from datetime import datetime, timezone, timedelta  
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Message, ChatPermissions
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply,
+                      Message, ChatPermissions, ReplyKeyboardMarkup)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
@@ -3812,6 +3813,11 @@ async def _night_open_mafia_decision(ctx, chat_id, g):
     sm  = _find_seat_by_role(g, _R_SIMPLE_MAFIA)
     decider = gf or neg or sm
     if not decider:
+        # 🤝 اگر مافیای اصلی نمانده، مذاکره‌شده‌ها (شهروندِ جذب‌شده) صاحبِ شات می‌شوند
+        for _s in sorted(_mafia_seats(g, alive_only=True)):
+            decider = _s
+            break
+    if not decider:
         await _night_report(ctx, g, "⚠️ هیچ مافیای زنده‌ای برای اکت شب نیست.")
         return
     g.night_decider_seat = decider
@@ -3918,10 +3924,15 @@ async def end_night(ctx, chat_id, g):
     g.night_active = False
     g.night_stage = None
     for u, mid in list((g.night_pm_msgs or {}).items()):
+        # ⏰ پرامپتِ جواب‌نداده: متن هم عوض شود که مثل «پرامپتِ بی‌دکمه» به نظر نرسد
         try:
-            await ctx.bot.edit_message_reply_markup(chat_id=u, message_id=mid, reply_markup=None)
+            await ctx.bot.edit_message_text(chat_id=u, message_id=mid,
+                                            text="⏰ شب تمام شد — فرصتِ این اکت گذشت.")
         except Exception:
-            pass
+            try:
+                await ctx.bot.edit_message_reply_markup(chat_id=u, message_id=mid, reply_markup=None)
+            except Exception:
+                pass
     g.night_pm_msgs = {}
     g.night_sel = {}
     g.night_doc_sel = {}
@@ -5621,10 +5632,15 @@ async def _bzp_check_open_rest(ctx, chat_id, g):
     if det:
         duid, _dn = g.seats[det]
         targets = [s for s in _alive_seats(g) if s != det]
+        if not targets:
+            await _night_report(ctx, g, "⚠️ کاراگاه هدفی برای استعلام ندارد (لیست خالی)!")
         m = await _safe_pm(ctx, duid, "🔎 استعلام چه کسی را می‌گیری؟",
                            _kb_night_seats(targets, g, "bzp_det_"))
         if m:
             g.night_pm_msgs[duid] = m.message_id
+        else:
+            await _night_report(ctx, g, "⚠️ پرامپتِ کاراگاه ارسال نشد (پیوی بسته یا خطای تلگرام) — "
+                                        "دوباره «شب» لازم نیست؛ اگر تکرار شد خبر بده.")
 
     # 💉 پزشک — در شب یاکوزایی/ناتویی حق سیو ندارد
     if not g.night_doctor_blocked:
@@ -7756,6 +7772,11 @@ async def _kp_open_don(ctx, chat_id, g):
     witch = _find_seat_by_role(g, _R_WITCH)
     ex = _find_seat_by_role(g, _R_EXECUTIONER)
     decider = don or witch or ex
+    if not decider:
+        # 🥷 اگر مافیای اصلی نمانده، یاکوزایی/جذب‌شده صاحبِ شات می‌شود
+        for _s in sorted(_mafia_seats(g, alive_only=True)):
+            decider = _s
+            break
     if not decider:
         g.night_done.add("mafia")
         store.save()
@@ -11992,9 +12013,11 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "سلام! 🎭 به بات مافیا خوش آمدید.\n\n"
             "این بات برای اجرای بازی مافیا در گروه‌ها ساخته شده و اکت‌های شبانهٔ نقش شما "
             "در همین پیوی انجام می‌شود.\n\n"
-            "• «آمار من» را بفرستید تا آمار بازی‌هایتان را ببینید.\n"
-            "• «آمار کل» را بفرستید تا جدول برترین‌ها را ببینید.\n\n"
-            "موفق باشید! 🌙"
+            "از دکمه‌های پایین استفاده کنید 👇\n\n"
+            "موفق باشید! 🌙",
+            reply_markup=ReplyKeyboardMarkup(
+                [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]],
+                resize_keyboard=True, is_persistent=True)
         )
     except Exception:
         pass
@@ -12007,25 +12030,34 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = msg.text.strip()
     uid = msg.from_user.id
-    if text == "آمار من":
+    # دکمه‌های کیبورد ایموجی دارند («📊 آمار من») → تطبیقِ پسوندی
+    if text.endswith("آمار من"):
         stats = load_player_stats()
         p = stats.get(str(uid))
         if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_player_stats(p), parse_mode="HTML")
-    elif text == "آمار کل":
+    elif text.endswith("آمار کل"):
         board = build_alltime_leaderboard_text(load_player_stats())
         if not board:
             await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
         else:
             await msg.reply_text(board, parse_mode="HTML")
-    elif text == "بازی من":
+    elif text.endswith("بازی من"):
         rows = load_game_history().get(str(uid), [])
         if not rows:
             await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_game_history(rows), parse_mode="HTML")
+    elif text.endswith("آمار هفتگی"):
+        meta = load_weekly_meta()
+        snapshot = meta.get("snapshot", {}) if isinstance(meta, dict) else {}
+        board = build_weekly_leaderboard_text(load_player_stats(), snapshot, require_weekly=False)
+        if not board:
+            await msg.reply_text("📭 هنوز آماری برای این هفته ثبت نشده است.")
+        else:
+            await msg.reply_text(board, parse_mode="HTML")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -13465,7 +13497,8 @@ async def main():
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & filters.Regex(r"^\s*(آمار من|آمار کل|بازی من)\s*$"),
+            filters.ChatType.PRIVATE & filters.TEXT
+            & filters.Regex(r"^\s*(?:\S+\s+)?(آمار من|آمار کل|آمار هفتگی|بازی من)\s*$"),
             handle_stats_pm
         )
     )
