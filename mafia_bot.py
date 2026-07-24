@@ -354,6 +354,7 @@ class GameState:
         self.poison_phase = getattr(self, "poison_phase", False)
         self.antidote_votes = getattr(self, "antidote_votes", {}) or {}
         self.antidote_expected = getattr(self, "antidote_expected", []) or []
+        self.antidote_done = getattr(self, "antidote_done", False)
         self.heir_seat = getattr(self, "heir_seat", None)
         self.heir_target = getattr(self, "heir_target", None)
         self.heir_inherited = getattr(self, "heir_inherited", False)
@@ -3150,6 +3151,10 @@ async def announce_winner(ctx, update, g: GameState):
             marker = "◽️"  # شهروند
             role_display = role
 
+        # ⚱️ وارث در لیستِ نهایی با نامِ خودش نمایش داده می‌شود (نه نقشِ ارث‌برده)
+        if _is_kapu_scenario(g) and getattr(g, "heir_seat", None) == seat:
+            role_display = "وارث"
+
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
 
         lines.append(
@@ -3409,19 +3414,14 @@ def _detective_positive(g, seat) -> bool:
     rn = _seat_role_norm(g, seat)
     if rn in (_R_SIMPLE_MAFIA, _R_NEGOTIATOR):
         return True
+    # فقط مذاکره‌ی «نشسته» (موفق) — هدفِ مذاکره‌ی ناموفق شهروند مانده و منفی است
     if seat in (g.negotiated_seats or set()):
-        return True
-    if g.night_is_negotiation and seat == g.night_negotiation_target:
         return True
     return False  # گادفادر برای کاراگاه منفی است
 
 def _reporter_positive(g, seat) -> bool:
-    # خبرنگار فقط روی فرد مذاکره‌شده مثبت می‌گیرد
-    if seat in (g.negotiated_seats or set()):
-        return True
-    if g.night_is_negotiation and seat == g.night_negotiation_target:
-        return True
-    return False
+    # خبرنگار فقط روی فردِ مذاکره‌شده‌ی «موفق» مثبت می‌گیرد؛ بقیه (حتی مافیا) منفی
+    return seat in (g.negotiated_seats or set())
 
 
 def _kb_night_seats(seats, g, prefix, selected=None, confirm_cb=None):
@@ -3691,6 +3691,7 @@ async def start_night(ctx, chat_id, g):
     g.poison_phase = False
     g.antidote_votes = {}
     g.antidote_expected = []
+    g.antidote_done = False
     # per-night گیمر (بمبِ شبِ قبل تا الان در روز تعیین‌تکلیف شده)
     g.gm_bomb_seat = None
     g.gm_bomb_fuses = {}
@@ -4708,6 +4709,12 @@ async def _burn_advance(ctx, chat_id, g):
             await _tk_check_open_mafia(ctx, chat_id, g)
             await _tk_check_open_citizens(ctx, chat_id, g)
             await _tk_check_open_gunman(ctx, chat_id, g)
+        elif _is_kapu_scenario(g):
+            # 🧪 اگر رأی‌گیریِ پادزهر فقط منتظرِ سوخته/کیک‌شده بود → جمع‌بندی و ادامه‌ی شب
+            if (getattr(g, "poison_phase", False)
+                    and not getattr(g, "antidote_done", False)
+                    and not _kp_antidote_pending(g)):
+                await _kp_after_vote(ctx, chat_id, g)
     except Exception as e:
         print("⚠️ burn advance err:", e)
 
@@ -7170,19 +7177,43 @@ async def _kp_ask_gun_type(ctx, g):
                        "🔫 پیویِ کاپو بسته بود — گانِ اول چه باشد؟ (دومی برعکس)", kb)
 
 
+async def _kp_pair_kb_update(ctx, chat_id, g):
+    """👥 روی پیامِ گان: انتخابِ دو نفرِ دفاع توسط گاد (با ✅ و تأیید)."""
+    tmp = getattr(g, "kp_pair_tmp", []) or []
+    rows = []
+    for s in _alive_seats(g):
+        mark = "✅ " if s in tmp else ""
+        rows.append([InlineKeyboardButton(f"{mark}{s} {g.seats[s][1]}", callback_data=f"kpd_{s}")])
+    rows.append([InlineKeyboardButton("✅ تأیید (۲ نفر)", callback_data="kpd_ok")])
+    txt = "👥 چه کسانی در دفاع هستند؟ دو نفر را انتخاب و تأیید کن (فقط گاد)."
+    mid = getattr(g, "kp_gun_msg_id", None)
+    try:
+        await ctx.bot.edit_message_text(chat_id=chat_id, message_id=mid, text=txt,
+                                        reply_markup=InlineKeyboardMarkup(rows))
+    except Exception:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid,
+                                                    reply_markup=InlineKeyboardMarkup(rows))
+        except Exception:
+            m = await ctx.bot.send_message(chat_id, txt, reply_markup=InlineKeyboardMarkup(rows))
+            g.kp_gun_msg_id = m.message_id
+            store.save()
+
+
 async def _kp_gun_prompt(ctx, chat_id, g):
-    """🔫 پرامپتِ اکتِ گان برای معتمد — گزینه‌های عمومی (شخص اول/دوم/هوایی)، روی همان پیامِ گروهی."""
+    """🔫 پرامپتِ اکتِ گان برای معتمد — با نامِ واقعیِ دو نفرِ انتخابیِ گاد."""
     t = getattr(g, "kp_trust", None)
-    if t is None or t not in g.seats:
+    pair = list(getattr(g, "kp_gun_targets", []) or [])
+    if t is None or t not in g.seats or len(pair) != 2:
         return
     stage = int(getattr(g, "kp_gun_stage", 0) or 0)
     used = getattr(g, "kp_gun_used_opt", None)
     lbl = "اول" if stage == 1 else "دوم"
     rows = []
-    if used != "t1":
-        rows.append([InlineKeyboardButton("شخص اول", callback_data="kpf_t1")])
-    if used != "t2":
-        rows.append([InlineKeyboardButton("شخص دوم", callback_data="kpf_t2")])
+    if used != "t1" and pair[0] in g.seats:
+        rows.append([InlineKeyboardButton(f"{pair[0]}. {g.seats[pair[0]][1]}", callback_data="kpf_t1")])
+    if used != "t2" and pair[1] in g.seats:
+        rows.append([InlineKeyboardButton(f"{pair[1]}. {g.seats[pair[1]][1]}", callback_data="kpf_t2")])
     if used != "air":
         rows.append([InlineKeyboardButton("🌫 هوایی", callback_data="kpf_air")])
     txt = (f"🤝 معتمدِ کاپو {t}. {escape(g.seats[t][1], quote=False)} — "
@@ -7199,26 +7230,47 @@ async def _kp_gun_prompt(ctx, chat_id, g):
 
 
 async def _kp_gun_resolve(ctx, chat_id, g, opt):
-    """🔫 شلیک: فقط اعلامِ نتیجه بر اساسِ نوعِ گان — خط‌زدن و اعلامِ ساید با خودِ گاد."""
+    """🔫 شلیک: مشقی=هیچ؛ جنگی به شخص=خطِ خودکار + ساید بعد از ۵۰ ثانیه؛ هوایی=هدر."""
     stage = int(getattr(g, "kp_gun_stage", 0) or 0)
     g1 = getattr(g, "kp_gun1_type", None) or "blank"
     typ = g1 if stage == 1 else ("blank" if g1 == "war" else "war")
     lbl = "اول" if stage == 1 else "دوم"
-    hit_person = opt in ("t1", "t2")
-    person = "شخصِ اول" if opt == "t1" else ("شخصِ دوم" if opt == "t2" else None)
+    pair = list(getattr(g, "kp_gun_targets", []) or [])
+    hit_person = opt in ("t1", "t2") and len(pair) == 2
+    target = pair[0] if opt == "t1" else (pair[1] if opt == "t2" else None)
 
     if not hit_person:
         await ctx.bot.send_message(chat_id, f"🌫 گانِ {lbl} هوایی شلیک شد.", parse_mode="HTML")
         await _night_report(ctx, g, f"🔫 گانِ {lbl} ({'جنگی' if typ == 'war' else 'مشقی'}) → هوایی")
     elif typ != "war":
-        await ctx.bot.send_message(chat_id, f"💨 تفنگ مشقی بود — {person} وصیت نکند.",
+        _tn = escape(g.seats[target][1], quote=False)
+        await ctx.bot.send_message(chat_id, f"💨 تفنگ مشقی بود — {target}. {_tn} وصیت نکند.",
                                    parse_mode="HTML")
-        await _night_report(ctx, g, f"🔫 گانِ {lbl} (مشقی) → {person}")
+        await _night_report(ctx, g, f"🔫 گانِ {lbl} (مشقی) → {target}. {_tn}")
     else:
-        await ctx.bot.send_message(chat_id, f"💥 گان جنگی — {person} وصیت کند.",
+        _tn = escape(g.seats[target][1], quote=False)
+        g.striked.add(target)
+        store.save()
+        await ctx.bot.send_message(chat_id, f"💥 گان جنگی — {target}. {_tn} وصیت کند.",
                                    parse_mode="HTML")
-        await _night_report(ctx, g, f"🔫 گانِ {lbl} (جنگی) → {person} — "
-                                    f"خودت خط بزن و ساید را اعلام کن.")
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)
+        except Exception:
+            pass
+        await _night_report(ctx, g, f"🔫 گانِ {lbl} (جنگی) → {target}. {_tn} خارج شد "
+                                    f"({_sc_side(g, target)})")
+        _lside = _sc_side(g, target)
+
+        async def _kp_side_later():
+            try:
+                await asyncio.sleep(50)
+                if g.phase in ("idle", "ended"):
+                    return
+                await ctx.bot.send_message(chat_id, f"ساید {target}. {_tn}: <b>{_lside}</b>",
+                                           parse_mode="HTML")
+            except Exception as e:
+                print("⚠️ kp side err:", e)
+        asyncio.create_task(_kp_side_later())
 
     # پایان یا گانِ دوم
     if stage == 1 and not (typ == "war" and hit_person):
@@ -7270,11 +7322,46 @@ async def handle_kapu_trust_callback(update, ctx):
             await safe_q_answer(q, "اکتِ گان در جریان است.", show_alert=True)
             return
         await safe_q_answer(q)
-        # گزینه‌ها عمومی‌اند (شخص اول/دوم/هوایی) — نیازی به انتخابِ جفت نیست
-        g.kp_gun_stage = 1
+        # 👥 دکمه‌ها تبدیل می‌شوند به انتخابِ دو نفرِ دفاع (وسطِ گروه، فقط گاد)
+        g.kp_pair_tmp = []
         g.kp_gun_used_opt = None
         store.save()
-        await _kp_gun_prompt(ctx, chat_id, g)
+        await _kp_pair_kb_update(ctx, chat_id, g)
+        return
+
+    # 👥 انتخاب/تأییدِ دو نفرِ دفاع — دکمه‌های گروهی، فقط گاد
+    if data.startswith("kpd_"):
+        chat_id = q.message.chat.id if q.message else None
+        g = store.games.get(chat_id) if chat_id is not None else None
+        if (g is None or not _is_kapu_scenario(g) or getattr(g, "kp_gun_done", False)
+                or getattr(g, "kp_gun_stage", 0)):
+            await safe_q_answer(q, "درخواست معتبر نیست.", show_alert=True)
+            return
+        if uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if data == "kpd_ok":
+            if len(g.kp_pair_tmp or []) != 2:
+                await safe_q_answer(q, "دقیقاً ۲ نفر را انتخاب کن.", show_alert=True)
+                return
+            await safe_q_answer(q)
+            g.kp_gun_targets = list(g.kp_pair_tmp)
+            g.kp_pair_tmp = []
+            g.kp_gun_stage = 1
+            store.save()
+            await _kp_gun_prompt(ctx, chat_id, g)
+            return
+        await safe_q_answer(q)
+        s = int(data.rsplit("_", 1)[1])
+        if s in g.seats and s not in (g.striked or set()):
+            tmp = list(g.kp_pair_tmp or [])
+            if s in tmp:
+                tmp.remove(s)
+            elif len(tmp) < 2:
+                tmp.append(s)
+            g.kp_pair_tmp = tmp
+            store.save()
+            await _kp_pair_kb_update(ctx, chat_id, g)
         return
 
     # بقیه: پیویِ گاد/کاپو/معتمد → بازیِ کاپوی فعالِ مرتبط
@@ -7890,7 +7977,8 @@ async def handle_kapu_callback(update, ctx):
         g.antidote_votes[uid] = (data == "kp_anti_yes")
         await _close_pm(ctx, uid, mid, "✅ رأی شما ثبت شد.")
         store.save()
-        if len(g.antidote_votes) >= len(g.antidote_expected or []):
+        # ✅ کیک‌شده/سوخته‌ها از انتظار خارج‌اند — فقط زنده‌های رأی‌نداده ملاک‌اند
+        if not _kp_antidote_pending(g):
             await _kp_after_vote(ctx, chat_id, g)
         return
 
@@ -8256,6 +8344,19 @@ async def _kp_broadcast_jalad(ctx, g):
             pass
 
 
+def _kp_antidote_pending(g):
+    """رأی‌ندادگانِ «هنوز در بازی» — کیک‌شده/سوخته/خط‌خورده منتظر نمی‌مانیم."""
+    pending = []
+    for u in (g.antidote_expected or []):
+        if u in (g.antidote_votes or {}):
+            continue
+        s = _seat_of_uid(g, u)
+        if s is None or s in (g.striked or set()) or s in (g.night_burned or set()):
+            continue
+        pending.append(u)
+    return pending
+
+
 def _kp_antidote_holder(g):
     """دارندهٔ پادزهر: دن‌مافیا اگر زنده باشد، وگرنه جادوگر."""
     don = _find_seat_by_role(g, _R_DON)
@@ -8336,6 +8437,11 @@ async def _kp_begin_poison(ctx, chat_id, g):
 
 
 async def _kp_after_vote(ctx, chat_id, g):
+    # 🔒 فقط یک‌بار (رأیِ آخر و ماشه‌ی کیک ممکن است هم‌زمان برسند)
+    if getattr(g, "antidote_done", False):
+        return
+    g.antidote_done = True
+    store.save()
     target = g.attar_poisoned_seat
     votes = g.antidote_votes or {}
     yes = sum(1 for v in votes.values() if v)
@@ -8403,6 +8509,7 @@ async def _kp_apply_poison(ctx, chat_id, g, target, survived):
     g.poison_phase = False
     g.antidote_votes = {}
     g.antidote_expected = []
+    g.antidote_done = False
     store.save()
     await _kp_check_heir_inherit(ctx, g)   # وارث ممکن است عطار جدید شود
     try:
@@ -9488,7 +9595,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🤝 کاپو: شمارش/تأیید/گان
-    if _q and _q.data and _q.data.startswith(("kpe_", "kpc_", "kpg_", "kpf_")):
+    if _q and _q.data and _q.data.startswith(("kpe_", "kpc_", "kpg_", "kpd_", "kpf_")):
         await handle_kapu_trust_callback(update, ctx)
         return
 
