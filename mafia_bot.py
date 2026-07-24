@@ -360,6 +360,8 @@ class GameState:
         self.heir_inherited = getattr(self, "heir_inherited", False)
         self.heir_no_yakuza = getattr(self, "heir_no_yakuza", False)
         self.kp_decider_seat = getattr(self, "kp_decider_seat", None)
+        self.kp_yak_tmp = getattr(self, "kp_yak_tmp", False)     # ↩️ یاکوزاییِ تأییدنشده (برگشت‌پذیر)
+        self.bzp_yak_tmp = getattr(self, "bzp_yak_tmp", False)
         # ── حالت شبِ خودکار (سناریو گیمر) ──
         self.gm_don_sentence = getattr(self, "gm_don_sentence", None)
         self.gm_awaiting_don_sentence = getattr(self, "gm_awaiting_don_sentence", False)
@@ -566,9 +568,154 @@ def save_player_stats(stats: dict):
         print("❌ save_player_stats error:", e)
 
 
+# ─── 🏁 فصل امتیازی (سقف ۲۰۰۰ → مدال + ریست) ────────────────────
+MEDALS_FILENAME = "medals.json"
+SEASON_TARGET = 1500.0
+
+
+def load_medals_log() -> dict:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        if r.status_code == 200:
+            content = r.json().get("files", {}).get(MEDALS_FILENAME, {}).get("content", "{}")
+            return json.loads(content) or {"seasons": []}
+        return {"seasons": []}
+    except Exception as e:
+        print("❌ load_medals_log error:", e)
+        return {"seasons": []}
+
+
+def save_medals_log(data: dict):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {"files": {MEDALS_FILENAME: {
+            "content": json.dumps(data, ensure_ascii=False, indent=2)}}}
+        httpx.patch(url, headers=headers, json=payload)
+    except Exception as e:
+        print("❌ save_medals_log error:", e)
+
+
+def _season_total(d) -> float:
+    """همان امتیازِ کلِ «آمار کل»: امتیازهای ثبت‌شده + ۱۵×بازی‌های قدیمی + ۲۵×بردهای قدیمی."""
+    lg = max(0, d.get("games", 0) - d.get("score_games", 0))
+    lw = max(0, d.get("wins", 0) - d.get("score_wins", 0))
+    return float(d.get("score_total", 0) or 0) + 15.0 * lg + 25.0 * lw
+
+
+def _medal_badges(d) -> str:
+    """نشان‌های مدال برای نمایش کنار اسم: 🥇×2🥈 ..."""
+    m = d.get("medals") or {}
+    parts = []
+    for k, e in (("gold", "🥇"), ("silver", "🥈"), ("bronze", "🥉")):
+        try:
+            c = int(m.get(k, 0) or 0)
+        except Exception:
+            c = 0
+        if c == 1:
+            parts.append(e)
+        elif c > 1:
+            parts.append(f"{e}×{c}")
+    return "".join(parts)
+
+
+def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
+    """اگر امتیازِ نفرِ اول به سقف رسید: مدالِ ۳ نفر اول + ثبت در تاریخچه + صفر کردنِ همه.
+    متنِ اعلانِ گروه را برمی‌گرداند (یا None)."""
+    rows = [(uid, d, _season_total(d)) for uid, d in stats.items()]
+    rows = [r for r in rows if r[2] > 0]
+    if not rows or max(r[2] for r in rows) < SEASON_TARGET:
+        return None
+
+    # رتبه‌بندی، همان کلیدِ ترکیبیِ «آمار کل»: مجموع + میانگین
+    rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
+                              it[1].get("wins", 0)), reverse=True)
+    medal_defs = (("gold", "🥇"), ("silver", "🥈"), ("bronze", "🥉"))
+    winners = []
+    for i, (uid, d, tot) in enumerate(rows[:3]):
+        key, emo = medal_defs[i]
+        m = d.get("medals") or {}
+        m[key] = int(m.get(key, 0) or 0) + 1
+        d["medals"] = m
+        winners.append({"uid": uid, "name": d.get("name", "بازیکن"),
+                        "medal": key, "score": round(tot, 1)})
+
+    # 📜 ثبتِ دائمی در تاریخچه‌ی مدال‌ها (برای لقب‌دهی آینده)
+    try:
+        mlog = load_medals_log()
+        seasons = mlog.get("seasons", [])
+        seasons.append({"n": len(seasons) + 1, "date": date_str or "—", "winners": winners})
+        mlog["seasons"] = seasons
+        save_medals_log(mlog)
+    except Exception as e:
+        print("❌ season medal log error:", e)
+
+    # 🔄 صفر کردنِ همه‌ی امتیازها (شمارنده‌های بازی/برد دست‌نخورده می‌مانند؛
+    #    score_games=games یعنی سهمِ «بازی‌های قدیمی» هم از این به بعد صفر است)
+    for d in stats.values():
+        d["score_total"] = 0
+        d["score_citizen"] = 0
+        d["score_mafia"] = 0
+        d["score_games"] = d.get("games", 0)
+        d["score_wins"] = d.get("wins", 0)
+        d["score_citizen_games"] = d.get("citizen_games", 0)
+        d["score_citizen_wins"] = d.get("citizen_wins", 0)
+        d["score_mafia_games"] = d.get("mafia_games", 0)
+        d["score_mafia_wins"] = d.get("mafia_wins", 0)
+
+    # 🗓 اسنپ‌شاتِ هفتگی هم باید ری‌بیس شود، وگرنه تفاضلِ هفتهٔ بعد منفیِ عظیم می‌شود
+    try:
+        meta = load_weekly_meta()
+        if isinstance(meta, dict):
+            meta["snapshot"] = json.loads(json.dumps(stats))
+            save_weekly_meta(meta)
+    except Exception as e:
+        print("❌ season weekly re-baseline error:", e)
+
+    def _fl(v):
+        f = float(v)
+        return str(int(f)) if f.is_integer() else f"{f:.1f}"
+
+    lines = ["🏁 <b>پایان فصل!</b>",
+             f"🏅 امتیازِ صدرنشین به <b>{int(SEASON_TARGET)}</b> رسید.", ""]
+    for w, (_k, emo) in zip(winners, medal_defs):
+        nm = f"<a href='tg://user?id={w['uid']}'>{escape(w['name'], quote=False)}</a>"
+        lines.append(f"{emo} {nm} — {_fl(w['score'])} امتیاز")
+    lines += ["", "🔄 همه‌ی امتیازها صفر شد — فصلِ جدید از همین حالا شروع شد!",
+              "🎖 مدال‌ها برای همیشه در آمار ثبت شدند."]
+    return "\n".join(lines)
+
+
+async def _broadcast_season_end(bot, text: str, first_chat_id=None):
+    """اعلانِ پایانِ فصل در همهٔ گروه‌های فعال + پین کردن."""
+    targets = []
+    if first_chat_id:
+        targets.append(first_chat_id)   # اول گروهی که بازیِ فصل‌بند در آن تمام شد
+    for cid in list(getattr(store, "active_groups", []) or []):
+        if cid not in targets:
+            targets.append(cid)
+    sent = 0
+    for cid in targets:
+        try:
+            m = await bot.send_message(cid, text, parse_mode="HTML")
+            sent += 1
+            try:
+                await bot.pin_chat_message(chat_id=cid, message_id=m.message_id,
+                                           disable_notification=True)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"⚠️ season announce failed for {cid}:", e)
+    print(f"🏁 season end announced in {sent}/{len(targets)} groups")
+
+
 def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                         group_title=None, date_str=None):
-    """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل + تاریخچه)."""
+    """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل + تاریخچه).
+    اگر فصل تمام شود (صدرنشین ≥ ۲۰۰۰)، متنِ اعلانِ مدال‌ها را برمی‌گرداند."""
+    season_msg = None
     try:
         stats = load_player_stats()
         hist_rows = []
@@ -663,6 +810,12 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
             gp["god_games"] = gp.get("god_games", 0) + 1
             stats[god_key] = gp
 
+        # 🏁 پایان فصل؟ (مدال + ریستِ امتیازها، قبل از ذخیره)
+        try:
+            season_msg = _season_check_and_reset(stats, date_str=date_str)
+        except Exception as e:
+            print("❌ season check error:", e)
+
         save_player_stats(stats)
 
         # 🎮 ثبتِ تاریخچه‌ی بازی برای «بازی من» (تاریخ + گروه + ساید + نتیجه)
@@ -680,6 +833,7 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                 print("❌ game history save:", _e)
     except Exception as e:
         print("❌ update_player_stats error:", e)
+    return season_msg
 
 
 # ─── 🎮 تاریخچه‌ی بازی‌ها (برای «بازی من») ───────────────────
@@ -750,12 +904,14 @@ def format_player_stats(p: dict) -> str:
             return str(v)
 
     _avg = (_st / games) if games else 0
+    _mb = _medal_badges(p)
     lines = [
-        f"📊 <b>آمار {name}</b>",
+        f"📊 <b>آمار {name}</b>" + (f" {_mb}" if _mb else ""),
         "",
         f"🎮 کل بازی‌ها: <b>{games}</b>",
         f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
         f"🏅 امتیاز کل: <b>{_lat(_st)}</b> | میانگین: <b>{_lat(_avg)}</b>",
+    ] + ([f"🎖 مدال‌ها: {_mb}"] if _mb else []) + [
         "",
         f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
         f"◾️ مافیا: {mg} بازی | {mw} برد{pct(mw, mg)}",
@@ -828,6 +984,7 @@ def _weekly_delta(current: dict, snapshot: dict) -> dict:
         old = snapshot.get(uid, {})
         d = {f: cur.get(f, 0) - old.get(f, 0) for f in fields}
         d["name"] = cur.get("name", "بازیکن")
+        d["medals"] = cur.get("medals") or {}   # 🎖 برای نمایش کنار اسم در لیست
         delta[uid] = d
     return delta
 
@@ -934,6 +1091,9 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
                 nm = escape(d["name"], quote=False)
                 # نام قابل‌کلیک → پروفایل بازیکن (بدون نمایش آیدی)
                 nm = f"<a href='tg://user?id={_uid}'>{nm}</a>"
+                _mb = _medal_badges(d)
+                if _mb:
+                    nm += f" {_mb}"
                 w = d.get(win_key, 0)
                 n = d.get(game_key, 0)
                 suffix = pct(w, n) if unit == "برد" else ""
@@ -1040,6 +1200,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
             for i, (_uid, d) in enumerate(rows):
                 nm = escape(d.get("name", "بازیکن"), quote=False)
                 nm = f"<a href='tg://user?id={_uid}'>{nm}</a>"
+                _mb = _medal_badges(d)
+                if _mb:
+                    nm += f" {_mb}"
                 w = d.get(win_key, 0)
                 n = d.get(game_key, 0)
                 suffix = pct(w, n) if unit == "برد" else ""
@@ -1061,6 +1224,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
     out10 = ["🏅 <b>۱۰ بازیکن برتر کل</b>"]
     for i, (_uid, d) in enumerate(overall):
         nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
+        _mb = _medal_badges(d)
+        if _mb:
+            nm += f" {_mb}"
         w, n = d.get("wins", 0), d.get("games", 0)
         if ov_by_avg and n:
             out10.append(f"{_medal(i)} {nm} — {_fmt_lat(_ov_total(d))} امتیاز | "
@@ -1076,6 +1242,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         sb = [title]
         for i, (_uid, d, val) in enumerate(rows):
             nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
+            _mb = _medal_badges(d)
+            if _mb:
+                nm += f" {_mb}"
             w, n = d.get(w_key, 0), d.get(g_key, 0)
             if val is not None and n:
                 sb.append(f"{_medal(i)} {nm} — {_fmt_lat(val)} امتیاز | "
@@ -3184,9 +3353,9 @@ async def announce_winner(ctx, update, g: GameState):
         print("⚠️ score compute error:", e)
         game_scores = {}
 
-    # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل)
-    update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
-                        group_title=group_title, date_str=date_str)
+    # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل + چکِ پایانِ فصل)
+    season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
+                                     group_title=group_title, date_str=date_str)
 
     g.phase = "ended"
     store.save()
@@ -3196,6 +3365,10 @@ async def announce_winner(ctx, update, g: GameState):
         await ctx.bot.pin_chat_message(chat_id=chat.id, message_id=msg.message_id)
     except Exception as e:
         print("⚠️ خطا در پین کردن پیام:", e)
+
+    # 🏁 اعلانِ پایانِ فصل و مدال‌ها در «همهٔ گروه‌ها» + پین
+    if season_msg:
+        await _broadcast_season_end(ctx.bot, season_msg, first_chat_id=chat.id)
 
     # 🌙 گزارش شب‌به‌شبِ اکت‌ها (به‌صورت متن جداگانه زیر لیست پایانی)
     night_log = getattr(g, "night_log", None)
@@ -3384,13 +3557,16 @@ def _mafia_role_set(g):
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
-    """صندلی‌های تیم مافیا (شامل جذب‌شده‌های مذاکره/یاکوزایی)."""
+    """صندلی‌های تیم مافیا (شامل جذب‌شده‌های مذاکره/یاکوزایی/خریداری)."""
     mafia_roles = _mafia_role_set(g)
     out = set()
     for s in g.seats:
         if _seat_role_norm(g, s) in mafia_roles:
             out.add(s)
     out |= set(g.negotiated_seats or set())
+    for _bp in (getattr(g, "purchased_player", None), getattr(g, "purchased_seat", None)):
+        if _bp and _bp in g.seats:
+            out.add(_bp)
     if alive_only:
         out = {s for s in out if s not in (g.striked or set())}
     return out
@@ -3439,6 +3615,12 @@ def _kb_night_seats(seats, g, prefix, selected=None, confirm_cb=None):
         rows.append([InlineKeyboardButton(f"{mark}{s} {name}", callback_data=f"{prefix}{s}")])
     if confirm_cb:
         rows.append([InlineKeyboardButton("✅ تأیید", callback_data=confirm_cb)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _kb_add_back(kb, back_cb):
+    """↩️ افزودنِ دکمه‌ی بازگشت به انتهای یک کیبورد (تا قبل از تأیید)."""
+    rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("↩️ بازگشت", callback_data=back_cb)]]
     return InlineKeyboardMarkup(rows)
 
 
@@ -3653,6 +3835,8 @@ async def start_night(ctx, chat_id, g):
     g.night_nato_seat = None
     g.night_nato_target = None
     g.night_yakuza_sacrifice = None
+    g.kp_yak_tmp = False
+    g.bzp_yak_tmp = False
     g.night_hunter_target = None
     # per-night نماینده
     g.night_hacker_actor = None
@@ -5292,13 +5476,39 @@ async def handle_night_callback(update, ctx):
     mid = q.message.message_id if q.message else None
 
     # ── تصمیم مافیا: مذاکره / شات ──
+    if data == "night_dec_back":
+        # ↩️ برگشت به منوی «مذاکره یا شات» — مصرفِ مذاکره‌ی تأییدنشده هم برمی‌گردد
+        g.night_sel.pop(uid, None)
+        if getattr(g, "night_is_negotiation", False):
+            g.night_is_negotiation = False
+            g.negotiation_used = False
+            g.night_stage = None
+        store.save()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤝 مذاکره", callback_data="night_dec_negotiate")],
+            [InlineKeyboardButton("🔫 شات",    callback_data="night_dec_shoot")],
+        ])
+        dec = getattr(g, "night_decider_seat", None)
+        dec_uid = g.seats[dec][0] if dec in g.seats else None
+        if dec_uid == uid or dec_uid is None:
+            await _edit_pm(ctx, uid, mid, f"🌙 شب {g.night_number}\nمذاکره یا شات؟", kb)
+        else:
+            await _close_pm(ctx, uid, mid, "↩️ تصمیم به تصمیم‌گیرِ مافیا برگشت.")
+            m = await _safe_pm(ctx, dec_uid, f"🌙 شب {g.night_number}\nمذاکره یا شات؟", kb)
+            if m:
+                g.night_pm_msgs[dec_uid] = m.message_id
+                store.save()
+        return
+
     if data == "night_dec_shoot":
         g.night_is_negotiation = False
         store.save()
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "night_shot_",
-                                       selected=g.night_sel.get(uid), confirm_cb="night_shot_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "night_shot_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="night_shot_confirm"),
+                                    "night_dec_back"))
         return
 
     if data == "night_dec_negotiate":
@@ -5313,8 +5523,10 @@ async def handle_night_callback(update, ctx):
         store.save()
         neg_uid, _nn = g.seats[neg]
         targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
-        kb = _kb_night_seats(targets, g, "night_neg_",
-                             selected=g.night_sel.get(neg_uid), confirm_cb="night_neg_confirm")
+        kb = _kb_add_back(_kb_night_seats(targets, g, "night_neg_",
+                                          selected=g.night_sel.get(neg_uid),
+                                          confirm_cb="night_neg_confirm"),
+                          "night_dec_back")
         if neg_uid == uid:
             await _edit_pm(ctx, uid, mid, "🤝 با چه کسی مذاکره می‌کنی؟", kb)
             g.night_pm_msgs[neg_uid] = mid
@@ -5347,7 +5559,9 @@ async def handle_night_callback(update, ctx):
         store.save()
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "night_shot_", selected=s, confirm_cb="night_shot_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "night_shot_", selected=s,
+                                                    confirm_cb="night_shot_confirm"),
+                                    "night_dec_back"))
         return
 
     # ── مذاکره (negotiator) ──
@@ -5386,7 +5600,9 @@ async def handle_night_callback(update, ctx):
         store.save()
         targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
         await _edit_pm(ctx, uid, mid, "🤝 با چه کسی مذاکره می‌کنی؟",
-                       _kb_night_seats(targets, g, "night_neg_", selected=s, confirm_cb="night_neg_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "night_neg_", selected=s,
+                                                    confirm_cb="night_neg_confirm"),
+                                    "night_dec_back"))
         return
 
     # ── کاراگاه (مستقیم) ──
@@ -5590,7 +5806,7 @@ async def _bzp_open_gf_shiad(ctx, chat_id, g):
     gf_alive = _find_seat_by_role(g, _R_GODFATHER)
     nato_alive = _find_seat_by_role(g, _R_NATO)
     shiad_alive = _find_seat_by_role(g, _R_SHIAD)
-    converted = sorted(s for s in (g.negotiated_seats or set()) if s not in (g.striked or set()))
+    converted = sorted(_mafia_seats(g, alive_only=True))
     decider = gf_alive or nato_alive or shiad_alive or (converted[0] if converted else None)
     if not decider:
         g.night_done.add("mafia")
@@ -5730,15 +5946,46 @@ async def handle_baazpors_callback(update, ctx):
         return
 
     # ── تصمیم گادفادر ──
+    if data == "bzp_act_back":
+        # ↩️ برگشت به منوی اکتِ مافیا — یاکوزاییِ تأییدنشده آزاد می‌شود
+        g.night_sel.pop(uid, None)
+        if getattr(g, "bzp_yak_tmp", False):
+            g.yakuza_used = False
+            g.night_yakuza_sacrifice = None
+            g.bzp_yak_tmp = False
+        store.save()
+        _gf = _find_seat_by_role(g, _R_GODFATHER)
+        _nato = _find_seat_by_role(g, _R_NATO)
+        rows = [[InlineKeyboardButton("🔫 شات", callback_data="bzp_gf_shoot")]]
+        if _gf is not None and not g.yakuza_used:
+            rows.append([InlineKeyboardButton("🥷 یاکوزایی", callback_data="bzp_gf_yakuza")])
+        if _nato is not None:
+            rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="bzp_gf_nato")])
+        kb = InlineKeyboardMarkup(rows)
+        dec = getattr(g, "bzp_decider_seat", None)
+        dec_uid = g.seats[dec][0] if dec in g.seats else None
+        if dec_uid == uid or dec_uid is None:
+            await _edit_pm(ctx, uid, mid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+        else:
+            await _close_pm(ctx, uid, mid, "↩️ تصمیم به تصمیم‌گیرِ مافیا برگشت.")
+            m = await _safe_pm(ctx, dec_uid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+            if m:
+                g.night_pm_msgs[dec_uid] = m.message_id
+                store.save()
+        return
+
     if data == "bzp_gf_shoot":
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "bzp_shot_",
-                                       selected=g.night_sel.get(uid), confirm_cb="bzp_shot_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "bzp_shot_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="bzp_shot_confirm"),
+                                    "bzp_act_back"))
         return
 
     if data == "bzp_gf_yakuza":
         g.yakuza_used = True
+        g.bzp_yak_tmp = True   # ↩️ تا تأیید، قابلِ برگشت
         store.save()
         me = _seat_of_uid(g, uid)
         teammates = [s for s in _mafia_seats(g, alive_only=True) if s != me]
@@ -5748,11 +5995,15 @@ async def handle_baazpors_callback(update, ctx):
             store.save()
             targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
             await _edit_pm(ctx, uid, mid, "🥷 یاری نداری؛ خودت فدا می‌شوی.\nبا چه کسی یاکوزایی می‌کنی؟",
-                           _kb_night_seats(targets, g, "bzp_yakrec_", confirm_cb="bzp_yakrec_confirm"))
+                           _kb_add_back(_kb_night_seats(targets, g, "bzp_yakrec_",
+                                                        confirm_cb="bzp_yakrec_confirm"),
+                                        "bzp_act_back"))
         else:
             await _edit_pm(ctx, uid, mid, "🥷 کدام یارت را فدا می‌کنی؟",
-                           _kb_night_seats(teammates, g, "bzp_yaksac_",
-                                           selected=g.night_sel.get(uid), confirm_cb="bzp_yaksac_confirm"))
+                           _kb_add_back(_kb_night_seats(teammates, g, "bzp_yaksac_",
+                                                        selected=g.night_sel.get(uid),
+                                                        confirm_cb="bzp_yaksac_confirm"),
+                                        "bzp_act_back"))
         return
 
     if data == "bzp_gf_nato":
@@ -5762,8 +6013,10 @@ async def handle_baazpors_callback(update, ctx):
             return
         nato_uid, _nn = g.seats[nato]
         targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
-        kb = _kb_night_seats(targets, g, "bzp_nato_",
-                             selected=g.night_sel.get(nato_uid), confirm_cb="bzp_nato_confirm")
+        kb = _kb_add_back(_kb_night_seats(targets, g, "bzp_nato_",
+                                          selected=g.night_sel.get(nato_uid),
+                                          confirm_cb="bzp_nato_confirm"),
+                          "bzp_act_back")
         if nato_uid == uid:
             await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟", kb)
             g.night_pm_msgs[nato_uid] = mid
@@ -5796,7 +6049,9 @@ async def handle_baazpors_callback(update, ctx):
         store.save()
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "bzp_shot_", selected=s, confirm_cb="bzp_shot_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "bzp_shot_", selected=s,
+                                                    confirm_cb="bzp_shot_confirm"),
+                                    "bzp_act_back"))
         return
 
     # ── یاکوزایی: فدا کردن یار ──
@@ -5820,7 +6075,9 @@ async def handle_baazpors_callback(update, ctx):
         me = _seat_of_uid(g, uid)
         teammates = [x for x in _mafia_seats(g, alive_only=True) if x != me]
         await _edit_pm(ctx, uid, mid, "🥷 کدام یارت را فدا می‌کنی؟",
-                       _kb_night_seats(teammates, g, "bzp_yaksac_", selected=s, confirm_cb="bzp_yaksac_confirm"))
+                       _kb_add_back(_kb_night_seats(teammates, g, "bzp_yaksac_", selected=s,
+                                                    confirm_cb="bzp_yaksac_confirm"),
+                                    "bzp_act_back"))
         return
 
     # ── یاکوزایی: جذب شهروند ──
@@ -5863,7 +6120,9 @@ async def handle_baazpors_callback(update, ctx):
         store.save()
         targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
         await _edit_pm(ctx, uid, mid, "🥷 با چه کسی یاکوزایی می‌کنی؟",
-                       _kb_night_seats(targets, g, "bzp_yakrec_", selected=s, confirm_cb="bzp_yakrec_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "bzp_yakrec_", selected=s,
+                                                    confirm_cb="bzp_yakrec_confirm"),
+                                    "bzp_act_back"))
         return
 
     # ── ناتویی: انتخاب هدف، سپس حدس نقش ──
@@ -5907,7 +6166,9 @@ async def handle_baazpors_callback(update, ctx):
         store.save()
         targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
         await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟",
-                       _kb_night_seats(targets, g, "bzp_nato_", selected=s, confirm_cb="bzp_nato_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "bzp_nato_", selected=s,
+                                                    confirm_cb="bzp_nato_confirm"),
+                                    "bzp_act_back"))
         return
 
     # ── شیاد: حدس کاراگاه ──
@@ -6161,6 +6422,10 @@ async def _nem_open_mafia(ctx, chat_id, g):
     yaghi_alive = _find_seat_by_role(g, _R_YAGHI)
     hacker_alive = _find_seat_by_role(g, _R_HACKER)
     decider = don_alive or yaghi_alive or hacker_alive
+    if not decider:
+        # 🤝 اگر مافیای اصلی نمانده، جذب‌شده (مذاکره/یاکوزایی/خریداری) صاحبِ شات می‌شود
+        converted = sorted(_mafia_seats(g, alive_only=True))
+        decider = converted[0] if converted else None
     if not decider:
         g.night_done.add("mafia")
     else:
@@ -6834,6 +7099,10 @@ async def _tk_open_mafia(ctx, chat_id, g):
     nato = _find_seat_by_role(g, _R_NATO)
     host = _find_seat_by_role(g, _R_HOSTAGE)
     decider = gf or nato or host
+    if not decider:
+        # 🤝 اگر مافیای اصلی نمانده، جذب‌شده (مذاکره/یاکوزایی/خریداری) صاحبِ شات می‌شود
+        converted = sorted(_mafia_seats(g, alive_only=True))
+        decider = converted[0] if converted else None
     if not decider:
         g.night_done.add("mafia")
         store.save()
@@ -7563,11 +7832,34 @@ async def handle_takavar_callback(update, ctx):
         return
 
     # ── تصمیم مافیا ──
+    if data == "tk_act_back":
+        # ↩️ برگشت به منوی اکتِ مافیای تکاور
+        g.night_sel.pop(uid, None)
+        store.save()
+        _nato = _find_seat_by_role(g, _R_NATO)
+        rows = [[InlineKeyboardButton("🔫 شات", callback_data="tk_shot")]]
+        if _nato is not None:
+            rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="tk_nato")])
+        kb = InlineKeyboardMarkup(rows)
+        dec = getattr(g, "tk_decider_seat", None)
+        dec_uid = g.seats[dec][0] if dec in g.seats else None
+        if dec_uid == uid or dec_uid is None:
+            await _edit_pm(ctx, uid, mid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+        else:
+            await _close_pm(ctx, uid, mid, "↩️ تصمیم به تصمیم‌گیرِ مافیا برگشت.")
+            m = await _safe_pm(ctx, dec_uid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+            if m:
+                g.night_pm_msgs[dec_uid] = m.message_id
+                store.save()
+        return
+
     if data == "tk_shot":
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "tk_st_",
-                                       selected=g.night_sel.get(uid), confirm_cb="tk_st_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "tk_st_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="tk_st_confirm"),
+                                    "tk_act_back"))
         return
 
     if data == "tk_nato":
@@ -7577,7 +7869,10 @@ async def handle_takavar_callback(update, ctx):
             return
         nato_uid = g.seats[nato][0]
         targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
-        kb = _kb_night_seats(targets, g, "tk_nt_", selected=g.night_sel.get(nato_uid), confirm_cb="tk_nt_confirm")
+        kb = _kb_add_back(_kb_night_seats(targets, g, "tk_nt_",
+                                          selected=g.night_sel.get(nato_uid),
+                                          confirm_cb="tk_nt_confirm"),
+                          "tk_act_back")
         if nato_uid == uid:
             await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟", kb)
             g.night_pm_msgs[nato_uid] = mid
@@ -7610,7 +7905,9 @@ async def handle_takavar_callback(update, ctx):
         store.save()
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "tk_st_", selected=s, confirm_cb="tk_st_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "tk_st_", selected=s,
+                                                    confirm_cb="tk_st_confirm"),
+                                    "tk_act_back"))
         return
 
     # ── ناتویی (حدس نقش) ──
@@ -7654,7 +7951,9 @@ async def handle_takavar_callback(update, ctx):
         store.save()
         targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
         await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟",
-                       _kb_night_seats(targets, g, "tk_nt_", selected=s, confirm_cb="tk_nt_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "tk_nt_", selected=s,
+                                                    confirm_cb="tk_nt_confirm"),
+                                    "tk_act_back"))
         return
 
     # ── کاراگاه (مستقیم) ──
@@ -7990,15 +8289,46 @@ async def handle_kapu_callback(update, ctx):
         return
 
     # ── تصمیم دن ──
+    if data == "kp_act_back":
+        # ↩️ برگشت به منوی اکتِ مافیا — یاکوزاییِ تأییدنشده هم آزاد می‌شود
+        g.night_sel.pop(uid, None)
+        if getattr(g, "kp_yak_tmp", False):
+            g.yakuza_used = False
+            g.night_yakuza_sacrifice = None
+            g.kp_yak_tmp = False
+        store.save()
+        _don = _find_seat_by_role(g, _R_DON)
+        _ex = _find_seat_by_role(g, _R_EXECUTIONER)
+        rows = [[InlineKeyboardButton("🔫 شات", callback_data="kp_don_shot")]]
+        if _don is not None and not g.yakuza_used:
+            rows.append([InlineKeyboardButton("🥷 یاکوزایی", callback_data="kp_don_yakuza")])
+        if _ex is not None and not g.jalad_used:
+            rows.append([InlineKeyboardButton("⚔️ جلادی", callback_data="kp_don_jalad")])
+        kb = InlineKeyboardMarkup(rows)
+        dec = getattr(g, "kp_decider_seat", None)
+        dec_uid = g.seats[dec][0] if dec in g.seats else None
+        if dec_uid == uid or dec_uid is None:
+            await _edit_pm(ctx, uid, mid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+        else:
+            await _close_pm(ctx, uid, mid, "↩️ تصمیم به تصمیم‌گیرِ مافیا برگشت.")
+            m = await _safe_pm(ctx, dec_uid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:", kb)
+            if m:
+                g.night_pm_msgs[dec_uid] = m.message_id
+                store.save()
+        return
+
     if data == "kp_don_shot":
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "kp_st_",
-                                       selected=g.night_sel.get(uid), confirm_cb="kp_st_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "kp_st_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="kp_st_confirm"),
+                                    "kp_act_back"))
         return
 
     if data == "kp_don_yakuza":
         g.yakuza_used = True
+        g.kp_yak_tmp = True   # ↩️ تا تأیید، قابلِ برگشت
         store.save()
         me = _seat_of_uid(g, uid)
         teammates = [s for s in _mafia_seats(g, alive_only=True) if s != me]
@@ -8008,11 +8338,15 @@ async def handle_kapu_callback(update, ctx):
             store.save()
             targets = _kp_yakuza_recruit_targets(g)
             await _edit_pm(ctx, uid, mid, "🥷 یاری نداری؛ خودت فدا می‌شوی.\nچه کسی را جذب می‌کنی؟",
-                           _kb_night_seats(targets, g, "kp_yakrec_", confirm_cb="kp_yakrec_confirm"))
+                           _kb_add_back(_kb_night_seats(targets, g, "kp_yakrec_",
+                                                        confirm_cb="kp_yakrec_confirm"),
+                                        "kp_act_back"))
         else:
             await _edit_pm(ctx, uid, mid, "🥷 کدام یارت را فدا می‌کنی؟",
-                           _kb_night_seats(teammates, g, "kp_yaksac_",
-                                           selected=g.night_sel.get(uid), confirm_cb="kp_yaksac_confirm"))
+                           _kb_add_back(_kb_night_seats(teammates, g, "kp_yaksac_",
+                                                        selected=g.night_sel.get(uid),
+                                                        confirm_cb="kp_yaksac_confirm"),
+                                        "kp_act_back"))
         return
 
     if data == "kp_don_jalad":
@@ -8022,7 +8356,10 @@ async def handle_kapu_callback(update, ctx):
             return
         ex_uid = g.seats[ex][0]
         targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
-        kb = _kb_night_seats(targets, g, "kp_jt_", selected=g.night_sel.get(ex_uid), confirm_cb="kp_jt_confirm")
+        kb = _kb_add_back(_kb_night_seats(targets, g, "kp_jt_",
+                                          selected=g.night_sel.get(ex_uid),
+                                          confirm_cb="kp_jt_confirm"),
+                          "kp_act_back")
         if ex_uid == uid:
             await _edit_pm(ctx, uid, mid, "⚔️ نقشِ چه کسی را حدس می‌زنی؟", kb)
             g.night_pm_msgs[ex_uid] = mid
@@ -8056,7 +8393,9 @@ async def handle_kapu_callback(update, ctx):
         store.save()
         targets = list(_alive_seats(g))   # شاملِ خودِ مافیا
         await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
-                       _kb_night_seats(targets, g, "kp_st_", selected=s, confirm_cb="kp_st_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "kp_st_", selected=s,
+                                                    confirm_cb="kp_st_confirm"),
+                                    "kp_act_back"))
         return
 
     # ── یاکوزایی: فدا ──
@@ -8080,7 +8419,9 @@ async def handle_kapu_callback(update, ctx):
         me = _seat_of_uid(g, uid)
         teammates = [x for x in _mafia_seats(g, alive_only=True) if x != me]
         await _edit_pm(ctx, uid, mid, "🥷 کدام یارت را فدا می‌کنی؟",
-                       _kb_night_seats(teammates, g, "kp_yaksac_", selected=s, confirm_cb="kp_yaksac_confirm"))
+                       _kb_add_back(_kb_night_seats(teammates, g, "kp_yaksac_", selected=s,
+                                                    confirm_cb="kp_yaksac_confirm"),
+                                    "kp_act_back"))
         return
 
     # ── یاکوزایی: جذب (فقط شهرساده یا مظنون) ──
@@ -8118,7 +8459,9 @@ async def handle_kapu_callback(update, ctx):
         store.save()
         targets = _kp_yakuza_recruit_targets(g)
         await _edit_pm(ctx, uid, mid, "🥷 چه کسی را جذب می‌کنی؟",
-                       _kb_night_seats(targets, g, "kp_yakrec_", selected=s, confirm_cb="kp_yakrec_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "kp_yakrec_", selected=s,
+                                                    confirm_cb="kp_yakrec_confirm"),
+                                    "kp_act_back"))
         return
 
     # ── جلادی (حدس نقش) ──
@@ -8166,7 +8509,9 @@ async def handle_kapu_callback(update, ctx):
         store.save()
         targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
         await _edit_pm(ctx, uid, mid, "⚔️ نقشِ چه کسی را حدس می‌زنی؟",
-                       _kb_night_seats(targets, g, "kp_jt_", selected=s, confirm_cb="kp_jt_confirm"))
+                       _kb_add_back(_kb_night_seats(targets, g, "kp_jt_", selected=s,
+                                                    confirm_cb="kp_jt_confirm"),
+                                    "kp_act_back"))
         return
 
     # ── جادوگر ──
@@ -8685,6 +9030,10 @@ async def _gm_open_mafia(ctx, chat_id, g):
                          _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
     else:
         decider = don or mo or tf   # 🔫 وراثتِ شات: دن → موریارتی → تووفیس
+        if not decider:
+            # 🤝 اگر مافیای اصلی نمانده، جذب‌شده (مذاکره/یاکوزایی/خریداری) صاحبِ شات می‌شود
+            converted = sorted(_mafia_seats(g, alive_only=True))
+            decider = converted[0] if converted else None
         odd_n = (g.night_number % 2 == 1)
         tf_dual = (decider is not None and tf is not None and decider == tf
                    and odd_n and not _gm_own_act_skipped(g, tf))
@@ -13158,6 +13507,54 @@ async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report)
 
 
+async def season_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/season → گزارشِ صدرِ جدول و چکِ دستیِ پایانِ فصل (فقط مدیر اصلی، در پی‌وی).
+    اگر کسی به سقف رسیده باشد: مدال + ریست + اعلان در همهٔ گروه‌ها."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("⚠️ این دستور را فقط در پی‌وی بات بزن.")
+        return
+
+    stats = load_player_stats()
+    if not stats:
+        await update.message.reply_text("⚠️ آماری برای بررسی نیست (یا خواندن از گیست ناموفق بود).")
+        return
+
+    def _fl(v):
+        f = float(v)
+        return str(int(f)) if f.is_integer() else f"{f:.1f}"
+
+    # همان کلیدِ رتبه‌بندیِ «آمار کل» و مدال‌ها: مجموع + میانگین
+    rows = sorted(((u, d, _season_total(d)) for u, d in stats.items()),
+                  key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
+                                  it[1].get("wins", 0)), reverse=True)[:5]
+    head = [f"🏁 <b>وضعیت فصل</b> — سقف: <b>{int(SEASON_TARGET)}</b>", ""]
+    for i, (_u, d, t) in enumerate(rows, 1):
+        mb = _medal_badges(d)
+        head.append(f"{i}. {escape(d.get('name', 'بازیکن'), quote=False)}"
+                    f"{(' ' + mb) if mb else ''} — {_fl(t)}")
+    await update.message.reply_text("\n".join(head), parse_mode="HTML")
+
+    date_str = jdatetime.date.today().strftime("%Y/%m/%d")
+    try:
+        msg = _season_check_and_reset(stats, date_str=date_str)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در چکِ فصل: {e}")
+        return
+
+    if not msg:
+        gap = SEASON_TARGET - (rows[0][2] if rows else 0)
+        await update.message.reply_text(
+            f"✅ هنوز کسی به سقف نرسیده — تا پایانِ فصل <b>{_fl(max(0, gap))}</b> امتیاز مانده.",
+            parse_mode="HTML")
+        return
+
+    save_player_stats(stats)
+    await _broadcast_season_end(ctx.bot, msg)
+    await update.message.reply_text("🏁 فصل بسته شد؛ مدال‌ها ثبت و اعلان در همهٔ گروه‌ها فرستاده شد.")
+
+
 async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """شروع دستی دور لیست منتخب (برای تست) — فقط مدیر اصلی."""
     if update.effective_user.id != ADMIN_ID:
@@ -13574,6 +13971,15 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         kb = None
 
+    # 🧹 اگر لیستِ قبلی هنوز در گروه هست، پاکش کن تا گروه شلوغ نشود
+    _old = getattr(g, "last_seating_msg_id", None)
+    if _old:
+        try:
+            await ctx.bot.delete_message(chat_id=chat.id, message_id=_old)
+        except Exception:
+            pass   # قبلاً پاک شده یا قابلِ حذف نیست → عادی ادامه بده
+        g.last_seating_msg_id = None
+
     # 📜 ارسال لیست بازیابی‌شده
     msg = await ctx.bot.send_message(
         chat.id,
@@ -13624,6 +14030,7 @@ async def main():
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
     app.add_handler(CommandHandler("sendtoall", sendtoall_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("season", season_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("startselected", start_selected_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("selected", selected_report_cmd, filters=filters.ChatType.PRIVATE))
     # 👉 اضافه کردن هندلرها
