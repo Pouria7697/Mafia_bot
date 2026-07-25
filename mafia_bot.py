@@ -621,6 +621,38 @@ def _medal_badges(d) -> str:
     return "".join(parts)
 
 
+# 🎖 کشِ مدال‌ها — برای نمایشِ نشان کنارِ اسم در لیست‌ها (بدون خواندنِ گیست در هر رفرش)
+_MEDAL_CACHE: dict = {"ts": 0.0, "map": {}}
+_MEDAL_TTL = 1800.0   # نیم ساعت — مدال فقط در پایانِ فصل عوض می‌شود
+
+
+def refresh_medal_cache(stats: dict | None = None):
+    """کشِ نشان‌ها را از روی آمار به‌روز می‌کند (اگر آمار داده نشود، از گیست می‌خواند)."""
+    try:
+        if stats is None:
+            stats = load_player_stats()
+        _MEDAL_CACHE["map"] = {
+            str(u): b for u, d in (stats or {}).items()
+            if isinstance(d, dict) and (b := _medal_badges(d))
+        }
+        _MEDAL_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
+    except Exception as e:
+        print("❌ refresh_medal_cache:", e)
+
+
+def ensure_medal_cache():
+    """اگر کش خالی یا کهنه است، تازه‌اش کن."""
+    now = datetime.now(timezone.utc).timestamp()
+    if (now - float(_MEDAL_CACHE.get("ts", 0) or 0)) >= _MEDAL_TTL:
+        refresh_medal_cache()
+
+
+def medal_tag(uid) -> str:
+    """نشانِ مدالِ یک بازیکن برای چسباندن کنارِ اسم (خالی اگر مدالی ندارد)."""
+    b = _MEDAL_CACHE["map"].get(str(uid), "")
+    return f" {b}" if b else ""
+
+
 def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
     """اگر امتیازِ نفرِ اول به سقف رسید: مدالِ ۳ نفر اول + ثبت در تاریخچه + صفر کردنِ همه.
     متنِ اعلانِ گروه را برمی‌گرداند (یا None)."""
@@ -685,6 +717,9 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
         lines.append(f"{emo} {nm} — {_fl(w['score'])} امتیاز")
     lines += ["", "🔄 همه‌ی امتیازها صفر شد — فصلِ جدید از همین حالا شروع شد!",
               "🎖 مدال‌ها برای همیشه در آمار ثبت شدند."]
+
+    # 🎖 نشان‌های تازه فوراً کنارِ اسم‌ها ظاهر شوند
+    refresh_medal_cache(stats)
     return "\n".join(lines)
 
 
@@ -2160,6 +2195,12 @@ async def publish_seating(
             await _retry(ctx.bot.send_message(chat_id, "برای شروع، ادمین باید /newgame <seats> بزند."))
             return
 
+        # 🎖 کشِ مدال‌ها (حداکثر هر نیم ساعت یک‌بار از گیست خوانده می‌شود — در ترد جدا)
+        try:
+            await asyncio.to_thread(ensure_medal_cache)
+        except Exception:
+            pass
+
         today = jdatetime.date.today().strftime("%Y/%m/%d")
         emoji_numbers = [
             "⓿", "➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒",
@@ -2201,7 +2242,8 @@ async def publish_seating(
             f"{cr}🎭 <b>{escape(g.event_title, quote=False) if g.event_title else 'رویداد مافیا'}</b>",
             f"{cr}📆 <b>تاریخ:</b> {today}",
             f"{cr}🕰 <b>زمان:</b> {g.event_time or '---'}",
-            f"{cr}🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+            f"{cr}🎩 <b>راوی:</b> <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>"
+            f"{medal_tag(g.god_id)}",
         ]
 
         if g.scenario:
@@ -2215,7 +2257,9 @@ async def publish_seating(
             if i in g.seats:
                 uid, name = g.seats[i]
                 safe_name = escape(name, quote=False)
-                name_link = f"<a href='tg://user?id={uid}'>{safe_name}</a>"
+                # 🎖 نشانِ مدال (اگر دارد) بلافاصله بعد از اسم
+                name_link = (f"<a href='tg://user?id={uid}'>{safe_name}</a>"
+                             f"{medal_tag(uid)}")
 
                 wn = 0
                 if isinstance(getattr(g, "warnings", None), dict):
@@ -3287,7 +3331,8 @@ async def announce_winner(ctx, update, g: GameState):
         f"░⚜️🎮 گروه: {group_link}",
         f"░⚜️📅 تاریخ: {date_str}",
         f"░⚜️🎯 شماره رویداد:{event_num}",
-        f"░💡🔱 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>",
+        f"░💡🔱 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>"
+        f"{medal_tag(g.god_id)}",
         f"░⚜️📃 سناریو: {scenario_name}",
         "",
         "░⚜️💫 لیست بازیکنان ⬇️",
@@ -3327,7 +3372,8 @@ async def announce_winner(ctx, update, g: GameState):
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
 
         lines.append(
-            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a> ⇦ {role_display}{chaos_mark}"
+            f"░⚜️{marker}{seat}- <a href='tg://user?id={uid}'>{name}</a>"
+            f"{medal_tag(uid)} ⇦ {role_display}{chaos_mark}"
         )
 
     lines.append("")
@@ -5303,6 +5349,21 @@ def _nem_reps_kb(g, tmp):
     return InlineKeyboardMarkup(rows)
 
 
+_NDING_ASK = "🗡 دنگ خیانت را روی کدام نماینده می‌گذاری؟"
+
+
+def _nem_ding_kb(g, don):
+    """کیبوردِ انتخابِ نماینده برای دنگ خیانت (None اگر گزینه‌ای نماند)."""
+    rows = []
+    for i, rep in enumerate(g.nem_reps or []):
+        if rep == don:
+            continue   # دن روی خودش دنگ نمی‌گذارد
+        lbl = "اول" if i == 0 else "دوم"
+        rows.append([InlineKeyboardButton(
+            f"نماینده {lbl} — {rep}. {g.seats[rep][1]}", callback_data=f"nding_{i}")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 async def _nem_ding_prompt_don(ctx, g):
     """پیوی دن‌مافیا: انتخابِ نماینده برای دنگ خیانت (خودش را نمی‌تواند)."""
     don = _find_seat_by_role(g, _R_DON)
@@ -5311,21 +5372,13 @@ async def _nem_ding_prompt_don(ctx, g):
         store.save()
         await _night_report(ctx, g, "🗡 دن‌مافیا زنده نیست — دنگ خیانت منتفی شد.")
         return
-    rows = []
-    for i, rep in enumerate(g.nem_reps):
-        if rep == don:
-            continue   # دن روی خودش دنگ نمی‌گذارد
-        lbl = "اول" if i == 0 else "دوم"
-        rows.append([InlineKeyboardButton(
-            f"نماینده {lbl} — {rep}. {g.seats[rep][1]}", callback_data=f"nding_{i}")])
-    if not rows:
+    kb = _nem_ding_kb(g, don)
+    if kb is None:
         g.nem_awaiting_ding = False
         store.save()
         await _night_report(ctx, g, "🗡 هر دو نماینده خودِ دن بودند؟! دنگ خیانت منتفی.")
         return
-    await _safe_pm(ctx, g.seats[don][0],
-                   "🗡 دنگ خیانت را روی کدام نماینده می‌گذاری؟",
-                   InlineKeyboardMarkup(rows))
+    await _safe_pm(ctx, g.seats[don][0], _NDING_ASK, kb)
 
 
 async def handle_nem_ding_callback(update, ctx):
@@ -5391,14 +5444,29 @@ async def handle_nem_ding_callback(update, ctx):
     await safe_q_answer(q)
     mid = q.message.message_id if q.message else None
 
+    # ↩️ بازگشت به انتخابِ نماینده (تا قبل از ثبتِ مثبت/منفی)
+    if data == "nding_back":
+        g.nem_ding = None
+        store.save()
+        don = _find_seat_by_role(g, _R_DON)
+        kb = _nem_ding_kb(g, don) if don is not None else None
+        if kb is None:
+            await safe_q_answer(q, "گزینه‌ای برای انتخاب نمانده.", show_alert=True)
+            return
+        await _edit_pm(ctx, uid, mid, _NDING_ASK, kb)
+        return
+
     if data.startswith("nding_"):
         i = int(data.rsplit("_", 1)[1])
         g.nem_ding = (i, 0)   # علامت بعداً
         store.save()
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("➕ مثبت", callback_data="ndsign_p"),
-            InlineKeyboardButton("➖ منفی", callback_data="ndsign_n"),
-        ]])
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("➕ مثبت", callback_data="ndsign_p"),
+                InlineKeyboardButton("➖ منفی", callback_data="ndsign_n"),
+            ],
+            [InlineKeyboardButton("↩️ بازگشت", callback_data="nding_back")],
+        ])
         lbl = "اول" if i == 0 else "دوم"
         await _edit_pm(ctx, uid, mid, f"🗡 رأی خیانت روی نماینده {lbl} — مثبت یا منفی؟", kb)
         return
