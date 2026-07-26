@@ -7352,16 +7352,26 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
         return
     rn = _seat_role_norm(g, target)
     if rn == _R_WATCHMAN and not getattr(g, "tk_shield_lost", False):
-        # 🛡 نگهبانِ شیلددار: نمی‌میرد، شیلدش می‌افتد و در شب دیگر اکتی ندارد
+        # 🛡 نگهبانِ شیلددار: نمی‌میرد — بعد از ۵۰ ثانیه اعلام می‌شود که زره‌اش افتاد
         g.tk_shield_lost = True
         store.save()
         await ctx.bot.send_message(
-            chat_id,
-            f"🛡 تیر جنگی به {target}. {tname} خورد اما شیلد داشت — "
-            f"شیلدش افتاد و در بازی می‌ماند.",
-            parse_mode="HTML")
+            chat_id, f"💥 تیر جنگی — {target}. {tname} وصیت کند.", parse_mode="HTML")
         await _night_report(ctx, g, f"🔫 گانِ روز: {shooter}. {sname} → {target}. {tname} "
-                                    f"(جنگی — شیلدِ نگهبان افتاد)")
+                                    f"(جنگی — شیلدِ نگهبان افتاد، در بازی ماند)")
+
+        async def _tk_shield_later():
+            try:
+                await asyncio.sleep(50)
+                if g.phase in ("idle", "ended"):
+                    return
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"🛡 {target}. {tname} زره داشت — <b>زره‌اش افتاد</b> و در بازی می‌ماند.",
+                    parse_mode="HTML")
+            except Exception as e:
+                print("⚠️ tk shield announce err:", e)
+        asyncio.create_task(_tk_shield_later())
         return
     g.striked.add(target)
     store.save()
@@ -7373,6 +7383,20 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
         pass
     await _night_report(ctx, g, f"🔫 گانِ روز: {shooter}. {sname} → {target}. {tname} "
                                 f"(جنگی — خارج شد، {_sc_side(g, target)})")
+
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
+    _tside = _sc_side(g, target)
+
+    async def _tk_side_later():
+        try:
+            await asyncio.sleep(50)
+            if g.phase in ("idle", "ended"):
+                return
+            await ctx.bot.send_message(
+                chat_id, f"ساید {target}. {tname}: <b>{_tside}</b>", parse_mode="HTML")
+        except Exception as e:
+            print("⚠️ tk side announce err:", e)
+    asyncio.create_task(_tk_side_later())
 
 
 # ═══════════════ 🤝 موتورِ معتمدِ کاپو (کاپو — روز ۱) ═══════════════
