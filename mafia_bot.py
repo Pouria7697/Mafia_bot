@@ -282,6 +282,10 @@ class GameState:
         self.night_burned_uids = getattr(self, "night_burned_uids", set()) or set()
         self.burn_tmp = getattr(self, "burn_tmp", []) or []
         self.night_god_panel_mid = getattr(self, "night_god_panel_mid", None)
+        # 🎛 اکتِ دستیِ گاد (به‌جای بازیکن)
+        self.god_acting_as = getattr(self, "god_acting_as", None)          # صندلی‌ای که گاد جایش اکت می‌زند
+        self.god_act_tmp = getattr(self, "god_act_tmp", None)              # انتخابِ تأییدنشده
+        self.night_prompt_cache = getattr(self, "night_prompt_cache", {}) or {}   # uid → (متن, کیبورد)
         # 🎯 حدسِ ۳ مافیا توسط شهروندِ خروجیِ روز ۱
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
@@ -3670,7 +3674,78 @@ def _kb_add_back(kb, back_cb):
     return InlineKeyboardMarkup(rows)
 
 
+# ═══════════ 🎛 اکتِ دستیِ گاد — جانشینیِ پیویِ بازیکن ═══════════
+_GOD_ONLY_CB = ("kpd_", "kpg_", "kpe_", "kpc_", "nemd_", "nemc_", "nrep_", "bzd_",
+                "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_")
+
+
+def _kb_dump(kb):
+    """کیبوردِ اینلاین → داده‌ی ساده (قابلِ ذخیره در state)."""
+    if not kb:
+        return None
+    try:
+        return [[(b.text, b.callback_data) for b in row if b.callback_data]
+                for row in kb.inline_keyboard]
+    except Exception:
+        return None
+
+
+def _kb_load(dump):
+    """داده‌ی ساده → کیبوردِ اینلاین."""
+    if not dump:
+        return None
+    try:
+        rows = [[InlineKeyboardButton(t, callback_data=c) for t, c in row] for row in dump if row]
+        return InlineKeyboardMarkup(rows) if rows else None
+    except Exception:
+        return None
+
+
+def _god_impersonating(uid):
+    """اگر این آیدی گادی است که در حالِ اکتِ دستی است → (بازی، صندلی، آیدیِ بازیکن)."""
+    try:
+        for _g in store.games.values():
+            s = getattr(_g, "god_acting_as", None)
+            if _g.god_id == uid and s and s in _g.seats:
+                return _g, s, _g.seats[s][0]
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _q_uid(q):
+    """آیدیِ مؤثرِ کال‌بک — وقتی گاد «اکتِ دستی» می‌زند، به‌جای خودِ بازیکن حساب می‌شود.
+    دکمه‌های مخصوصِ گاد از این قاعده مستثنا هستند."""
+    u = q.from_user.id
+    d = q.data or ""
+    if d.startswith(_GOD_ONLY_CB):
+        return u
+    _g, _s, puid = _god_impersonating(u)
+    return puid if puid else u
+
+
+def _pm_target(uid):
+    """اگر گاد دارد به‌جای این بازیکن اکت می‌زند، پیام‌هایش باید به پیویِ گاد برود."""
+    try:
+        for _g in store.games.values():
+            s = getattr(_g, "god_acting_as", None)
+            if s and s in _g.seats and _g.seats[s][0] == uid:
+                return _g.god_id
+    except Exception:
+        pass
+    return uid
+
+
 async def _safe_pm(ctx, uid, text, kb=None):
+    # 📥 پرامپت را همیشه کش کن — حتی اگر ارسال نشود (گوشی خاموش/پیوی بسته)،
+    #    تا گاد بتواند با «اکتِ دستی» همین سؤال را جای بازیکن جواب بدهد
+    try:
+        for _g in store.games.values():
+            if any(u == uid for u, _n in _g.seats.values()):
+                _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
+                break
+    except Exception:
+        pass
     # 🔥 اکتِ سوخته: مثل بازیکنِ با پیویِ بسته رفتار می‌شود — هیچ پرامپتی نمی‌گیرد
     try:
         for _g in store.games.values():
@@ -3679,7 +3754,7 @@ async def _safe_pm(ctx, uid, text, kb=None):
     except Exception:
         pass
     try:
-        return await ctx.bot.send_message(uid, text, reply_markup=kb)
+        return await ctx.bot.send_message(_pm_target(uid), text, reply_markup=kb)
     except Exception:
         return None
 
@@ -3705,14 +3780,36 @@ async def _report_unreachable(ctx, chat_id, g):
 
 async def _edit_pm(ctx, uid, msg_id, text, kb):
     try:
-        await ctx.bot.edit_message_text(chat_id=uid, message_id=msg_id, text=text, reply_markup=kb)
+        for _g in store.games.values():
+            if any(u == uid for u, _n in _g.seats.values()):
+                _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
+                break
+    except Exception:
+        pass
+    try:
+        await ctx.bot.edit_message_text(chat_id=_pm_target(uid), message_id=msg_id,
+                                        text=text, reply_markup=kb)
     except Exception:
         pass
 
 async def _close_pm(ctx, uid, msg_id, text):
     """ویرایش پیام به متن نهایی و حذف دکمه‌ها (تا نتوانند نظرشان را عوض کنند)."""
+    target = _pm_target(uid)
     try:
-        await ctx.bot.edit_message_text(chat_id=uid, message_id=msg_id, text=text, reply_markup=None)
+        for _g in store.games.values():
+            if any(u == uid for u, _n in _g.seats.values()):
+                _g.night_prompt_cache.pop(uid, None)   # اکت تمام شد → دیگر پرامپتی نمانده
+                # 🎛 اکتِ دستی با تمام‌شدنِ همین اکت خودکار بسته می‌شود،
+                #    وگرنه بقیه‌ی پیام‌های این بازیکن هم به پیویِ گاد می‌رفت
+                s = getattr(_g, "god_acting_as", None)
+                if s and s in _g.seats and _g.seats[s][0] == uid:
+                    _g.god_acting_as = None
+                break
+    except Exception:
+        pass
+    try:
+        await ctx.bot.edit_message_text(chat_id=target, message_id=msg_id,
+                                        text=text, reply_markup=None)
     except Exception:
         pass
 
@@ -3968,17 +4065,7 @@ async def start_night(ctx, chat_id, g):
         # ⚠️ هشدار درباره بازیکن‌هایی که بات را استارت نکرده‌اند
         await _report_unreachable(ctx, chat_id, g)
 
-        # 👢 کیک شب (همه‌ی سناریوها): از گاد بپرس
-        try:
-            await ctx.bot.send_message(
-                g.god_id,
-                f"👢 شب {g.night_number} — آیا امشب کسی «کیکِ شب» می‌شود؟",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ بله", callback_data="nkick_yes")],
-                    [InlineKeyboardButton("🚫 خیر", callback_data="nkick_no")],
-                ]))
-        except Exception:
-            pass
+        # 👢 کیکِ شب دیگر پرسیده نمی‌شود — دکمه‌اش در پنلِ گاد همیشه در دسترس است
 
         if is_neg:
             g.night_stage = "mafia_decision"
@@ -4020,10 +4107,13 @@ async def start_night(ctx, chat_id, g):
 
     # 🎛 پنلِ شبِ گاد در پیوی: سوزاندن اکت + کیک شب (با پایانِ شب دکمه‌ها حذف می‌شوند)
     try:
-        _kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔥 سوزاندن اکت", callback_data="nburn_open"),
-            InlineKeyboardButton("👢 کیک شب", callback_data="nkick_open"),
-        ]])
+        _kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔥 سوزاندن اکت", callback_data="nburn_open"),
+                InlineKeyboardButton("👢 کیک شب", callback_data="nkick_open"),
+            ],
+            [InlineKeyboardButton("🎛 اکت دستی", callback_data="gact_open")],
+        ])
         _pm = await ctx.bot.send_message(g.god_id, f"🌙 شب {g.night_number} — پنلِ گاد", reply_markup=_kb)
         g.night_god_panel_mid = _pm.message_id
         store.save()
@@ -4144,6 +4234,9 @@ async def end_night(ctx, chat_id, g):
     # 🔥 سوختگیِ اکت فقط تا پایانِ همین شب اعتبار دارد
     g.night_burned = set()
     g.night_burned_uids = set()
+    g.god_acting_as = None          # 🎛 اکتِ دستی با شبِ نو ریست می‌شود
+    g.god_act_tmp = None
+    g.night_prompt_cache = {}
     # 🎛 دکمه‌های پنلِ شبِ گاد حذف شوند (اشتباهی در روز دستش نخورد)
     _pmid = getattr(g, "night_god_panel_mid", None)
     if _pmid:
@@ -4216,6 +4309,83 @@ def _shot_outcome(g, seat):
             return "kill"   # زره با رأیِ روز افتاده → دیگر محافظتی ندارد
         return "zereh"
     return "kill"
+
+
+def _burn_seat_acts(g, seat):
+    """🔥 سوزاندنِ کاملِ اکتِ یک صندلی (کیکِ شب/روز یا سوزاندنِ دستی).
+    هر چیزی که این نفر امشب ثبت کرده پاک می‌شود — انگار اصلاً اکت نزده."""
+    if seat not in g.seats:
+        return
+    rn = _seat_role_norm(g, seat)
+
+    # نقش → فیلدهایی که همان نقش می‌نویسد
+    per_role = {
+        # 🛡 سیو/محافظت
+        _R_DOCTOR:      ("night_doc_saved",),
+        _R_GUARD:       ("night_doc_saved",),            # محافظِ نماینده
+        _R_ARMORER:     ("night_doc_saved",),            # زره‌سازِ کاپو
+        _R_WATCHMAN:    ("night_guard_seats",),          # نگهبانِ تکاور
+        # 🔫 کشتن/شلیک
+        _R_SNIPER:      ("night_sniper_target",),
+        _R_SNIPER_BZP:  ("night_sniper_target",),
+        _R_HUNTER:      ("night_hunter_target",),
+        _R_COMMANDO:    ("night_commando_target",),
+        _R_GUNMAN:      ("night_gun1_target", "night_gun1_type",
+                         "night_gun2_target", "night_gun2_type"),
+        _R_EXECUTIONER: ("night_jalad_target", "night_jalad_seat", "night_jalad_correct"),
+        # 🕵️ اکت‌های دیگر
+        _R_NATO:        ("night_nato_seat", "night_nato_target", "night_nato_correct"),
+        _R_SHIAD:       ("night_shiad_guess",),
+        _R_HOSTAGE:     ("night_hostage_seat",),
+        _R_HACKER:      ("night_hacker_actor", "night_hacker_target"),
+        _R_WITCH:       ("night_witch_target",),
+        _R_BAAZPORS:    ("night_baz_targets",),
+        _R_LAWYER:      ("night_lawyer_target",),
+        _R_GUIDE:       ("night_guide_target", "night_guide_recipient_inv"),
+        _R_ATTAR:       ("night_attar_poison_target",),
+        _R_MINER:       ("night_mine_sacrifice",),
+    }
+    empties = {"night_doc_saved": [], "night_guard_seats": [], "night_baz_targets": [],
+               "night_nato_correct": False, "night_jalad_correct": False}
+
+    fields = list(per_role.get(rn, ()))
+
+    # 🩸 تصمیم‌گیرندهٔ مافیا (شات/مذاکره/ناتویی/یاکوزایی/خنثی) — هر سناریو کلیدِ خودش را دارد
+    decider_keys = ("night_decider_seat", "bzp_decider_seat", "nem_decider_seat",
+                    "tk_decider_seat", "kp_decider_seat")
+    if any(getattr(g, k, None) == seat for k in decider_keys):
+        fields += ["night_shot_target", "night_is_negotiation", "night_negotiation_target",
+                   "night_don_act", "night_don_defuse", "night_yakuza_sacrifice"]
+
+    cleared = []
+    for f in fields:
+        if getattr(g, f, None) in (None, [], False, {}):
+            continue
+        setattr(g, f, empties.get(f, None))
+        cleared.append(f)
+
+    # 🔫 گانِ روزِ تکاور: هم آنچه داده، هم آنچه گرفته، می‌سوزد
+    guns = getattr(g, "tk_day_guns", None)
+    if isinstance(guns, dict) and guns:
+        if rn == _R_GUNMAN:
+            g.tk_day_guns = {}
+            cleared.append("tk_day_guns")
+        elif seat in guns:
+            guns.pop(seat, None)
+            cleared.append("tk_day_gun")
+    if getattr(g, "tk_gun_aiming", None) == seat:
+        g.tk_gun_aiming = None
+
+    # انتخاب‌های نیمه‌کارهٔ همین نفر هم پاک شوند
+    _u = g.seats[seat][0]
+    for d in ("night_sel", "night_doc_sel", "night_baz_sel", "night_guard_sel"):
+        try:
+            (getattr(g, d, None) or {}).pop(_u, None)
+        except Exception:
+            pass
+
+    store.save()
+    return cleared
 
 
 def _add_night_kick(g, dead, reasons):
@@ -4469,6 +4639,10 @@ async def _resolve_baazpors(ctx, chat_id, g):
     # 🪢 هانتر: اگر امشب کشته شود و به مافیایی جز گادفادر بسته باشد، آن فرد را با خود می‌برد
     hunter = _find_seat_by_role(g, _R_HUNTER, alive_only=False)
     ht = g.night_hunter_target
+    # 👢 هانترِ کیک‌شده (شب یا روز) اکتش سوخته — کسی را با خود نمی‌برد
+    if hunter is not None and (hunter in (g.score_kicked or set())
+                               or hunter == getattr(g, "night_kick_seat", None)):
+        ht = None
     if hunter is not None and hunter in dead and ht and ht in g.seats and ht not in dead:
         draggable = (ht in _mafia_seats(g)) and (_seat_role_norm(g, ht) != _R_GODFATHER)
         if draggable:
@@ -4976,6 +5150,9 @@ async def handle_burn_callback(update, ctx):
         g.night_burned = set(g.burn_tmp or [])
         g.night_burned_uids = {g.seats[s][0] for s in g.night_burned if s in g.seats}
         g.burn_tmp = []
+        # 🔥 هرچه تا الان ثبت کرده بودند هم پاک شود (نه فقط پرامپت‌های بعدی)
+        for s in newly:
+            _burn_seat_acts(g, s)
         store.save()
         # پیویِ بازِ سوخته‌ها بسته شود تا دکمه‌ای برایشان نماند
         for s in newly:
@@ -5002,6 +5179,120 @@ async def handle_burn_callback(update, ctx):
     store.save()
     await _edit_pm(ctx, uid, mid,
                    "🔥 اکتِ چه کسانی سوزانده شود؟ (تا پایانِ همین شب اعتبار دارد)", _burn_kb(g))
+
+
+# ═══════════════ 🎛 اکتِ دستیِ گاد (به‌جای بازیکن) ═══════════════
+def _gact_kb(g):
+    """لیستِ زنده‌ها برای اکتِ دستی — کنارِ هرکس که پرامپتِ باز دارد 🔔 می‌آید."""
+    sel = getattr(g, "god_act_tmp", None)
+    cache = getattr(g, "night_prompt_cache", {}) or {}
+    rows, row = [], []
+    for s in _alive_seats(g):
+        u = g.seats[s][0]
+        mark = "✅ " if s == sel else ""
+        bell = " 🔔" if u in cache else ""
+        row.append(InlineKeyboardButton(f"{mark}{s}{bell}", callback_data=f"gact_pick_{s}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="gact_ok")])
+    if getattr(g, "god_acting_as", None):
+        rows.append([InlineKeyboardButton("🚫 پایانِ اکتِ دستی", callback_data="gact_end")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _gact_title(g):
+    cur = getattr(g, "god_acting_as", None)
+    head = "🎛 <b>اکت دستی</b> — به‌جای چه کسی اکت می‌زنی؟\n🔔 = همین حالا پرامپتِ باز دارد"
+    if cur and cur in g.seats:
+        head += f"\n\n▶️ الان به‌جای <b>{cur}. {escape(g.seats[cur][1], quote=False)}</b> هستی."
+    return head
+
+
+async def _gact_panel(ctx, uid, g, mid=None):
+    txt = _gact_title(g)
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text=txt,
+                                            parse_mode="HTML", reply_markup=_gact_kb(g))
+            return mid
+        except Exception:
+            pass
+    m = await ctx.bot.send_message(uid, txt, parse_mode="HTML", reply_markup=_gact_kb(g))
+    return m.message_id
+
+
+async def handle_god_act_callback(update, ctx):
+    """🎛 گاد به‌جای بازیکن اکت می‌زند — همان پرامپتِ خودِ بازیکن در پیویِ گاد باز می‌شود."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None
+    for _cid, game in store.games.items():
+        if game.god_id == uid and game.phase not in ("idle", "ended"):
+            g = game
+            break
+    if g is None:
+        await safe_q_answer(q, "بازیِ فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    if data == "gact_open":
+        g.god_act_tmp = None
+        store.save()
+        await _gact_panel(ctx, uid, g)
+        return
+
+    if data == "gact_end":
+        g.god_acting_as = None
+        g.god_act_tmp = None
+        store.save()
+        await _gact_panel(ctx, uid, g, mid)
+        return
+
+    if data.startswith("gact_pick_"):
+        g.god_act_tmp = int(data.rsplit("_", 1)[1])
+        store.save()
+        await _gact_panel(ctx, uid, g, mid)
+        return
+
+    if data == "gact_ok":
+        s = getattr(g, "god_act_tmp", None)
+        if not s or s not in g.seats:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        puid = g.seats[s][0]
+        cached = (getattr(g, "night_prompt_cache", {}) or {}).get(puid)
+        if not cached:
+            await safe_q_answer(
+                q, "این بازیکن الان پرامپتِ بازی ندارد (یا اکتش را زده یا هنوز نوبتش نشده).",
+                show_alert=True)
+            return
+        # 🔒 پرامپتِ خودِ بازیکن بی‌دکمه شود تا اگر گوشی‌اش برگشت، دوباره اکت نزند
+        old_mid = (g.night_pm_msgs or {}).get(puid)
+        if old_mid:
+            try:
+                await ctx.bot.edit_message_reply_markup(chat_id=puid, message_id=old_mid,
+                                                        reply_markup=None)
+            except Exception:
+                pass
+        # از این لحظه، دکمه‌های این پرامپت به‌نامِ همین بازیکن ثبت می‌شوند
+        g.god_acting_as = s
+        g.god_act_tmp = None
+        store.save()
+        await _gact_panel(ctx, uid, g, mid)
+        text, kbd = cached
+        m = await ctx.bot.send_message(
+            uid, f"🎛 <b>به‌جای {s}. {escape(g.seats[s][1], quote=False)}</b>\n\n{escape(text, quote=False)}",
+            parse_mode="HTML", reply_markup=_kb_load(kbd))
+        # پیویِ خودِ بازیکن هم به همین پیام وصل می‌شود تا ویرایش/بستن درست کار کند
+        g.night_pm_msgs[puid] = m.message_id
+        store.save()
+        await _night_report(ctx, g, f"🎛 اکتِ دستی: گاد به‌جای <b>{s}. "
+                                    f"{escape(g.seats[s][1], quote=False)}</b> اکت می‌زند.")
+        return
 
 
 # ═══════════════ 🗳 موتورِ شمارشِ دنگِ نمایندگی (نماینده — روز ۱) ═══════════════
@@ -5517,7 +5808,7 @@ async def _do_room_close(ctx, chat_id, g):
 async def handle_night_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی: گاد به‌جای بازیکن حساب می‌شود
 
     # پیدا کردن بازیِ فعالِ شب که این کاربر در آن بازیکن است
     g = None
@@ -5977,7 +6268,7 @@ async def _bzp_check_open_rest(ctx, chat_id, g):
 async def handle_baazpors_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
     g, chat_id = _find_active_night_game(uid, q)
     if g is None:
         await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
@@ -6669,7 +6960,7 @@ async def _nem_ask_defuse(ctx, uid, mid):
 async def handle_nemayande_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
     g, chat_id = _find_active_night_game(uid, q)
     if g is None:
         await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
@@ -7655,7 +7946,7 @@ async def handle_kapu_trust_callback(update, ctx):
     """🤝 کاپو: پایانِ شمارش، تأیید/انتخابِ معتمد، نوعِ گان، انتخابِ جفتِ دفاع، اکتِ گان."""
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
 
     # پایانِ شمارش — دکمه‌ی گروهی، چت-محور
     if data == "kpe_end":
@@ -7819,7 +8110,7 @@ async def handle_kapu_trust_callback(update, ctx):
 async def handle_takavar_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
 
     # سوال شیلد از گادِ راوی (بازیکن نیست)
     if data.startswith("tk_shield_"):
@@ -8355,7 +8646,7 @@ def _kp_armorer_targets(g, arm_seat):
 async def handle_kapu_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
     g, chat_id = _find_active_night_game(uid, q)
     if g is None:
         await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
@@ -9228,7 +9519,7 @@ def _gm_james_nums_kb(g):
 async def handle_gamer_callback(update, ctx):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
 
     # 🔀 انتخابِ تووفیس (شات یا بمب) — وقتی شات از راهِ وراثت به او رسیده و شبِ فرد است
     if data in ("gm_tfc_bomb", "gm_tfc_shot"):
@@ -9961,6 +10252,7 @@ async def handle_night_kick_callback(update, ctx):
         _tn = g.seats[s][1]
         # 👢 کیک‌شده امشب اکت ندارد (مثل سوختن) + شاتِ معطلش به مافیای بعدی پاس می‌شود
         await _pass_shot_to_next_mafia(ctx, g, s)   # قبل از بستنِ پیوی (به پرامپتِ باز نیاز دارد)
+        _burn_seat_acts(g, s)   # 🔥 هرچه تا الان زده بود هم می‌سوزد
         g.night_burned.add(s)
         _ku = g.seats[s][0]
         g.night_burned_uids.add(_ku)
@@ -10020,6 +10312,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_burn_callback(update, ctx)
         return
 
+    # 🎛 اکتِ دستیِ گاد (پیوی)
+    if _q and _q.data and _q.data.startswith("gact_"):
+        await handle_god_act_callback(update, ctx)
+        return
+
     # 🧑‍⚖️ بازپرس: ادامه/ملغی + پایانِ دوئل
     if _q and _q.data and _q.data.startswith("bzd_"):
         await handle_baz_duel_callback(update, ctx)
@@ -10063,7 +10360,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_gamer_callback(update, ctx)
         # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
         try:
-            _gg, _ = _find_active_night_game(_q.from_user.id, _q)
+            _gg, _ = _find_active_night_game(_q_uid(_q), _q)
             if _gg is not None:
                 await _maybe_notify_god_done(ctx, _gg)
         except Exception:
@@ -11064,6 +11361,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             _kside = _sc_side(g, s)
             g.score_kicked.add(s)
             g.striked.add(s)
+            # 🔥 کیکِ روز هم اکتِ شبِ ثبت‌شده‌اش را می‌سوزاند (هانتر یارش را نمی‌برد و…)
+            _burn_seat_acts(g, s)
+            if g.seats[s][0] not in (g.night_burned_uids or set()):
+                g.night_burned.add(s)
+                g.night_burned_uids.add(g.seats[s][0])
             try:
                 await ctx.bot.send_message(
                     chat, f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_kside}</b>",
