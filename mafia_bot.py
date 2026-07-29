@@ -285,6 +285,7 @@ class GameState:
         # 🎛 اکتِ دستیِ گاد (به‌جای بازیکن)
         self.god_acting_as = getattr(self, "god_acting_as", None)          # صندلی‌ای که گاد جایش اکت می‌زند
         self.god_act_tmp = getattr(self, "god_act_tmp", None)              # انتخابِ تأییدنشده
+        self.god_acted_seats = getattr(self, "god_acted_seats", set()) or set()   # اکتِ دستی ← اولویت بر کیک
         self.night_prompt_cache = getattr(self, "night_prompt_cache", {}) or {}   # uid → (متن, کیبورد)
         # 🎯 حدسِ ۳ مافیا توسط شهروندِ خروجیِ روز ۱
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
@@ -359,6 +360,8 @@ class GameState:
         self.antidote_votes = getattr(self, "antidote_votes", {}) or {}
         self.antidote_expected = getattr(self, "antidote_expected", []) or []
         self.antidote_done = getattr(self, "antidote_done", False)
+        self.antidote_skipped = getattr(self, "antidote_skipped", set()) or set()   # 🔥 رأی‌های سوزانده‌شده
+        self.kp_vote_panel_mid = getattr(self, "kp_vote_panel_mid", None)           # پنلِ زنده در پیویِ گاد
         self.heir_seat = getattr(self, "heir_seat", None)
         self.heir_target = getattr(self, "heir_target", None)
         self.heir_inherited = getattr(self, "heir_inherited", False)
@@ -1454,6 +1457,39 @@ def build_selected_report(sl: dict) -> str:
     return "\n".join(lines)
 
 
+async def _selected_live_ping(bot, sl: dict, uid: str, kind: str):
+    """📣 گزارشِ لحظه‌ایِ پاسخِ هر نفر به پیویِ ادمین (مستقل از مهلتِ ۴۸ ساعته)."""
+    cand = sl.get("candidates", {}) or {}
+    responses = sl.get("responses", {}) or {}
+    r = responses.get(uid) or {}
+    nm = escape(r.get("name") or cand.get(uid) or "بازیکن", quote=False)
+    who = f"<a href='tg://user?id={uid}'>{nm}</a>"
+
+    if kind == "no":
+        head = f"❌ {who} گفت <b>نمی‌آید</b>."
+    elif kind == "yes":
+        head = f"✅ {who} گفت <b>می‌آید</b> — منتظرِ انتخابِ روزهاست."
+    else:  # submit
+        head = f"📝 {who} روزهایش را ثبت کرد: <b>{escape('، '.join(r.get('days', [])), quote=False)}</b>"
+
+    def _final(u):
+        x = responses.get(u)
+        return bool(x and (not x.get("participate") or x.get("submitted")))
+
+    done = [u for u in cand if _final(u)]
+    yes = [u for u in done if (responses.get(u) or {}).get("participate")]
+    waiting = [u for u in cand if u not in done]
+    lines = [head, f"📊 تعیین‌تکلیف‌شده: <b>{len(done)}/{len(cand)}</b> | مایل: <b>{len(yes)}</b>"]
+    if waiting:
+        names = "، ".join(escape((responses.get(u) or {}).get("name")
+                                 or cand.get(u) or str(u), quote=False) for u in waiting)
+        lines.append(f"⏳ هنوز پاسخ نداده‌اند ({len(waiting)}): {names}")
+    try:
+        await bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ selected live ping:", e)
+
+
 async def _maybe_send_full_report(bot, sl: dict):
     """وقتی همهٔ کاندیداها پاسخ نهایی دادند، یک گزارش کامل به ادمین می‌فرستد."""
     cand = sl.get("candidates", {})
@@ -1532,6 +1568,7 @@ async def handle_selected_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
         await ctx.bot.send_message(int(uid), "باشه، ممنون! 🙏")
+        await _selected_live_ping(ctx.bot, sl, uid, "no")
         await _maybe_send_full_report(ctx.bot, sl)
         return
 
@@ -1544,6 +1581,7 @@ async def handle_selected_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             "در پایان «📝 ثبت» را بزنید:",
             reply_markup=kb_selected_days(set()),
         )
+        await _selected_live_ping(ctx.bot, sl, uid, "yes")
         return
 
     if data.startswith("selday_"):
@@ -1590,6 +1628,7 @@ async def handle_selected_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await ctx.bot.send_message(
             int(uid), f"✅ ثبت شد! روزهای انتخابی شما: {'، '.join(r['days'])}"
         )
+        await _selected_live_ping(ctx.bot, sl, uid, "submit")
         await _maybe_send_full_report(ctx.bot, sl)
         return
 
@@ -3676,7 +3715,7 @@ def _kb_add_back(kb, back_cb):
 
 # ═══════════ 🎛 اکتِ دستیِ گاد — جانشینیِ پیویِ بازیکن ═══════════
 _GOD_ONLY_CB = ("kpd_", "kpg_", "kpe_", "kpc_", "nemd_", "nemc_", "nrep_", "bzd_",
-                "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_")
+                "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_", "kpv_")
 
 
 def _kb_dump(kb):
@@ -4019,6 +4058,8 @@ async def start_night(ctx, chat_id, g):
     g.antidote_votes = {}
     g.antidote_expected = []
     g.antidote_done = False
+    g.antidote_skipped = set()
+    g.kp_vote_panel_mid = None
     # per-night گیمر (بمبِ شبِ قبل تا الان در روز تعیین‌تکلیف شده)
     g.gm_bomb_seat = None
     g.gm_bomb_fuses = {}
@@ -4236,6 +4277,7 @@ async def end_night(ctx, chat_id, g):
     g.night_burned_uids = set()
     g.god_acting_as = None          # 🎛 اکتِ دستی با شبِ نو ریست می‌شود
     g.god_act_tmp = None
+    g.god_acted_seats = set()
     g.night_prompt_cache = {}
     # 🎛 دکمه‌های پنلِ شبِ گاد حذف شوند (اشتباهی در روز دستش نخورد)
     _pmid = getattr(g, "night_god_panel_mid", None)
@@ -4311,11 +4353,22 @@ def _shot_outcome(g, seat):
     return "kill"
 
 
-def _burn_seat_acts(g, seat):
+def _god_acted_for(g, seat) -> bool:
+    """🎛 آیا گاد امشب به‌جای این صندلی «اکت دستی» زده؟"""
+    return seat in (getattr(g, "god_acted_seats", set()) or set())
+
+
+def _burn_seat_acts(g, seat, force=False):
     """🔥 سوزاندنِ کاملِ اکتِ یک صندلی (کیکِ شب/روز یا سوزاندنِ دستی).
-    هر چیزی که این نفر امشب ثبت کرده پاک می‌شود — انگار اصلاً اکت نزده."""
+    هر چیزی که این نفر امشب ثبت کرده پاک می‌شود — انگار اصلاً اکت نزده.
+
+    ⚠️ اولویتِ اکتِ دستی: اگر گاد خودش به‌جای این نفر اکت زده باشد، کیک آن را
+    نمی‌سوزاند (گاد آگاهانه ثبتش کرده). فقط دکمه‌ی «🔥 سوزاندن اکت» که خودِ گاد
+    می‌زند با force=True همه‌چیز را پاک می‌کند."""
     if seat not in g.seats:
         return
+    if not force and _god_acted_for(g, seat):
+        return []   # 🎛 اکتِ دستیِ گاد بر کیک اولویت دارد
     rn = _seat_role_norm(g, seat)
 
     # نقش → فیلدهایی که همان نقش می‌نویسد
@@ -4397,8 +4450,32 @@ def _add_night_kick(g, dead, reasons):
         g.score_kicked.add(ks)   # 🏅 انضباطِ کیک‌شده = ۰
 
 
+async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
+    """🔫 گزارشِ صریحِ سرنوشتِ شلیکِ مافیا — تا اگر هدف خط نخورد، گاد بداند چرا."""
+    st = getattr(g, "night_shot_target", None)
+    if not st or st not in g.seats:
+        return
+    nm = escape(g.seats[st][1], quote=False)
+    if st in (g.striked or set()):
+        why = "قبلاً از بازی خارج شده بود"
+    elif st in dead:
+        return   # خورد و در «کشته‌های شب» می‌آید — نیاز به توضیح نیست
+    elif st in (zereh_warn or []):
+        why = "زره‌پوش بود — بات خودکار خط نمی‌زند؛ اگر شات درست است خودت خط بزن"
+    elif _is_saved(g, st):
+        why = "پزشک سیوش کرده بود"
+    elif _armor_kind(g, st) == "rouin":
+        why = "رویین‌تن بود (مصون)"
+    else:
+        why = "دلیلِ نامشخص — اگر انتظار داشتی خط بخورد، همین پیام را برایم بفرست"
+    await _night_report(
+        ctx, g,
+        f"🔫 <b>سرنوشتِ شلیکِ مافیا</b>: هدف {st}. {nm} <b>خط نخورد</b> — {why}.")
+
+
 async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     dead = {s for s in dead if s in g.seats and s not in (g.striked or set())}
+    await _shot_outcome_report(ctx, g, dead, reasons, zereh_warn)
     _score_night_acts(g, dead, reasons)   # 🏅 قبل از خط‌خوردن — وضعیتِ سیو/زره هنوز سرِ جاست
     for s in dead:
         g.striked.add(s)
@@ -4640,8 +4717,10 @@ async def _resolve_baazpors(ctx, chat_id, g):
     hunter = _find_seat_by_role(g, _R_HUNTER, alive_only=False)
     ht = g.night_hunter_target
     # 👢 هانترِ کیک‌شده (شب یا روز) اکتش سوخته — کسی را با خود نمی‌برد
-    if hunter is not None and (hunter in (g.score_kicked or set())
-                               or hunter == getattr(g, "night_kick_seat", None)):
+    #    مگر اینکه گاد خودش دستی بسته باشد (اکتِ دستی بر کیک اولویت دارد)
+    if (hunter is not None and not _god_acted_for(g, hunter)
+            and (hunter in (g.score_kicked or set())
+                 or hunter == getattr(g, "night_kick_seat", None))):
         ht = None
     if hunter is not None and hunter in dead and ht and ht in g.seats and ht not in dead:
         draggable = (ht in _mafia_seats(g)) and (_seat_role_norm(g, ht) != _R_GODFATHER)
@@ -5150,9 +5229,11 @@ async def handle_burn_callback(update, ctx):
         g.night_burned = set(g.burn_tmp or [])
         g.night_burned_uids = {g.seats[s][0] for s in g.night_burned if s in g.seats}
         g.burn_tmp = []
-        # 🔥 هرچه تا الان ثبت کرده بودند هم پاک شود (نه فقط پرامپت‌های بعدی)
+        # 🔥 هرچه تا الان ثبت کرده بودند هم پاک شود (نه فقط سؤال‌های بعدی)
+        #    force=True: این دکمه را خودِ گاد زده، پس بر اکتِ دستی هم مقدم است
         for s in newly:
-            _burn_seat_acts(g, s)
+            _burn_seat_acts(g, s, force=True)
+            g.god_acted_seats.discard(s)
         store.save()
         # پیویِ بازِ سوخته‌ها بسته شود تا دکمه‌ای برایشان نماند
         for s in newly:
@@ -5204,7 +5285,7 @@ def _gact_kb(g):
 
 def _gact_title(g):
     cur = getattr(g, "god_acting_as", None)
-    head = "🎛 <b>اکت دستی</b> — به‌جای چه کسی اکت می‌زنی؟\n🔔 = همین حالا پرامپتِ باز دارد"
+    head = "🎛 <b>اکت دستی</b> — به‌جای چه کسی اکت می‌زنی؟\n🔔 = همین حالا سؤالِ اکتش باز است"
     if cur and cur in g.seats:
         head += f"\n\n▶️ الان به‌جای <b>{cur}. {escape(g.seats[cur][1], quote=False)}</b> هستی."
     return head
@@ -5267,7 +5348,7 @@ async def handle_god_act_callback(update, ctx):
         cached = (getattr(g, "night_prompt_cache", {}) or {}).get(puid)
         if not cached:
             await safe_q_answer(
-                q, "این بازیکن الان پرامپتِ بازی ندارد (یا اکتش را زده یا هنوز نوبتش نشده).",
+                q, "این بازیکن الان سؤالِ بازی ندارد (یا اکتش را زده یا هنوز نوبتش نشده).",
                 show_alert=True)
             return
         # 🔒 پرامپتِ خودِ بازیکن بی‌دکمه شود تا اگر گوشی‌اش برگشت، دوباره اکت نزند
@@ -5278,14 +5359,18 @@ async def handle_god_act_callback(update, ctx):
                                                         reply_markup=None)
             except Exception:
                 pass
-        # از این لحظه، دکمه‌های این پرامپت به‌نامِ همین بازیکن ثبت می‌شوند
+        # از این لحظه، دکمه‌های این سؤال به‌نامِ همین بازیکن ثبت می‌شوند
         g.god_acting_as = s
+        g.god_acted_seats.add(s)   # 🎛 اکتِ دستی بر کیک اولویت دارد
         g.god_act_tmp = None
         store.save()
         await _gact_panel(ctx, uid, g, mid)
         text, kbd = cached
         m = await ctx.bot.send_message(
-            uid, f"🎛 <b>به‌جای {s}. {escape(g.seats[s][1], quote=False)}</b>\n\n{escape(text, quote=False)}",
+            uid,
+            f"🎛 <b>به‌جای {s}. {escape(g.seats[s][1], quote=False)}</b>\n\n"
+            f"{escape(text, quote=False)}\n\n"
+            f"<i>⚠️ تا «تأیید» را نزنی هیچ اکتی ثبت نمی‌شود.</i>",
             parse_mode="HTML", reply_markup=_kb_load(kbd))
         # پیویِ خودِ بازیکن هم به همین پیام وصل می‌شود تا ویرایش/بستن درست کار کند
         g.night_pm_msgs[puid] = m.message_id
@@ -6221,7 +6306,7 @@ async def _bzp_check_open_rest(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[duid] = m.message_id
         else:
-            await _night_report(ctx, g, "⚠️ پرامپتِ کاراگاه ارسال نشد (پیوی بسته یا خطای تلگرام) — "
+            await _night_report(ctx, g, "⚠️ سؤالِ اکتِ کاراگاه ارسال نشد (پیوی بسته یا خطای تلگرام) — "
                                         "دوباره «شب» لازم نیست؛ اگر تکرار شد خبر بده.")
 
     # 💉 پزشک — در شب یاکوزایی/ناتویی حق سیو ندارد
@@ -8659,6 +8744,7 @@ async def handle_kapu_callback(update, ctx):
         g.antidote_votes[uid] = (data == "kp_anti_yes")
         await _close_pm(ctx, uid, mid, "✅ رأی شما ثبت شد.")
         store.save()
+        await _kp_vote_report(ctx, g, voter_uid=uid)   # 🧪 گزارشِ زنده به گاد
         # ✅ کیک‌شده/سوخته‌ها از انتظار خارج‌اند — فقط زنده‌های رأی‌نداده ملاک‌اند
         if not _kp_antidote_pending(g):
             await _kp_after_vote(ctx, chat_id, g)
@@ -9073,16 +9159,131 @@ async def _kp_broadcast_jalad(ctx, g):
 
 
 def _kp_antidote_pending(g):
-    """رأی‌ندادگانِ «هنوز در بازی» — کیک‌شده/سوخته/خط‌خورده منتظر نمی‌مانیم."""
+    """رأی‌ندادگانِ «هنوز در بازی» — کیک‌شده/سوخته/خط‌خورده/سوزانده‌شده منتظر نمی‌مانیم."""
     pending = []
+    skipped = getattr(g, "antidote_skipped", set()) or set()
     for u in (g.antidote_expected or []):
-        if u in (g.antidote_votes or {}):
+        if u in (g.antidote_votes or {}) or u in skipped:
             continue
         s = _seat_of_uid(g, u)
         if s is None or s in (g.striked or set()) or s in (g.night_burned or set()):
             continue
         pending.append(u)
     return pending
+
+
+def _kp_vote_panel_kb(g):
+    """دکمه‌های سوزاندنِ رأیِ کسانی که هنوز رأی نداده‌اند."""
+    rows = []
+    for u in _kp_antidote_pending(g):
+        s = _seat_of_uid(g, u)
+        if s is None:
+            continue
+        rows.append([InlineKeyboardButton(f"🔥 {s}. {g.seats[s][1]}", callback_data=f"kpv_b_{s}")])
+    if rows:
+        rows.append([InlineKeyboardButton("🔥 سوزاندنِ همه‌ی رأی‌های مانده", callback_data="kpv_all")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def _kp_vote_report(ctx, g, voter_uid=None):
+    """🧪 گزارشِ زنده‌ی رأی‌گیریِ پادزهر در پیویِ گاد (چه کسی رأی داد، چه کسی نداده)."""
+    votes = g.antidote_votes or {}
+    lines = ["🧪 <b>رأی‌گیریِ پادزهر</b>"]
+    if voter_uid is not None:
+        vs = _seat_of_uid(g, voter_uid)
+        if vs is not None:
+            v = votes.get(voter_uid)
+            lines.append(f"🗳 {vs}. {escape(g.seats[vs][1], quote=False)} رأی داد: "
+                         f"<b>{'بله (پادزهر)' if v else 'خیر'}</b>")
+    yes = sum(1 for v in votes.values() if v)
+    no = len(votes) - yes
+    lines.append(f"📊 تا اینجا: <b>{yes}</b> بله | <b>{no}</b> خیر")
+
+    burned = []
+    for u in (getattr(g, "antidote_skipped", set()) or set()):
+        s = _seat_of_uid(g, u)
+        if s is not None:
+            burned.append(f"{s}. {escape(g.seats[s][1], quote=False)}")
+    if burned:
+        lines.append("🔥 رأیِ سوزانده‌شده: " + "، ".join(burned))
+
+    pend = _kp_antidote_pending(g)
+    if pend:
+        names = []
+        for u in pend:
+            s = _seat_of_uid(g, u)
+            if s is not None:
+                names.append(f"{s}. {escape(g.seats[s][1], quote=False)}")
+        lines.append(f"⏳ <b>هنوز رأی نداده‌اند ({len(pend)})</b>: " + "، ".join(names))
+        lines.append("🔥 اگر کسی آفلاین است، رأیش را بسوزان تا شمارش معطل نماند.")
+    else:
+        lines.append("✅ همه تعیین‌تکلیف شدند.")
+
+    txt = "\n".join(lines)
+    kb = _kp_vote_panel_kb(g)
+    mid = getattr(g, "kp_vote_panel_mid", None)
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(chat_id=g.god_id, message_id=mid, text=txt,
+                                            parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    try:
+        m = await ctx.bot.send_message(g.god_id, txt, parse_mode="HTML", reply_markup=kb)
+        g.kp_vote_panel_mid = m.message_id
+        store.save()
+    except Exception:
+        pass
+
+
+async def handle_kp_vote_callback(update, ctx):
+    """🔥 سوزاندنِ رأیِ پادزهر توسط گاد (برای آفلاین‌ها)."""
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if game.god_id == uid and getattr(game, "poison_phase", False):
+            g, chat_id = game, cid
+            break
+    if g is None:
+        await safe_q_answer(q, "رأی‌گیریِ فعالی نیست.", show_alert=True)
+        return
+    await safe_q_answer(q)
+
+    if getattr(g, "antidote_done", False):
+        await _kp_vote_report(ctx, g)
+        return
+
+    targets = []
+    if data == "kpv_all":
+        targets = list(_kp_antidote_pending(g))
+    elif data.startswith("kpv_b_"):
+        s = int(data.rsplit("_", 1)[1])
+        if s in g.seats:
+            targets = [g.seats[s][0]]
+    if not targets:
+        await _kp_vote_report(ctx, g)
+        return
+
+    for u in targets:
+        g.antidote_skipped.add(u)
+        s = _seat_of_uid(g, u)
+        # پرامپتِ بازِ همان بازیکن بسته شود تا دکمه‌ای برایش نماند
+        pm = (g.night_pm_msgs or {}).get(u)
+        if pm:
+            try:
+                await _close_pm(ctx, u, pm, "🔥 گاد رأیت را سوزاند — این دور رأیی نداری.")
+            except Exception:
+                pass
+        if s is not None:
+            await _night_report(ctx, g, f"🔥 رأیِ پادزهرِ <b>{s}. "
+                                        f"{escape(g.seats[s][1], quote=False)}</b> سوزانده شد.")
+    store.save()
+    await _kp_vote_report(ctx, g)
+    if not _kp_antidote_pending(g):
+        await _kp_after_vote(ctx, chat_id, g)
 
 
 def _kp_antidote_holder(g):
@@ -9138,6 +9339,8 @@ async def _kp_begin_poison(ctx, chat_id, g):
         return
     g.poison_phase = True
     g.antidote_votes = {}
+    g.antidote_skipped = set()
+    g.kp_vote_panel_mid = None
     tname = g.seats[target][1]
     attar = _find_seat_by_role(g, _R_ATTAR)
     for s in _alive_seats(g):
@@ -9160,6 +9363,8 @@ async def _kp_begin_poison(ctx, chat_id, g):
             expected.append(uid)
     g.antidote_expected = expected
     store.save()
+    # 🧪 پنلِ زنده‌ی گاد: چه کسی رأی داده / نداده + دکمه‌ی سوزاندنِ رأیِ آفلاین‌ها
+    await _kp_vote_report(ctx, g)
     if not expected:
         await _kp_after_vote(ctx, chat_id, g)
 
@@ -9188,13 +9393,28 @@ async def _kp_after_vote(ctx, chat_id, g):
         return "، ".join(out) if out else "—"
 
     tname = g.seats[target][1] if target in g.seats else "—"
+    _burned = []
+    for u in (getattr(g, "antidote_skipped", set()) or set()):
+        _s = _seat_of_uid(g, u)
+        if _s:
+            _burned.append(f"{_s}. {g.seats[_s][1]}")
+    _bline = (f"\n🔥 رأیِ سوزانده‌شده: {escape('، '.join(_burned), quote=False)}"
+              if _burned else "")
     await _night_report(
         ctx, g,
         f"🧪 <b>رأی پادزهر</b> (هدف {target}. {escape(tname, quote=False)})\n"
         f"موافق: {yes} | مخالف: {no} (نصاب اکثریت: {threshold})\n"
         f"✅ موافقان: {escape(_names(True), quote=False)}\n"
-        f"❌ مخالفان: {escape(_names(False), quote=False)}"
+        f"❌ مخالفان: {escape(_names(False), quote=False)}{_bline}"
     )
+    # پنلِ زنده بی‌دکمه شود (رأی‌گیری تمام شد)
+    _pmid = getattr(g, "kp_vote_panel_mid", None)
+    if _pmid:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=g.god_id, message_id=_pmid,
+                                                    reply_markup=None)
+        except Exception:
+            pass
 
     holder = _kp_antidote_holder(g)
     attar = _find_seat_by_role(g, _R_ATTAR)
@@ -9238,6 +9458,8 @@ async def _kp_apply_poison(ctx, chat_id, g, target, survived):
     g.antidote_votes = {}
     g.antidote_expected = []
     g.antidote_done = False
+    g.antidote_skipped = set()
+    g.kp_vote_panel_mid = None
     store.save()
     await _kp_check_heir_inherit(ctx, g)   # وارث ممکن است عطار جدید شود
     try:
@@ -10252,7 +10474,8 @@ async def handle_night_kick_callback(update, ctx):
         _tn = g.seats[s][1]
         # 👢 کیک‌شده امشب اکت ندارد (مثل سوختن) + شاتِ معطلش به مافیای بعدی پاس می‌شود
         await _pass_shot_to_next_mafia(ctx, g, s)   # قبل از بستنِ پیوی (به پرامپتِ باز نیاز دارد)
-        _burn_seat_acts(g, s)   # 🔥 هرچه تا الان زده بود هم می‌سوزد
+        # 🔥 هرچه تا الان زده بود می‌سوزد — مگر اینکه گاد خودش دستی زده باشد
+        _burn_seat_acts(g, s)
         g.night_burned.add(s)
         _ku = g.seats[s][0]
         g.night_burned_uids.add(_ku)
@@ -10315,6 +10538,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🎛 اکتِ دستیِ گاد (پیوی)
     if _q and _q.data and _q.data.startswith("gact_"):
         await handle_god_act_callback(update, ctx)
+        return
+
+    # 🧪 سوزاندنِ رأیِ پادزهر (کاپو — پیوی گاد)
+    if _q and _q.data and _q.data.startswith("kpv_"):
+        await handle_kp_vote_callback(update, ctx)
         return
 
     # 🧑‍⚖️ بازپرس: ادامه/ملغی + پایانِ دوئل
