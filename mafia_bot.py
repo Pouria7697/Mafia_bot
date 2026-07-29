@@ -1314,6 +1314,84 @@ SELECTED_FILENAME = "selected_list.json"
 SELECTED_DAYS = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
 ADMIN_ID = 99347107
 
+# ─── 📢 چنلِ آرشیو (لیست/گزارش/کارنامه‌ی هر بازی) ────────────────
+SETTINGS_FILENAME = "bot_settings.json"
+_SETTINGS_CACHE = {"data": None}
+
+
+def load_bot_settings(force=False) -> dict:
+    if _SETTINGS_CACHE["data"] is not None and not force:
+        return _SETTINGS_CACHE["data"]
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        if r.status_code == 200:
+            content = r.json().get("files", {}).get(SETTINGS_FILENAME, {}).get("content", "{}")
+            _SETTINGS_CACHE["data"] = json.loads(content) or {}
+        else:
+            _SETTINGS_CACHE["data"] = {}
+    except Exception as e:
+        print("❌ load_bot_settings:", e)
+        _SETTINGS_CACHE["data"] = {}
+    return _SETTINGS_CACHE["data"]
+
+
+def save_bot_settings(data: dict):
+    _SETTINGS_CACHE["data"] = data
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        httpx.patch(url, headers=headers, json={"files": {SETTINGS_FILENAME: {
+            "content": json.dumps(data, ensure_ascii=False, indent=2)}}})
+    except Exception as e:
+        print("❌ save_bot_settings:", e)
+
+
+def get_archive_channel():
+    """آیدی/یوزرنیمِ چنلِ آرشیو (یا None اگر تنظیم نشده)."""
+    v = (load_bot_settings() or {}).get("archive_channel")
+    return v or (os.getenv("ARCHIVE_CHANNEL") or None)
+
+
+async def _send_chunked(bot, chat_id, text, limit=3500):
+    """ارسالِ متنِ بلند در چند تکه (محدودیتِ ۴۰۹۶ کاراکتریِ تلگرام)."""
+    sent = []
+    chunk = ""
+    for line in text.split("\n"):
+        if len(chunk) + len(line) + 1 > limit:
+            if chunk.strip():
+                try:
+                    sent.append(await bot.send_message(chat_id, chunk, parse_mode="HTML"))
+                except Exception as e:
+                    print(f"⚠️ chunk send failed ({chat_id}):", e)
+            chunk = ""
+        chunk += (line + "\n")
+    if chunk.strip():
+        try:
+            sent.append(await bot.send_message(chat_id, chunk, parse_mode="HTML"))
+        except Exception as e:
+            print(f"⚠️ chunk send failed ({chat_id}):", e)
+    return sent
+
+
+async def archive_game_to_channel(bot, header, final_text, report_text=None, score_text=None):
+    """📢 لیست پایانی + گزارش شب‌به‌شب + کارنامه‌ی امتیاز → چنلِ آرشیو."""
+    ch = get_archive_channel()
+    if not ch:
+        return False
+    try:
+        await _send_chunked(bot, ch, header + "\n" + final_text)
+        if report_text:
+            await _send_chunked(bot, ch, report_text)
+        if score_text:
+            await _send_chunked(bot, ch, score_text)
+        return True
+    except Exception as e:
+        print("⚠️ archive_game_to_channel:", e)
+        return False
+
+
 def load_selected_list() -> dict:
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
@@ -3461,31 +3539,27 @@ async def announce_winner(ctx, update, g: GameState):
 
     # 🌙 گزارش شب‌به‌شبِ اکت‌ها (به‌صورت متن جداگانه زیر لیست پایانی)
     night_log = getattr(g, "night_log", None)
-    if night_log:
-        report = "📜 <b>گزارش شب‌به‌شب</b>\n" + "\n".join(night_log)
-        # تکه‌تکه کردن در صورت طولانی بودن (محدودیت ۴۰۹۶ کاراکتر تلگرام)
-        chunk = ""
-        for line in report.split("\n"):
-            if len(chunk) + len(line) + 1 > 3500:
-                try:
-                    await ctx.bot.send_message(chat.id, chunk, parse_mode="HTML")
-                except Exception:
-                    pass
-                chunk = ""
-            chunk += (line + "\n")
-        if chunk.strip():
-            try:
-                await ctx.bot.send_message(chat.id, chunk, parse_mode="HTML")
-            except Exception:
-                pass
+    report = ("📜 <b>گزارش شب‌به‌شب</b>\n" + "\n".join(night_log)) if night_log else None
+    if report:
+        await _send_chunked(ctx.bot, chat.id, report)
 
     # 🏅 کارنامه‌ی امتیاز — زیرِ گزارشِ اکت‌ها
-    if game_scores:
+    score_text = "\n".join(_score_card_lines(g, game_scores)) if game_scores else None
+    if score_text:
         try:
-            await ctx.bot.send_message(chat.id, "\n".join(_score_card_lines(g, game_scores)),
-                                       parse_mode="HTML")
+            await ctx.bot.send_message(chat.id, score_text, parse_mode="HTML")
         except Exception as e:
             print("⚠️ score card send error:", e)
+
+    # 📢 آرشیوِ همین بازی در چنل (اگر چنل تنظیم شده باشد)
+    try:
+        _hdr = (f"📢 <b>بازیِ تمام‌شده</b>\n"
+                f"🎮 گروه: {escape(group_title or '—', quote=False)}\n"
+                f"📅 {date_str} | 🎯 رویداد {event_num}\n"
+                f"━━━━━━━━━━━━")
+        await archive_game_to_channel(ctx.bot, _hdr, "\n".join(lines), report, score_text)
+    except Exception as e:
+        print("⚠️ archive to channel:", e)
 
     # 🔗 پایان بازی: پاک‌سازی اتاق مافیا (حذف همه + باطل‌کردن لینک)
     await _room_cleanup(ctx, g)
@@ -14129,6 +14203,65 @@ async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report)
 
 
+async def channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/channel — تنظیمِ چنلِ آرشیوِ بازی‌ها (فقط مدیر اصلی، در پی‌وی).
+    /channel @name یا -100…  → ثبت | /channel off → حذف | /channel → نمایش"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("⚠️ این دستور را فقط در پی‌وی بات بزن.")
+        return
+
+    arg = " ".join(ctx.args).strip() if ctx.args else ""
+    st = dict(load_bot_settings(force=True) or {})
+
+    if not arg:
+        cur = st.get("archive_channel")
+        if cur:
+            await update.message.reply_text(
+                f"📢 چنلِ آرشیو: <code>{escape(str(cur), quote=False)}</code>\n\n"
+                "برای تغییر: <code>/channel @نام‌چنل</code>\nبرای حذف: <code>/channel off</code>",
+                parse_mode="HTML")
+        else:
+            await update.message.reply_text(
+                "📢 هنوز چنلی تنظیم نشده.\n\n"
+                "۱) بات را در چنل <b>ادمین</b> کن (دسترسیِ ارسال پیام)\n"
+                "۲) بعد اینجا بزن: <code>/channel @نام‌چنل</code>\n"
+                "   (چنلِ خصوصی؟ آیدیِ عددی‌اش را بده، مثل <code>-1001234567890</code>)",
+                parse_mode="HTML")
+        return
+
+    if arg in ("off", "حذف", "خاموش", "-"):
+        st.pop("archive_channel", None)
+        save_bot_settings(st)
+        await update.message.reply_text("🚫 آرشیو در چنل خاموش شد.")
+        return
+
+    target = arg if arg.startswith("@") else arg
+    try:
+        target = int(arg)          # آیدیِ عددی
+    except ValueError:
+        if not target.startswith("@"):
+            target = "@" + target
+
+    # تستِ واقعی: یک پیام بفرست تا مطمئن شویم بات ادمین است
+    try:
+        await ctx.bot.send_message(target, "✅ این چنل به‌عنوان آرشیوِ بازی‌های مافیا ثبت شد.")
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ نشد پیام بفرستم:\n<code>{escape(str(e), quote=False)}</code>\n\n"
+            "مطمئن شو بات در چنل <b>ادمین</b> است و اسم/آیدی درست است.",
+            parse_mode="HTML")
+        return
+
+    st["archive_channel"] = target
+    save_bot_settings(st)
+    await update.message.reply_text(
+        f"✅ ثبت شد. از این به بعد بعد از هر بازی، لیستِ پایانی + گزارشِ شب‌به‌شب + "
+        f"کارنامه‌ی امتیاز به <code>{escape(str(target), quote=False)}</code> می‌رود.",
+        parse_mode="HTML")
+
+
 async def season_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/season → گزارشِ صدرِ جدول و چکِ دستیِ پایانِ فصل (فقط مدیر اصلی، در پی‌وی).
     اگر کسی به سقف رسیده باشد: مدال + ریست + اعلان در همهٔ گروه‌ها."""
@@ -14653,6 +14786,7 @@ async def main():
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
     app.add_handler(CommandHandler("sendtoall", sendtoall_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("season", season_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("channel", channel_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("startselected", start_selected_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("selected", selected_report_cmd, filters=filters.ChatType.PRIVATE))
     # 👉 اضافه کردن هندلرها
