@@ -924,6 +924,174 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
     return season_msg
 
 
+# ═══════════ 🎩 امتیازِ گاد + محرومیت ═══════════
+GOD_BANS_FILENAME = "god_bans.json"
+GOD_MIN_VOTES = 3        # حداقلِ رأی برای اینکه میانگین معتبر باشد
+GOD_MIN_RATING = 4.0     # زیرِ این میانگین در یک هفته → محرومیتِ هفتهٔ بعد
+GOD_MAX_ABANDONS = 3     # این تعداد ترکِ بازی در هفته → محرومیتِ هفتهٔ بعد
+
+
+def load_god_bans() -> dict | None:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        if r.status_code != 200:
+            return None
+        f = (r.json().get("files", {}) or {}).get(GOD_BANS_FILENAME)
+        if not f:
+            return {"banned": {}}
+        return json.loads(f.get("content") or "{}") or {"banned": {}}
+    except Exception as e:
+        print("❌ load_god_bans:", e)
+        return None
+
+
+def save_god_bans(data: dict):
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        httpx.patch(url, headers=headers, json={"files": {GOD_BANS_FILENAME: {
+            "content": json.dumps(data, ensure_ascii=False, indent=2)}}})
+        _GOD_BAN_CACHE["data"] = data
+        return True
+    except Exception as e:
+        print("❌ save_god_bans:", e)
+        return False
+
+
+_GOD_BAN_CACHE = {"data": None, "ts": 0.0}
+
+
+def god_ban_info(uid):
+    """اگر این نفر محرومِ گاد شدن است، دلیلش را برمی‌گرداند؛ وگرنه None."""
+    now = datetime.now(timezone.utc).timestamp()
+    if _GOD_BAN_CACHE["data"] is None or (now - _GOD_BAN_CACHE["ts"]) > 900:
+        d = load_god_bans()
+        if d is not None:
+            _GOD_BAN_CACHE["data"] = d
+            _GOD_BAN_CACHE["ts"] = now
+    data = _GOD_BAN_CACHE["data"] or {}
+    return (data.get("banned") or {}).get(str(uid))
+
+
+def god_rating_avg(p: dict):
+    """(میانگین, تعدادِ رأی) از روی رکوردِ آمارِ یک نفر."""
+    c = int(p.get("god_rating_count", 0) or 0)
+    if c <= 0:
+        return None, 0
+    return round(float(p.get("god_rating_sum", 0) or 0) / c, 1), c
+
+
+def god_rating_text(p: dict) -> str:
+    avg, c = god_rating_avg(p)
+    if not c:
+        return "بدون رأی"
+    return f"{avg}/5 از {c} رأی"
+
+
+def record_god_rating(god_uid, score) -> bool:
+    """ثبتِ یک رأی برای گاد در آمارِ دائمی."""
+    try:
+        stats = load_player_stats()
+        if stats is None:
+            print("⛔ record_god_rating: خواندنِ آمار ناموفق")
+            return False
+        key = str(god_uid)
+        p = stats.get(key) or {"name": "بازیکن", "games": 0, "wins": 0}
+        p["god_rating_sum"] = round(float(p.get("god_rating_sum", 0) or 0) + float(score), 1)
+        p["god_rating_count"] = int(p.get("god_rating_count", 0) or 0) + 1
+        stats[key] = p
+        return bool(save_player_stats(stats))
+    except Exception as e:
+        print("❌ record_god_rating:", e)
+        return False
+
+
+def record_god_abandon(god_uid, name=None) -> bool:
+    """🚪 ثبتِ «ترکِ بازی» برای گادی که وسطِ بازی عوض شده."""
+    try:
+        stats = load_player_stats()
+        if stats is None:
+            return False
+        key = str(god_uid)
+        p = stats.get(key) or {"name": name or "بازیکن", "games": 0, "wins": 0}
+        if name:
+            p["name"] = name
+        p["god_abandons"] = int(p.get("god_abandons", 0) or 0) + 1
+        stats[key] = p
+        return bool(save_player_stats(stats))
+    except Exception as e:
+        print("❌ record_god_abandon:", e)
+        return False
+
+
+_UNBAN_PHRASES = ("رفع محرومیت", "رفع محرومیت گاد", "آزادش کن", "رفع تنبیه")
+
+
+def _is_unban_text(text: str) -> bool:
+    """آیا این متن دستورِ «رفع محرومیت» است؟ (_nz پایین‌تر تعریف شده، پس تنبل صدا می‌زنیم)"""
+    t = _nz(text or "")
+    return t in {_nz(p) for p in _UNBAN_PHRASES}
+
+
+def god_unban(uid) -> tuple[bool, str]:
+    """🔓 برداشتنِ محرومیتِ یک گاد تا پایانِ همین هفته."""
+    data = load_god_bans()
+    if data is None:
+        return False, "خواندنِ لیستِ محرومان ناموفق بود — کمی بعد دوباره امتحان کن."
+    banned = data.get("banned") or {}
+    key = str(uid)
+    if key not in banned:
+        return False, "این نفر محروم نیست."
+    nm = (banned[key] or {}).get("name", "بازیکن")
+    banned.pop(key, None)
+    data["banned"] = banned
+    if not save_god_bans(data):
+        return False, "ذخیرهٔ تغییرات ناموفق بود."
+    _GOD_BAN_CACHE["data"] = data
+    _GOD_BAN_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
+    return True, nm
+
+
+async def _god_unban_from_reply(ctx, msg):
+    """«رفع محرومیت» با ریپلای روی پیامِ فرد (فقط مدیر اصلی)."""
+    rep = msg.reply_to_message
+    if not rep or not rep.from_user:
+        await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «رفع محرومیت».")
+        return
+    target = rep.from_user
+    ok, res = god_unban(target.id)
+    if not ok:
+        await msg.reply_text(f"ℹ️ {res}")
+        return
+    await msg.reply_text(
+        f"🔓 محرومیتِ <b>{escape(res or target.full_name, quote=False)}</b> برداشته شد — "
+        f"تا پایانِ همین هفته می‌تواند گاد شود.", parse_mode="HTML")
+    try:
+        await ctx.bot.send_message(
+            target.id, "🔓 محرومیتِ گادی‌ات برداشته شد — می‌توانی دوباره گاد شوی.")
+    except Exception:
+        pass
+
+
+def compute_god_bans(delta: dict) -> dict:
+    """از دلتای هفته، لیستِ محرومانِ هفتهٔ بعد را می‌سازد."""
+    banned = {}
+    for uid, d in (delta or {}).items():
+        ab = int(d.get("god_abandons", 0) or 0)
+        cnt = int(d.get("god_rating_count", 0) or 0)
+        ssum = float(d.get("god_rating_sum", 0) or 0)
+        avg = round(ssum / cnt, 1) if cnt else None
+        if ab >= GOD_MAX_ABANDONS:
+            banned[str(uid)] = {"name": d.get("name", "بازیکن"), "reason": "abandon",
+                                "abandons": ab}
+        elif cnt >= GOD_MIN_VOTES and avg is not None and avg < GOD_MIN_RATING:
+            banned[str(uid)] = {"name": d.get("name", "بازیکن"), "reason": "rating",
+                                "avg": avg, "votes": cnt}
+    return banned
+
+
 # ─── 🎮 تاریخچه‌ی بازی‌ها (برای «بازی من») ───────────────────
 HISTORY_FILENAME = "game_history.json"
 
@@ -1011,9 +1179,17 @@ def format_player_stats(p: dict) -> str:
         lines.append(f"♦️ مستقل: {ig} بازی | {iw} برد{pct(iw, ig)}")
 
     gg = p.get("god_games", 0)
-    if gg > 0:
+    _avg, _cnt = god_rating_avg(p)
+    if gg > 0 or _cnt:
         lines.append("")
         lines.append(f"🎩 گرداندن بازی (گاد): <b>{gg}</b> بار")
+        if _cnt:
+            lines.append(f"⭐️ امتیاز گادی: <b>{_avg}/5</b> (از {_cnt} رأی)")
+        else:
+            lines.append("⭐️ امتیاز گادی: <i>هنوز رأیی ثبت نشده</i>")
+        _ab = int(p.get("god_abandons", 0) or 0)
+        if _ab:
+            lines.append(f"🚪 ترکِ بازی وسطِ گادی: <b>{_ab}</b> بار")
     return "\n".join(lines)
 
 
@@ -1065,7 +1241,7 @@ def _weekly_delta(current: dict, snapshot: dict) -> dict:
         "citizen_games", "citizen_wins",
         "mafia_games", "mafia_wins",
         "indep_games", "indep_wins",
-        "god_games",
+        "god_games", "god_rating_sum", "god_rating_count", "god_abandons",
         "score_total", "score_citizen", "score_mafia",
         "score_citizen_games", "score_mafia_games", "score_games", "score_wins",
         "score_citizen_wins", "score_mafia_wins",
@@ -1099,6 +1275,28 @@ def _rank_block(delta: dict, win_key: str, game_key: str, top_n: int):
 
 def _medal(i: int) -> str:
     return ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i + 1}."
+
+
+def _god_block(title, rows):
+    """🎩 بلوکِ «برترین گاد» — میانگینِ امتیاز از ۵ + تعدادِ رأی."""
+    out = [title]
+    if rows:
+        for i, (_uid, d) in enumerate(rows):
+            nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
+            mb = _medal_badges(d)
+            if mb:
+                nm += f" {mb}"
+            avg, cnt = god_rating_avg(d)
+            gg = int(d.get("god_games", 0) or 0)
+            if cnt:
+                out.append(f"{_medal(i)} {nm} — ⭐️ <b>{avg}/5</b> از {cnt} رأی"
+                           + (f" | {gg} بازی" if gg else ""))
+            else:
+                out.append(f"{_medal(i)} {nm} — {gg} بازی <i>(بدون رأی)</i>")
+    else:
+        out.append("—")
+    out.append("")
+    return out
 
 
 def build_weekly_leaderboard_text(current: dict, snapshot: dict,
@@ -1139,11 +1337,21 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
         "mafia_wins", "score_mafia_wins"), "mafia_games", 3)
     if not w_mafias:
         w_mafias = [(u, d, None) for u, d in _rank_block(delta, "mafia_wins", "mafia_games", 3)]
+    # 🎩 برترین گادهای هفته — بر اساس میانگینِ امتیاز (تساوی → تعدادِ رأیِ بیشتر)
     w_gods = sorted(
-        [(uid, d) for uid, d in delta.items() if d.get("god_games", 0) > 0],
-        key=lambda it: it[1].get("god_games", 0),
+        [(uid, d) for uid, d in delta.items()
+         if int(d.get("god_rating_count", 0) or 0) >= GOD_MIN_VOTES],
+        key=lambda it: (float(it[1].get("god_rating_sum", 0) or 0)
+                        / max(1, int(it[1].get("god_rating_count", 1) or 1)),
+                        int(it[1].get("god_rating_count", 0) or 0)),
         reverse=True,
-    )[:2]
+    )[:3]
+    if not w_gods:   # هنوز رأیِ کافی نیست → مثلِ قبل بر اساسِ تعدادِ بازی
+        w_gods = sorted(
+            [(uid, d) for uid, d in delta.items() if d.get("god_games", 0) > 0],
+            key=lambda it: it[1].get("god_games", 0),
+            reverse=True,
+        )[:2]
 
     # ── کل دوران (تجمعی) — همان ترکیبی ──
     c_overall = _hyb_rows(current, _wk_total, "games", 10)
@@ -1202,7 +1410,7 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
     lines += block("🏅 <b>۱۰ بازیکن برتر هفته</b>", w_overall, "wins", "games")
     lines += block("◽️ <b>۳ شهروند برتر هفته</b>", w_citizens, "citizen_wins", "citizen_games")
     lines += block("◾️ <b>۳ مافیای برتر هفته</b>", w_mafias, "mafia_wins", "mafia_games")
-    lines += block("🎩 <b>پرکارترین راوی‌های هفته (گاد)</b>", w_gods, "god_games", "god_games", unit="بازی")
+    lines += _god_block("🎩 <b>برترین گادهای هفته</b>", w_gods)
 
     lines.append("━━━━━━━━━━━━━")
     lines += block("👑 <b>۱۰ بازیکن برتر کل دوران</b>", c_overall, "wins", "games")
@@ -1273,11 +1481,21 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         citizens = [(u, d, None) for u, d in _rank_block(current, "citizen_wins", "citizen_games", 3)]
     if not mafias:
         mafias = [(u, d, None) for u, d in _rank_block(current, "mafia_wins", "mafia_games", 3)]
+    # 🎩 برترین گادهای کل دوران — میانگینِ امتیاز (حداقل چند رأی لازم است)
     gods = sorted(
-        [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
-        key=lambda it: it[1].get("god_games", 0),
+        [(uid, d) for uid, d in current.items()
+         if int(d.get("god_rating_count", 0) or 0) >= GOD_MIN_VOTES],
+        key=lambda it: (float(it[1].get("god_rating_sum", 0) or 0)
+                        / max(1, int(it[1].get("god_rating_count", 1) or 1)),
+                        int(it[1].get("god_rating_count", 0) or 0)),
         reverse=True,
-    )[:2]
+    )[:3]
+    if not gods:
+        gods = sorted(
+            [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
+            key=lambda it: it[1].get("god_games", 0),
+            reverse=True,
+        )[:2]
 
     if not (overall or citizens or mafias or gods):
         return None
@@ -1349,7 +1567,7 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
 
     lines += side_block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_games", "citizen_wins")
     lines += side_block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_games", "mafia_wins")
-    lines += block("🎩 <b>پرکارترین راوی‌ها (گاد)</b>", gods, "god_games", "god_games", unit="بازی")
+    lines += _god_block("🎩 <b>برترین گادهای کل دوران</b>", gods)
 
     while lines and lines[-1] == "":
         lines.pop()
@@ -1797,6 +2015,34 @@ async def broadcast_weekly_stats(bot, force: bool = False):
                 sent += 1
             except Exception as e:
                 print(f"⚠️ weekly send failed for {chat_id}:", e)
+
+    # 🚫 محرومیتِ گادها برای هفتهٔ پیشِ‌رو (ترکِ بازی یا امتیازِ پایین)
+    try:
+        _delta_all = _weekly_delta(current, snapshot)
+        _banned = compute_god_bans(_delta_all)
+        save_god_bans({"set_at": now, "banned": _banned})
+        if _banned:
+            _bl = ["🚫 <b>محرومانِ گادی برای این هفته</b>", ""]
+            for _u, _b in _banned.items():
+                _nm = escape(_b.get("name", "بازیکن"), quote=False)
+                _why = (f"{_b.get('abandons')} بار ترکِ بازی"
+                        if _b.get("reason") == "abandon"
+                        else f"میانگینِ {_b.get('avg')} از ۵ ({_b.get('votes')} رأی)")
+                _bl.append(f"• <a href='tg://user?id={_u}'>{_nm}</a> — {_why}")
+            _bl.append("")
+            _bl.append("<i>تا آمارِ هفتگیِ بعد نمی‌توانند گاد شوند.</i>")
+            _btxt = "\n".join(_bl)
+            for _cid in list(store.active_groups):
+                try:
+                    await bot.send_message(_cid, _btxt, parse_mode="HTML")
+                except Exception:
+                    pass
+            try:
+                await bot.send_message(ADMIN_ID, _btxt, parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception as e:
+        print("⚠️ god bans compute error:", e)
 
     # 📋 دعوت ۱۰ نفر برتر هفته به لیست منتخب (دستی و خودکار — هر دو)
     if text:
@@ -3478,6 +3724,131 @@ def _start_name_wait(ctx, chat_id: int, g: GameState, uid: int,
     )
 
 
+async def _send_god_rating_prompts(ctx, g, group_title=None):
+    """🎩 بعد از بازی: از همهٔ بازیکنانِ لیست بپرس به گاد چه امتیازی می‌دهند."""
+    god = getattr(g, "god_id", None)
+    if not god or not g.seats:
+        return 0
+    token = str(int(datetime.now(timezone.utc).timestamp()))[-7:]
+    gname = escape(getattr(g, "god_name", None) or "گاد", quote=False)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(str(n), callback_data=f"grate_{god}_{token}_{n}")
+        for n in (1, 2, 3, 4, 5)
+    ]])
+    txt = (f"🎩 <b>بازی تمام شد</b>"
+           + (f" — {escape(group_title, quote=False)}" if group_title else "")
+           + f"\n\nبه راویِ این بازی، <b>{gname}</b>، چه امتیازی می‌دهی؟\n"
+             f"<i>۱ = خیلی ضعیف   …   ۵ = عالی</i>")
+    prompts = []
+    for s in sorted(g.seats):
+        uid, _n = g.seats[s]
+        if uid == god:
+            continue   # گاد به خودش رأی نمی‌دهد
+        try:
+            m = await ctx.bot.send_message(uid, txt, parse_mode="HTML", reply_markup=kb)
+            prompts.append((uid, m.message_id))
+        except Exception:
+            pass   # پیوی بسته — بی‌خیال
+    if prompts:
+        asyncio.create_task(_expire_god_rating(ctx, prompts, token))
+    return len(prompts)
+
+
+async def _expire_god_rating(ctx, prompts, token, delay=3600):
+    """⏳ بعد از ۱ ساعت، پیامِ امتیازدهیِ بی‌پاسخ از پیویِ بازیکن پاک می‌شود."""
+    try:
+        await asyncio.sleep(delay)
+    except Exception:
+        return
+    seen = getattr(store, "god_rate_done", None) or set()
+    for uid, mid in prompts:
+        if f"{uid}_{token}" in seen:
+            continue   # رأی داده — دست نزن
+        try:
+            await ctx.bot.delete_message(chat_id=uid, message_id=mid)
+        except Exception:
+            try:   # اگر پاک نشد، دست‌کم دکمه‌ها را بردار
+                await ctx.bot.edit_message_text(
+                    chat_id=uid, message_id=mid,
+                    text="⏰ مهلتِ امتیازدهی به گاد تمام شد.")
+            except Exception:
+                pass
+
+
+async def handle_god_rating_callback(update, ctx):
+    """🎩 ثبتِ رأیِ بازیکن به گاد (۱ تا ۵)."""
+    q = update.callback_query
+    try:
+        _, god_s, token, score_s = (q.data or "").split("_", 3)
+        god_uid, score = int(god_s), int(score_s)
+    except Exception:
+        await safe_q_answer(q, "دکمه معتبر نیست.", show_alert=True)
+        return
+    if not (1 <= score <= 5):
+        await safe_q_answer(q, "امتیاز باید بین ۱ تا ۵ باشد.", show_alert=True)
+        return
+
+    rater = q.from_user.id
+    if rater == god_uid:
+        await safe_q_answer(q, "به خودت که نمی‌شود رأی داد 🙂", show_alert=True)
+        return
+
+    seen = getattr(store, "god_rate_done", None)
+    if not isinstance(seen, set):
+        seen = set()
+        store.god_rate_done = seen
+    key = f"{rater}_{token}"
+    if key in seen:
+        await safe_q_answer(q, "قبلاً رأی داده‌ای.", show_alert=True)
+        return
+
+    await safe_q_answer(q)
+    ok = record_god_rating(god_uid, score)
+    if not ok:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=rater, message_id=q.message.message_id,
+                text="⚠️ ثبتِ رأی موقتاً ممکن نشد؛ کمی بعد دوباره امتحان کن.")
+        except Exception:
+            pass
+        return
+
+    seen.add(key)
+    if len(seen) > 5000:      # جلوگیری از رشدِ بی‌پایان
+        store.god_rate_done = set(list(seen)[-2000:])
+    store.save()
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=rater, message_id=q.message.message_id,
+            text=f"✅ رأیت ثبت شد: <b>{score}/5</b>\nممنون 🙏", parse_mode="HTML")
+    except Exception:
+        pass
+
+
+def _seat_display_name(g, uid, tg_user=None):
+    """نامِ نمایشیِ موقعِ نشستن: اسمِ ذخیره‌شده، وگرنه نامِ تلگرام.
+    مقدارِ دوم می‌گوید آیا باید اسمِ فارسی پرسیده شود."""
+    saved = (g.user_names or {}).get(uid)
+    if saved:
+        return saved, False
+    tg = ""
+    if tg_user is not None:
+        tg = (getattr(tg_user, "full_name", None)
+              or getattr(tg_user, "first_name", None) or "").strip()
+    return (tg or "ناشناس"), True
+
+
+async def _ask_persian_name(ctx, chat_id, g, uid, seat_no):
+    """از بازیکنی که اسمِ ذخیره‌شده ندارد، نامِ فارسی می‌پرسد."""
+    try:
+        prompt = await ctx.bot.send_message(
+            chat_id,
+            f"✏️ برای صندلی {seat_no}: این پیام را ریپلای کن و نامت را به فارسی بنویس.")
+        _start_name_wait(ctx, chat_id, g, uid, seat_no, prompt)
+    except Exception as e:
+        print("⚠️ ask persian name:", e)
+
+
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
@@ -3599,6 +3970,12 @@ async def announce_winner(ctx, update, g: GameState):
             await ctx.bot.send_message(chat.id, score_text, parse_mode="HTML")
         except Exception as e:
             print("⚠️ score card send error:", e)
+
+    # 🎩 نظرسنجیِ امتیازِ گاد در پیویِ بازیکنان
+    try:
+        await _send_god_rating_prompts(ctx, g, group_title)
+    except Exception as e:
+        print("⚠️ god rating prompts:", e)
 
     # 📢 آرشیوِ همین بازی در چنل (اگر چنل تنظیم شده باشد)
     try:
@@ -10668,6 +11045,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_kp_vote_callback(update, ctx)
         return
 
+    # 🎩 امتیازدهی به گاد (پیویِ بازیکنان)
+    if _q and _q.data and _q.data.startswith("grate_"):
+        await handle_god_rating_callback(update, ctx)
+        return
+
     # 🧑‍⚖️ بازپرس: ادامه/ملغی + پایانِ دوئل
     if _q and _q.data and _q.data.startswith("bzd_"):
         await handle_baz_duel_callback(update, ctx)
@@ -12493,11 +12875,13 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
-    name = g.user_names.get(uid, "ناشناس")
+    name, need_name = _seat_display_name(g, uid, msg.from_user)
     g.seats[seat_no] = (uid, name)
     store.save()
     await publish_seating(ctx, chat_id, g)
     await ctx.bot.send_message(chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
+    if need_name:
+        await _ask_persian_name(ctx, chat_id, g, uid, seat_no)
 
 
 async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: str) -> bool:
@@ -12536,6 +12920,11 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     chat_id = msg.chat.id
     g = gs(chat_id)
+
+    # 🔓 «رفع محرومیت» با ریپلای — فقط مدیر اصلی
+    if uid == ADMIN_ID and _is_unban_text(text):
+        await _god_unban_from_reply(ctx, msg)
+        return
 
     # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
     if _try_capture_vote(g, msg, uid, text):
@@ -12654,7 +13043,10 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     existing_name = n
                     break
 
-            final_name = preferred_name or existing_name or "ناشناس"
+            _tg_name, _need_name = _seat_display_name(g, uid, msg.from_user)
+            final_name = preferred_name or existing_name or _tg_name
+            # فقط برای ثبت‌نامِ تازه اسم می‌پرسیم (نه جابه‌جایی)
+            _need_name = _need_name and not existing_name
 
             if existing_seat is not None:
                 # جابجایی
@@ -12676,6 +13068,8 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 chat_id,
                 f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{final_name}» انجام شد."
             )
+            if _need_name:
+                await _ask_persian_name(ctx, chat_id, g, uid, seat_no)
             return
 
     if g.phase == "idle" and (not getattr(g, "awaiting_shuffle_decision", False)) and text.strip() == "کنسل":
@@ -12934,12 +13328,15 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     target_uid = update.message.reply_to_message.from_user.id
 
-    # 🧠 بررسی نام ذخیره‌شده در gist
-    name = g.user_names.get(target_uid, "ناشناس")
+    # 🧠 بررسی نام ذخیره‌شده در gist (وگرنه نامِ تلگرام + پرسیدنِ نامِ فارسی)
+    name, _need = _seat_display_name(g, target_uid,
+                                     update.message.reply_to_message.from_user)
     g.seats[seat] = (target_uid, name)
     store.save()
 
     await update.message.reply_text(f"✅ صندلی {seat} با نام '{name}' به لیست اضافه شد.")
+    if _need:
+        await _ask_persian_name(ctx, update.effective_chat.id, g, target_uid, seat)
 
     # 🖥 به‌روزرسانی لیست صندلی‌ها
     await publish_seating(ctx, chat, g)
@@ -13147,6 +13544,22 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ همین حالا هم گاد هست.")
         return
 
+    # 🚫 محرومیتِ گاد شدن (بر اساس آمارِ هفتهٔ گذشته)
+    _ban = god_ban_info(target.id)
+    if _ban:
+        if _ban.get("reason") == "abandon":
+            _why = (f"هفتهٔ گذشته {_ban.get('abandons', GOD_MAX_ABANDONS)} بار "
+                    f"وسطِ بازی گاد را رها کرده")
+        else:
+            _why = (f"میانگینِ امتیازش هفتهٔ گذشته {_ban.get('avg', '—')} از ۵ بود "
+                    f"(زیرِ {int(GOD_MIN_RATING)})")
+        await update.message.reply_text(
+            f"⛔ <b>{escape(_ban.get('name') or target.full_name, quote=False)}</b> "
+            f"این هفته حقِ گاد شدن ندارد.\n📌 دلیل: {_why}.\n"
+            f"<i>محرومیت با آمارِ هفتگیِ بعدی برداشته می‌شود.</i>",
+            parse_mode="HTML")
+        return
+
     # بازیکن زنده نمی‌تواند گاد شود — فقط وقتی نقش‌ها پخش شده‌اند
     # (قبل از پخش نقش‌ها هر کسی، حتی داخل لیست، می‌تواند گاد شود)
     if getattr(g, "assigned_roles", None):
@@ -13161,6 +13574,16 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     new_name = g.user_names.get(target.id, target.full_name)
 
     old_god_id = g.god_id
+    # 🚪 اگر بازی در جریان بود، گادِ قبلی «ترکِ بازی» ثبت می‌شود (هر بازی یک‌بار)
+    if old_god_id and old_god_id != target.id and g.phase not in ("idle", "ended"):
+        if not isinstance(getattr(g, "god_abandon_logged", None), set):
+            g.god_abandon_logged = set()
+        if old_god_id not in g.god_abandon_logged:
+            g.god_abandon_logged.add(old_god_id)
+            _old_name = g.user_names.get(old_god_id) or getattr(g, "god_name", None)
+            if record_god_abandon(old_god_id, _old_name):
+                print(f"🚪 god abandon logged for {old_god_id}")
+
     g.god_id = target.id
     g.god_name = new_name
     store.save()
@@ -14707,7 +15130,8 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     new_uid = update.message.reply_to_message.from_user.id
-    new_name = g.user_names.get(new_uid, "ناشناس")
+    new_name, _sub_need = _seat_display_name(g, new_uid,
+                                             update.message.reply_to_message.from_user)
 
 
     parts = update.message.text.strip().split()
@@ -14749,7 +15173,7 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ نتونستم نقش رو به پیوی بفرستم (پی‌وی بسته است).")
 
 
-    if new_name == "ناشناس":
+    if _sub_need:
         prompt = await ctx.bot.send_message(
             chat_id,
             f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
