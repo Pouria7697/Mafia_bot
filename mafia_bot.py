@@ -507,15 +507,30 @@ def load_usernames_from_gist():
             gist_data = response.json()
             content = gist_data["files"].get(USERNAMES_FILENAME, {}).get("content", "{}")
             data = json.loads(content) or {}
-            return {int(k): v for k, v in data.items()}  # 👈 کلیدها رو تبدیل کن به عدد
+            out = {int(k): v for k, v in data.items()}  # 👈 کلیدها رو تبدیل کن به عدد
+            _UN_HIGH_WATER["n"] = max(_UN_HIGH_WATER["n"], len(out))
+            return out
         else:
             print("❌ user_names gist fetch failed:", response.status_code)
-            return {}
+            return None   # ⚠️ خطا ≠ «خالی» — وگرنه ذخیره‌ی بعدی همه را پاک می‌کند
     except Exception as e:
         print("❌ load_usernames error:", e)
-        return {}
+        return None
+
+_UN_HIGH_WATER = {"n": 0}   # بیشترین تعدادِ اسمی که تا حالا دیده‌ایم
+
 
 def save_usernames_to_gist(usernames: dict[int, str]):
+    # ⛡ محافظ: نه دادهٔ خالی، نه دادهٔ ناگهان‌کوچک‌شده روی فایل نوشته شود
+    if not usernames:
+        print("⛔ save_usernames skipped: دادهٔ خالی — از پاک‌شدنِ اسم‌ها جلوگیری شد")
+        return False
+    hw = _UN_HIGH_WATER["n"]
+    if hw and len(usernames) < hw * 0.8:
+        print(f"⛔ save_usernames skipped: {len(usernames)} اسم در برابرِ {hw} اسمِ قبلی "
+              f"— احتمالِ پاک‌شدنِ داده")
+        return False
+    _UN_HIGH_WATER["n"] = max(hw, len(usernames))
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {
@@ -530,8 +545,10 @@ def save_usernames_to_gist(usernames: dict[int, str]):
             }
         }
         httpx.patch(url, headers=headers, json=data)
+        return True
     except Exception as e:
         print("❌ save_usernames error:", e)
+        return False
 
 
 # ─── آمار بازیکنان (برد/باخت بر اساس ساید) ──────────────────────
@@ -551,12 +568,16 @@ def load_player_stats() -> dict:
             return json.loads(content) or {}
         else:
             print("❌ player_stats gist fetch failed:", response.status_code)
-            return {}
+            return None   # ⚠️ خطا ≠ «خالی»
     except Exception as e:
         print("❌ load_player_stats error:", e)
-        return {}
+        return None
 
 def save_player_stats(stats: dict):
+    # ⛡ محافظ: هرگز آمارِ همه را با دادهٔ خالی بازنویسی نکن
+    if not stats:
+        print("⛔ save_player_stats skipped: دادهٔ خالی")
+        return False
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {
@@ -571,8 +592,10 @@ def save_player_stats(stats: dict):
             }
         }
         httpx.patch(url, headers=headers, json=data)
+        return True
     except Exception as e:
         print("❌ save_player_stats error:", e)
+        return False
 
 
 # ─── 🏁 فصل امتیازی (سقف ۲۰۰۰ → مدال + ریست) ────────────────────
@@ -580,7 +603,7 @@ MEDALS_FILENAME = "medals.json"
 SEASON_TARGET = 1500.0
 
 
-def load_medals_log() -> dict:
+def load_medals_log() -> dict | None:
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -588,21 +611,27 @@ def load_medals_log() -> dict:
         if r.status_code == 200:
             content = r.json().get("files", {}).get(MEDALS_FILENAME, {}).get("content", "{}")
             return json.loads(content) or {"seasons": []}
-        return {"seasons": []}
+        print("❌ medals fetch failed:", r.status_code)
+        return None   # ⚠️ خطا ≠ «خالی» — وگرنه تاریخچهٔ مدال‌ها پاک می‌شود
     except Exception as e:
         print("❌ load_medals_log error:", e)
-        return {"seasons": []}
+        return None
 
 
 def save_medals_log(data: dict):
+    if not data or not data.get("seasons"):
+        print("⛔ save_medals_log skipped: دادهٔ خالی")
+        return False
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
         payload = {"files": {MEDALS_FILENAME: {
             "content": json.dumps(data, ensure_ascii=False, indent=2)}}}
-        httpx.patch(url, headers=headers, json=payload)
+        r = httpx.patch(url, headers=headers, json=payload)
+        return r.status_code in (200, 201)
     except Exception as e:
         print("❌ save_medals_log error:", e)
+        return False
 
 
 def _season_total(d) -> float:
@@ -637,7 +666,7 @@ def refresh_medal_cache(stats: dict | None = None):
     """کشِ نشان‌ها را از روی آمار به‌روز می‌کند (اگر آمار داده نشود، از گیست می‌خواند)."""
     try:
         if stats is None:
-            stats = load_player_stats()
+            stats = load_player_stats() or {}
         _MEDAL_CACHE["map"] = {
             str(u): b for u, d in (stats or {}).items()
             if isinstance(d, dict) and (b := _medal_badges(d))
@@ -682,14 +711,25 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
                         "medal": key, "score": round(tot, 1)})
 
     # 📜 ثبتِ دائمی در تاریخچه‌ی مدال‌ها (برای لقب‌دهی آینده)
+    #    اگر نشد بخوانیم/بنویسیم، فصل را نمی‌بندیم — وگرنه امتیازها صفر می‌شود
+    #    ولی مدالی ثبت نمی‌شود. دفعهٔ بعد دوباره امتحان می‌کند.
     try:
         mlog = load_medals_log()
+        if mlog is None:
+            raise RuntimeError("خواندنِ تاریخچهٔ مدال‌ها ناموفق بود")
         seasons = mlog.get("seasons", [])
         seasons.append({"n": len(seasons) + 1, "date": date_str or "—", "winners": winners})
         mlog["seasons"] = seasons
-        save_medals_log(mlog)
+        if not save_medals_log(mlog):
+            raise RuntimeError("ذخیرهٔ تاریخچهٔ مدال‌ها ناموفق بود")
     except Exception as e:
-        print("❌ season medal log error:", e)
+        print("❌ season medal log error:", e, "— بستنِ فصل به تعویق افتاد")
+        for i, (uid, d, _t) in enumerate(rows[:3]):   # مدال‌های داده‌شده را پس بگیر
+            key = ("gold", "silver", "bronze")[i]
+            m = d.get("medals") or {}
+            m[key] = max(0, int(m.get(key, 0) or 0) - 1)
+            d["medals"] = m
+        return None
 
     # 🔄 صفر کردنِ همه‌ی امتیازها (شمارنده‌های بازی/برد دست‌نخورده می‌مانند؛
     #    score_games=games یعنی سهمِ «بازی‌های قدیمی» هم از این به بعد صفر است)
@@ -759,7 +799,11 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
     اگر فصل تمام شود (صدرنشین ≥ ۲۰۰۰)، متنِ اعلانِ مدال‌ها را برمی‌گرداند."""
     season_msg = None
     try:
-        stats = load_player_stats()
+        stats = load_player_stats() or {}
+        if stats is None:
+            # ⚠️ خواندنِ آمار خطا داد → ذخیره نکن، وگرنه آمارِ همه با دادهٔ ناقص بازنویسی می‌شود
+            print("⛔ update_player_stats aborted: خواندنِ آمار ناموفق بود")
+            return None
         hist_rows = []
 
         for seat in sorted(g.seats):
@@ -864,6 +908,8 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
         if hist_rows and (group_title or date_str):
             try:
                 hist = load_game_history()
+                if hist is None:
+                    raise RuntimeError("خواندنِ تاریخچه ناموفق بود — ذخیره نشد")
                 for _u, _s, _w in hist_rows:
                     k = str(_u)
                     lst = hist.get(k, [])
@@ -882,19 +928,22 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
 HISTORY_FILENAME = "game_history.json"
 
 
-def load_game_history() -> dict:
+def load_game_history() -> dict | None:
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
         r = httpx.get(url, headers=headers)
+        if r.status_code != 200:
+            print("❌ game_history fetch failed:", r.status_code)
+            return None   # ⚠️ خطا ≠ «خالی»
         f = (r.json().get("files", {}) or {}).get(HISTORY_FILENAME)
         if not f:
-            return {}
+            return {}     # فایل واقعاً وجود ندارد (اولین بار)
         import json as _json
         return _json.loads(f.get("content") or "{}") or {}
     except Exception as e:
         print("❌ load_game_history:", e)
-        return {}
+        return None
 
 
 def save_game_history(h: dict) -> bool:
@@ -1441,7 +1490,7 @@ def kb_selected_days(selected_days) -> InlineKeyboardMarkup:
 async def launch_selected_round(bot, candidates=None) -> int:
     """دور جدید لیست منتخب: کاندیداها را ثبت و به همه پیام دعوت می‌فرستد."""
     if candidates is None:
-        current = load_player_stats()
+        current = load_player_stats() or {}
         meta = load_weekly_meta()
         snapshot = meta.get("snapshot", {})
         delta = _weekly_delta(current, snapshot)
@@ -1787,7 +1836,7 @@ store = Store()
 store.scenarios = load_scenarios_from_gist()
 
 # لود کردن نام‌های کاربران از Gist برای تمام گیم‌ها
-usernames = load_usernames_from_gist()
+usernames = load_usernames_from_gist() or {}
 for g in store.games.values():
     g.user_names = usernames
 
@@ -12428,7 +12477,7 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         return
 
     if not hasattr(g, 'user_names') or g.user_names is None:
-        g.user_names = load_usernames_from_gist()
+        g.user_names = load_usernames_from_gist() or {}
 
     command_text = msg.text.split('@')[0]
     try:
@@ -12767,9 +12816,13 @@ async def newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     store.games[chat] = GameState(max_seats=seats)
     g = gs(chat)
 
-    # بارگذاری/ذخیره نام‌ها در Gist
-    g.user_names = load_usernames_from_gist()
-    save_usernames_to_gist(g.user_names)
+    # بارگذاری نام‌ها از Gist — اگر خواندن خطا داد، نامِ قبلی را نگه دار و چیزی ننویس
+    _un = load_usernames_from_gist()
+    if _un is not None:
+        g.user_names = _un
+    else:
+        print("⚠️ newgame: خواندنِ اسم‌ها ناموفق بود — نامِ فعلی حفظ شد")
+        g.user_names = getattr(g, "user_names", None) or {}
 
     # گاد پیش‌فرض = اجراکنندهٔ /newgame
     god_name = g.user_names.get(uid) or (update.effective_user.full_name or "—")
@@ -12818,13 +12871,15 @@ async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = Non
         except Exception:
             pass
 
-    # 🔄 بارگذاری نام‌ها
+    # 🔄 بارگذاری نام‌ها (خطای خواندن نباید باعثِ نوشتنِ دادهٔ خالی شود)
     usernames = load_usernames_from_gist()
+    if usernames is None:
+        print("⚠️ reset: خواندنِ اسم‌ها ناموفق بود — فایل دست‌نخورده ماند")
+        usernames = dict(getattr(old, "user_names", None) or {}) if old is not None else {}
 
     store.games[chat_id] = GameState()
     g = store.games[chat_id]
     g.user_names = usernames
-    save_usernames_to_gist(g.user_names)
     store.save()
 
     # اگر از طریق دستور اومده، پیام بفرست
@@ -13184,20 +13239,20 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     # دکمه‌های کیبورد ایموجی دارند («📊 آمار من») → تطبیقِ پسوندی
     if text.endswith("آمار من"):
-        stats = load_player_stats()
+        stats = load_player_stats() or {}
         p = stats.get(str(uid))
         if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
             await msg.reply_text(format_player_stats(p), parse_mode="HTML")
     elif text.endswith("آمار کل"):
-        board = build_alltime_leaderboard_text(load_player_stats())
+        board = build_alltime_leaderboard_text(load_player_stats() or {})
         if not board:
             await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
         else:
             await msg.reply_text(board, parse_mode="HTML")
     elif text.endswith("بازی من"):
-        rows = load_game_history().get(str(uid), [])
+        rows = (load_game_history() or {}).get(str(uid), [])
         if not rows:
             await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
         else:
@@ -13205,7 +13260,7 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text.endswith("آمار هفتگی"):
         meta = load_weekly_meta()
         snapshot = meta.get("snapshot", {}) if isinstance(meta, dict) else {}
-        board = build_weekly_leaderboard_text(load_player_stats(), snapshot, require_weekly=False)
+        board = build_weekly_leaderboard_text(load_player_stats() or {}, snapshot, require_weekly=False)
         if not board:
             await msg.reply_text("📭 هنوز آماری برای این هفته ثبت نشده است.")
         else:
@@ -13850,7 +13905,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     # 📊 آمار من — هر بازیکنی در گروه فعال می‌تواند آمار خودش را ببیند
     if text == "آمار من":
-        stats = load_player_stats()
+        stats = load_player_stats() or {}
         p = stats.get(str(uid))
         if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
             await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
@@ -13860,7 +13915,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     # 🎮 بازی من — تاریخچه‌ی بازی‌های خودِ شخص (در گروه هم فعال)
     if text == "بازی من":
-        rows = load_game_history().get(str(uid), [])
+        rows = (load_game_history() or {}).get(str(uid), [])
         if not rows:
             await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
         else:
@@ -13869,7 +13924,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     # 📊 آمار کل — لیدربرد بهترین‌های کل دوران (برای همه در هر گروه فعال)
     if text == "آمار کل":
-        current = load_player_stats()
+        current = load_player_stats() or {}
         board = build_alltime_leaderboard_text(current)
         if not board:
             await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
