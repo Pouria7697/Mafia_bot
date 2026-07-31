@@ -927,7 +927,7 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
 # ═══════════ 🎩 امتیازِ گاد + محرومیت ═══════════
 GOD_BANS_FILENAME = "god_bans.json"
 GOD_MIN_VOTES = 3        # حداقلِ رأی برای اینکه میانگین معتبر باشد
-GOD_MIN_RATING = 4.0     # زیرِ این میانگین در یک هفته → محرومیتِ هفتهٔ بعد
+GOD_MIN_RATING = 3.0     # زیرِ این میانگین در یک هفته → محرومیتِ هفتهٔ بعد
 GOD_MAX_ABANDONS = 3     # این تعداد ترکِ بازی در هفته → محرومیتِ هفتهٔ بعد
 
 
@@ -3825,30 +3825,6 @@ async def handle_god_rating_callback(update, ctx):
         pass
 
 
-def _seat_display_name(g, uid, tg_user=None):
-    """نامِ نمایشیِ موقعِ نشستن: اسمِ ذخیره‌شده، وگرنه نامِ تلگرام.
-    مقدارِ دوم می‌گوید آیا باید اسمِ فارسی پرسیده شود."""
-    saved = (g.user_names or {}).get(uid)
-    if saved:
-        return saved, False
-    tg = ""
-    if tg_user is not None:
-        tg = (getattr(tg_user, "full_name", None)
-              or getattr(tg_user, "first_name", None) or "").strip()
-    return (tg or "ناشناس"), True
-
-
-async def _ask_persian_name(ctx, chat_id, g, uid, seat_no):
-    """از بازیکنی که اسمِ ذخیره‌شده ندارد، نامِ فارسی می‌پرسد."""
-    try:
-        prompt = await ctx.bot.send_message(
-            chat_id,
-            f"✏️ برای صندلی {seat_no}: این پیام را ریپلای کن و نامت را به فارسی بنویس.")
-        _start_name_wait(ctx, chat_id, g, uid, seat_no, prompt)
-    except Exception as e:
-        print("⚠️ ask persian name:", e)
-
-
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
@@ -5692,7 +5668,17 @@ async def _burn_advance(ctx, chat_id, g):
         store.save()
 
         # ⛓ زنجیره‌های اولویت‌دار
-        if _is_nemayande_scenario(g):
+        if _is_baazpors_scenario(g):
+            # 🪢 هانترِ سوخته → مرحله‌ی مافیا/شیاد باید باز شود، وگرنه شب قفل می‌ماند
+            h = _find_seat_by_role(g, _R_HUNTER)
+            if h in burned:
+                g.night_done.add("hunter")
+                store.save()
+            if "hunter" in (g.night_done or set()) and "mafia" not in (g.night_done or set()):
+                await _bzp_open_gf_shiad(ctx, chat_id, g)   # خودش idempotent است
+            # اگر مافیا/شیاد سوخته بودند، بقیه‌ی اکت‌ها هم باز شوند
+            await _bzp_check_open_rest(ctx, chat_id, g)
+        elif _is_nemayande_scenario(g):
             # مین‌گذارِ سوخته → مرحله‌ی مافیا/هکر باز شود (فقط اگر مین هنوز ثبت نشده)
             ml = _find_seat_by_role(g, _nz("مین‌گذار"))
             if (ml in burned and getattr(g, "night_mine_target", None) is None
@@ -5818,6 +5804,29 @@ async def _gact_panel(ctx, uid, g, mid=None):
     return m.message_id
 
 
+async def _gact_try_open_stage(ctx, g, seat):
+    """🔁 اگر مرحله‌ی این نقش هنوز باز نشده، بازش کن تا سؤالش ساخته و کش شود.
+    همه‌ی این بازکننده‌ها idempotent هستند یا با مارکر محافظت شده‌اند."""
+    chat_id = None
+    for cid, game in store.games.items():
+        if game is g:
+            chat_id = cid
+            break
+    if chat_id is None:
+        return
+    if _is_baazpors_scenario(g):
+        await _bzp_open_gf_shiad(ctx, chat_id, g)
+        await _bzp_check_open_rest(ctx, chat_id, g)
+    elif _is_takavar_scenario(g):
+        await _tk_check_open_mafia(ctx, chat_id, g)
+        await _tk_check_open_citizens(ctx, chat_id, g)
+        await _tk_check_open_gunman(ctx, chat_id, g)
+    elif _is_nemayande_scenario(g):
+        await _nem_check_open_rest(ctx, chat_id, g)
+    elif _is_kapu_scenario(g):
+        await _kp_check_open_witch(ctx, chat_id, g)
+
+
 async def handle_god_act_callback(update, ctx):
     """🎛 گاد به‌جای بازیکن اکت می‌زند — همان پرامپتِ خودِ بازیکن در پیویِ گاد باز می‌شود."""
     q = update.callback_query
@@ -5861,9 +5870,20 @@ async def handle_god_act_callback(update, ctx):
         puid = g.seats[s][0]
         cached = (getattr(g, "night_prompt_cache", {}) or {}).get(puid)
         if not cached:
-            await safe_q_answer(
-                q, "این بازیکن الان سؤالِ بازی ندارد (یا اکتش را زده یا هنوز نوبتش نشده).",
-                show_alert=True)
+            # 🔁 سؤالی در کار نیست → تلاش کن مرحله‌ی همان سناریو را باز کنی و دوباره بگیر
+            try:
+                await _gact_try_open_stage(ctx, g, s)
+            except Exception as _e:
+                print("⚠️ gact reopen:", _e)
+            cached = (getattr(g, "night_prompt_cache", {}) or {}).get(puid)
+        if not cached:
+            await ctx.bot.send_message(
+                uid,
+                f"⚠️ برای <b>{s}. {escape(g.seats[s][1], quote=False)}</b> سؤالِ بازی وجود ندارد.\n"
+                f"یا اکتش را زده، یا نقشش امشب اکتی ندارد، یا هنوز نوبتِ مرحله‌اش نشده.\n"
+                f"<i>اگر فکر می‌کنی مرحله‌ای گیر کرده، «🔥 سوزاندن اکت» را روی نقشِ قبلی بزن "
+                f"تا صف جلو برود.</i>",
+                parse_mode="HTML")
             return
         # 🔒 پرامپتِ خودِ بازیکن بی‌دکمه شود تا اگر گوشی‌اش برگشت، دوباره اکت نزند
         old_mid = (g.night_pm_msgs or {}).get(puid)
@@ -6760,6 +6780,11 @@ async def _bzp_open_hunter(ctx, chat_id, g):
 
 
 async def _bzp_open_gf_shiad(ctx, chat_id, g):
+    # 🔒 فقط یک‌بار در هر شب باز شود (مسیرِ عادی و مسیرِ سوزاندن هر دو صدایش می‌زنند)
+    if "bzp_mafia_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("bzp_mafia_opened")
+    store.save()
     # ── تصمیم‌گیرندهٔ مافیا: گادفادر → ناتو → شیاد → فرد یاکوزایی‌شده ──
     gf_alive = _find_seat_by_role(g, _R_GODFATHER)
     nato_alive = _find_seat_by_role(g, _R_NATO)
@@ -12925,13 +12950,11 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
-    name, need_name = _seat_display_name(g, uid, msg.from_user)
+    name = g.user_names.get(uid, "ناشناس")
     g.seats[seat_no] = (uid, name)
     store.save()
     await publish_seating(ctx, chat_id, g)
     await ctx.bot.send_message(chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
-    if need_name:
-        await _ask_persian_name(ctx, chat_id, g, uid, seat_no)
 
 
 async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: str) -> bool:
@@ -13093,10 +13116,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     existing_name = n
                     break
 
-            _tg_name, _need_name = _seat_display_name(g, uid, msg.from_user)
-            final_name = preferred_name or existing_name or _tg_name
-            # فقط برای ثبت‌نامِ تازه اسم می‌پرسیم (نه جابه‌جایی)
-            _need_name = _need_name and not existing_name
+            final_name = preferred_name or existing_name or "ناشناس"
 
             if existing_seat is not None:
                 # جابجایی
@@ -13118,8 +13138,6 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 chat_id,
                 f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{final_name}» انجام شد."
             )
-            if _need_name:
-                await _ask_persian_name(ctx, chat_id, g, uid, seat_no)
             return
 
     if g.phase == "idle" and (not getattr(g, "awaiting_shuffle_decision", False)) and text.strip() == "کنسل":
@@ -13378,15 +13396,12 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     target_uid = update.message.reply_to_message.from_user.id
 
-    # 🧠 بررسی نام ذخیره‌شده در gist (وگرنه نامِ تلگرام + پرسیدنِ نامِ فارسی)
-    name, _need = _seat_display_name(g, target_uid,
-                                     update.message.reply_to_message.from_user)
+    # 🧠 بررسی نام ذخیره‌شده در gist
+    name = g.user_names.get(target_uid, "ناشناس")
     g.seats[seat] = (target_uid, name)
     store.save()
 
     await update.message.reply_text(f"✅ صندلی {seat} با نام '{name}' به لیست اضافه شد.")
-    if _need:
-        await _ask_persian_name(ctx, update.effective_chat.id, g, target_uid, seat)
 
     # 🖥 به‌روزرسانی لیست صندلی‌ها
     await publish_seating(ctx, chat, g)
@@ -15180,8 +15195,7 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     new_uid = update.message.reply_to_message.from_user.id
-    new_name, _sub_need = _seat_display_name(g, new_uid,
-                                             update.message.reply_to_message.from_user)
+    new_name = g.user_names.get(new_uid, "ناشناس")
 
 
     parts = update.message.text.strip().split()
@@ -15223,7 +15237,7 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ نتونستم نقش رو به پیوی بفرستم (پی‌وی بسته است).")
 
 
-    if _sub_need:
+    if new_name == "ناشناس":
         prompt = await ctx.bot.send_message(
             chat_id,
             f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:"
