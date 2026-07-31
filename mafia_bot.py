@@ -3973,7 +3973,21 @@ async def announce_winner(ctx, update, g: GameState):
 
     # 🎩 نظرسنجیِ امتیازِ گاد در پیویِ بازیکنان
     try:
-        await _send_god_rating_prompts(ctx, g, group_title)
+        _n_rate = await _send_god_rating_prompts(ctx, g, group_title)
+        _others = len([1 for s in g.seats if g.seats[s][0] != g.god_id])
+        if _n_rate:
+            _msg = (f"🎩 نظرسنجیِ امتیازِ گاد برای <b>{_n_rate}</b> نفر ارسال شد "
+                    f"(مهلت: ۱ ساعت).")
+        elif _others == 0:
+            _msg = ("🎩 نظرسنجیِ امتیاز ارسال نشد: خودت تنها بازیکنِ لیست بودی و "
+                    "گاد به خودش رأی نمی‌دهد.")
+        else:
+            _msg = (f"🎩 نظرسنجیِ امتیاز به هیچ‌کس نرسید — پیویِ هر {_others} نفر بسته است "
+                    f"یا بات را استارت نکرده‌اند.")
+        try:
+            await ctx.bot.send_message(g.god_id, _msg, parse_mode="HTML")
+        except Exception:
+            pass
     except Exception as e:
         print("⚠️ god rating prompts:", e)
 
@@ -10904,14 +10918,31 @@ async def handle_don_sentence_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         return
 
 
+def _mafia_decider_key(g):
+    """کلیدِ «تصمیم‌گیرندهٔ مافیا» در هر سناریو (گیمر وراثتِ شاتِ خودش را دارد)."""
+    if _is_nemayande_scenario(g):
+        return "nem_decider_seat"
+    if _is_baazpors_scenario(g):
+        return "bzp_decider_seat"
+    if _is_takavar_scenario(g):
+        return "tk_decider_seat"
+    if _is_kapu_scenario(g):
+        return "kp_decider_seat"
+    if _is_gamer_scenario(g):
+        return None
+    return "night_decider_seat"
+
+
 async def _pass_shot_to_next_mafia(ctx, g, ks):
-    """👢→🔫 اگر کیک‌شده مافیای صاحبِ شات بود و هنوز شلیک نکرده، شات به مافیای بعدی می‌رسد."""
+    """👢→🔫 اگر کیک‌شده «تصمیم‌گیرندهٔ مافیا» بود و هنوز اکتش را ثبت نکرده،
+    نوبت به مافیای بعدی می‌رسد — با منویِ درستِ همان سناریو."""
     try:
-        if _sc_side(g, ks) != "مافیا" or getattr(g, "night_shot_target", None):
-            return
-        ku = g.seats[ks][0]
-        if ku not in (g.night_pm_msgs or {}):
-            return   # پرامپتِ بازی دستش نبود → شاتی معطل نیست
+        if getattr(g, "night_shot_target", None) or getattr(g, "night_don_act", None):
+            return   # اکتِ مافیا قبلاً ثبت شده
+        key = _mafia_decider_key(g)
+        if not key or getattr(g, key, None) != ks:
+            return   # ⚠️ این نفر تصمیم‌گیرندهٔ مافیا نبود (مثلاً هکر) → چیزی معطل نیست
+
         nxt = None
         for s in sorted(_alive_seats(g)):
             if s != ks and s not in (g.night_burned or set()) and _sc_side(g, s) == "مافیا":
@@ -10920,13 +10951,32 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
         if nxt is None:
             return
         nuid = g.seats[nxt][0]
-        targets = [x for x in _alive_seats(g) if x != nxt]
-        m = await _safe_pm(ctx, nuid, "🔫 شات به تو رسید (هم‌تیمی‌ات کیک شد) — هدف را انتخاب کن:",
-                           _kb_night_seats(targets, g, "night_shot_", confirm_cb="night_shot_confirm"))
+        setattr(g, key, nxt)
+        head = "🔫 اکتِ مافیا به تو رسید (هم‌تیمی‌ات کیک شد)"
+
+        # ⚠️ هر سناریو باید منویِ خودش را بگیرد، وگرنه جریانِ بازی به‌هم می‌ریزد
+        if _is_nemayande_scenario(g):
+            rows = [[InlineKeyboardButton("🔫 شات", callback_data="nem_don_shot")]]
+            # ناتویی اکتِ خودِ دن است — دنِ کیک‌شده هنوز خط نخورده، پس دستی کنارش می‌گذاریم
+            _don = _find_seat_by_role(g, _R_DON)
+            if _don is not None and _don != ks and _don not in (g.night_burned or set()):
+                rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="nem_don_nato")])
+            kb = InlineKeyboardMarkup(rows)
+            text = f"{head}\nاکت مافیا را انتخاب کن:"
+        else:
+            prefix, confirm = {
+                "bzp_decider_seat": ("bzp_shot_", "bzp_shot_confirm"),
+                "tk_decider_seat":  ("tk_st_", "tk_st_confirm"),
+                "kp_decider_seat":  ("kp_st_", "kp_st_confirm"),
+            }.get(key, ("night_shot_", "night_shot_confirm"))
+            kb = _kb_night_seats(list(_alive_seats(g)), g, prefix, confirm_cb=confirm)
+            text = f"{head} — هدف را انتخاب کن:"
+
+        m = await _safe_pm(ctx, nuid, text, kb)
         if m:
             g.night_pm_msgs[nuid] = m.message_id
             store.save()
-            await _night_report(ctx, g, f"🔫 شات از {ks} به {nxt} منتقل شد (کیک شب).")
+            await _night_report(ctx, g, f"🔫 اکتِ مافیا از {ks} به {nxt} منتقل شد (کیک شب).")
     except Exception as e:
         print("⚠️ pass shot err:", e)
 
