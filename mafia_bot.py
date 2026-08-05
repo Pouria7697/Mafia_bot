@@ -183,6 +183,7 @@ class GameState:
         self.chaos_auto = getattr(self, "chaos_auto", False)   # 🌀 کی‌آسِ خودکار (۳ نفرِ باقی‌مانده)
         self.endq_token = getattr(self, "endq_token", None)    # 🏁 سؤالِ «بازی تمام شده؟»
         self.endq_mid = getattr(self, "endq_mid", None)
+        self.endq_alert = getattr(self, "endq_alert", False)   # پاپ‌آپِ یادآوری روی دکمهٔ بعدیِ گاد
         self.purchased_seat = None    
         self.pending_delete = getattr(self, "pending_delete", None) or set()  
         self.warnings = self.warnings or {}
@@ -4982,6 +4983,8 @@ async def _auto_end_game(ctx, chat_id, g, winner_side, clean, why):
     g.chaos_mode = False
     g.chaos_selected = set()
     g.chaos_auto = False
+    g.endq_token = None
+    g.endq_alert = False
     g.winner_side = winner_side
     g.clean_win = bool(clean)
     store.save()
@@ -5034,6 +5037,25 @@ def _win_condition(g):
     return None
 
 
+# 🖱 آخرین دکمه‌ای که همین الان زده شده — تا پاپ‌آپ روی «همان» دکمه بیاید
+_LAST_CB = {"q": None, "uid": None, "ts": 0.0}
+
+
+async def _popup_now(text) -> bool:
+    """پاپ‌آپ روی همان دکمه‌ای که همین لحظه زده شده (اگر هنوز تازه باشد)."""
+    q = _LAST_CB.get("q")
+    if not q:
+        return False
+    if (datetime.now(timezone.utc).timestamp() - float(_LAST_CB.get("ts") or 0)) > 20:
+        return False
+    _LAST_CB["q"] = None      # هر دکمه فقط یک پاپ‌آپ
+    try:
+        await safe_q_answer(q, text, show_alert=True)
+        return True
+    except Exception:
+        return False
+
+
 async def _expire_end_question(ctx, g, token, delay=300):
     """⏳ اگر گاد تا ۵ دقیقه جواب نداد، سؤال پاک می‌شود و بازی عادی ادامه می‌یابد."""
     try:
@@ -5045,6 +5067,7 @@ async def _expire_end_question(ctx, g, token, delay=300):
     mid = getattr(g, "endq_mid", None)
     g.endq_token = None
     g.endq_mid = None
+    g.endq_alert = False
     store.save()
     if mid:
         try:
@@ -5062,6 +5085,7 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
             side, clean, why = cond
             token = str(int(datetime.now(timezone.utc).timestamp()))[-8:]
             g.endq_token = token
+            g.endq_alert = True      # اولین دکمه‌ای که گاد بزند، پاپ‌آپ می‌گیرد
             store.save()
             lbl = ("کلین‌شیت " if clean else "برد ") + side
             kb = InlineKeyboardMarkup([[
@@ -5080,9 +5104,18 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
                 g.endq_mid = m.message_id
                 store.save()
                 asyncio.create_task(_expire_end_question(ctx, g, token))
+                # 🔔 اگر همین الان خودِ گاد دکمه‌ای زده (پایان رأی‌گیری / روز / …)،
+                #    پاپ‌آپ روی همان دکمه بیاید — نه دکمهٔ بعدی
+                if _LAST_CB.get("uid") == g.god_id:
+                    if await _popup_now(
+                            "🏁 به‌نظر می‌رسد بازی تمام شده!\n"
+                            "همین حالا پیویِ بات را چک کن و بله/خیر را بزن."):
+                        g.endq_alert = False
+                        store.save()
             except Exception as e:
                 print("⚠️ end question send:", e)
                 g.endq_token = None
+                g.endq_alert = False
                 store.save()
 
         # 🌀 پایانِ شب با ۳ نفرِ باقی‌مانده (۲ شهر + ۱ مافیا) → حالتِ کی‌آس
@@ -5121,6 +5154,7 @@ async def handle_end_question_callback(update, ctx):
     mid = getattr(g, "endq_mid", None) or (q.message.message_id if q.message else None)
     g.endq_token = None
     g.endq_mid = None
+    g.endq_alert = False
     store.save()
 
     if q.data == "endq_no":
@@ -11288,6 +11322,30 @@ async def handle_night_kick_callback(update, ctx):
 async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 📋 لیست منتخب (مستقل از بازی، در پی‌وی) — قبل از هر چیز
     _q = update.callback_query
+
+    # 🖱 ثبتِ دکمه‌ی جاری تا اگر همین دکمه بازی را تمام کرد، پاپ‌آپ روی خودش بیاید
+    if _q and _q.data and not _q.data.startswith("endq_"):
+        _LAST_CB["q"] = _q
+        _LAST_CB["uid"] = _q.from_user.id
+        _LAST_CB["ts"] = datetime.now(timezone.utc).timestamp()
+
+    # 🏁 پاپ‌آپِ «بازی تمام شده؟» — اگر از قبل سؤالِ بی‌پاسخی مانده باشد
+    if _q and _q.data and not _q.data.startswith("endq_"):
+        try:
+            _uid = _q.from_user.id
+            for _cid, _gg in store.games.items():
+                if (_gg.god_id == _uid and getattr(_gg, "endq_token", None)
+                        and getattr(_gg, "endq_alert", False)):
+                    _gg.endq_alert = False
+                    store.save()
+                    await safe_q_answer(
+                        _q,
+                        "🏁 به‌نظر می‌رسد بازی تمام شده!\n"
+                        "همین حالا پیویِ بات را چک کن و بله/خیر را بزن.",
+                        show_alert=True)
+                    break
+        except Exception:
+            pass
     if _q and _q.data and (_q.data.startswith("sel_") or _q.data.startswith("selday_")):
         await handle_selected_callback(update, ctx)
         return
@@ -13003,6 +13061,7 @@ async def shuffle_and_assign(
     g.chaos_auto = False
     g.endq_token = None
     g.endq_mid = None
+    g.endq_alert = False
     g.score_events = {}
     g.score_kicked = set()
     g.score_act_impossible = set()
