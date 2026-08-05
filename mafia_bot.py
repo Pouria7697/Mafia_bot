@@ -178,8 +178,11 @@ class GameState:
         self.status_mode = False
         self.preview_uid_to_role = getattr(self, "preview_uid_to_role", None)
         self.shuffle_repeats = getattr(self, "shuffle_repeats", None) 
-        self.chaos_mode = False        
-        self.chaos_selected = set()       
+        self.chaos_mode = False
+        self.chaos_selected = set()
+        self.chaos_auto = getattr(self, "chaos_auto", False)   # 🌀 کی‌آسِ خودکار (۳ نفرِ باقی‌مانده)
+        self.endq_token = getattr(self, "endq_token", None)    # 🏁 سؤالِ «بازی تمام شده؟»
+        self.endq_mid = getattr(self, "endq_mid", None)
         self.purchased_seat = None    
         self.pending_delete = getattr(self, "pending_delete", None) or set()  
         self.warnings = self.warnings or {}
@@ -2445,6 +2448,13 @@ def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
 
 
 def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
+    # 🌀 کی‌آسِ خودکار: فقط دو گزینه — بات خودش می‌داند چه کسانی کی‌آس‌اند (زنده‌ها)
+    if getattr(g, "chaos_auto", False):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("😈 برد مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
+            [InlineKeyboardButton("🏙 برد شهر (کی‌آس)", callback_data="winner_city_chaos")],
+            [InlineKeyboardButton("⬅️ بازگشت", callback_data="back_endgame")],
+        ])
     rows = [
         [InlineKeyboardButton("🏙 شهر", callback_data="winner_city")],
         [InlineKeyboardButton("😈 مافیا", callback_data="winner_mafia")],
@@ -3531,6 +3541,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
             await publish_seating(ctx, chat_id, g, mode=CTRL)
         except Exception:
             pass
+        await _check_auto_end(ctx, chat_id, g)   # 🏁
 
     # 🏅 امتیازِ رأی نهایی (خروجِ واقعی = وقتی خط خورده باشد)
     _score_votes_final(g, targets, exiter, not protected)
@@ -4205,7 +4216,8 @@ def _kb_add_back(kb, back_cb):
 
 # ═══════════ 🎛 اکتِ دستیِ گاد — جانشینیِ پیویِ بازیکن ═══════════
 _GOD_ONLY_CB = ("kpd_", "kpg_", "kpe_", "kpc_", "nemd_", "nemc_", "nrep_", "bzd_",
-                "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_", "kpv_")
+                "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_", "kpv_",
+                "endq_")
 
 
 def _kb_dump(kb):
@@ -4963,6 +4975,183 @@ async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
         f"🔫 <b>سرنوشتِ شلیکِ مافیا</b>: هدف {st}. {nm} <b>خط نخورد</b> — {why}.")
 
 
+async def _auto_end_game(ctx, chat_id, g, winner_side, clean, why):
+    """🏁 بستنِ خودکارِ بازی با برندهٔ مشخص."""
+    g.awaiting_winner = False
+    g.temp_winner = None
+    g.chaos_mode = False
+    g.chaos_selected = set()
+    g.chaos_auto = False
+    g.winner_side = winner_side
+    g.clean_win = bool(clean)
+    store.save()
+    try:
+        _chat = await ctx.bot.get_chat(chat_id)
+    except Exception as e:
+        print("⚠️ auto end get_chat:", e)
+        return False
+    _lbl = ("کلین‌شیت " if clean else "برد ") + winner_side
+    try:
+        await ctx.bot.send_message(chat_id, f"🏁 <b>بازی تمام شد — {_lbl}</b>\n{why}",
+                                   parse_mode="HTML")
+    except Exception:
+        pass
+
+    class _AutoUpdate:
+        effective_chat = _chat
+
+    await announce_winner(ctx, _AutoUpdate(), g)
+    await reset_game(ctx=ctx, chat_id=chat_id)
+    return True
+
+
+def _win_condition(g):
+    """شرطِ پایان را حساب می‌کند → (ساید, کلین‌شیت, دلیل) یا None اگر بازی ادامه دارد."""
+    if g.phase in ("idle", "ended", "awaiting_winner"):
+        return None
+    if not getattr(g, "assigned_roles", None):
+        return None
+    alive = set(_alive_seats(g))
+    if not alive:
+        return None
+    # ♦️ سناریوی مستقل‌دار → بات اصلاً دخالت نمی‌کند
+    if any(_sc_side(g, s) == "مستقل" for s in alive):
+        return None
+    mafia_alive = {s for s in alive if _sc_side(g, s) == "مافیا"}
+    city_alive = alive - mafia_alive
+    struck = {s for s in (g.striked or set()) if s in g.seats}
+
+    if not mafia_alive:
+        clean = not any(_sc_side(g, s) != "مافیا" for s in struck)
+        return ("شهر", clean,
+                "همهٔ مافیاها از بازی خارج شده‌اند."
+                + (" هیچ شهروندی هم خارج نشده." if clean else ""))
+    if len(mafia_alive) >= len(city_alive):
+        clean = not any(_sc_side(g, s) == "مافیا" for s in struck)
+        return ("مافیا", clean,
+                f"تعدادِ مافیا ({len(mafia_alive)}) با شهروندها ({len(city_alive)}) برابر شده."
+                + (" هیچ مافیایی هم کشته نشده." if clean else ""))
+    return None
+
+
+async def _expire_end_question(ctx, g, token, delay=300):
+    """⏳ اگر گاد تا ۵ دقیقه جواب نداد، سؤال پاک می‌شود و بازی عادی ادامه می‌یابد."""
+    try:
+        await asyncio.sleep(delay)
+    except Exception:
+        return
+    if getattr(g, "endq_token", None) != token:
+        return   # جواب داده یا سؤالِ تازه‌تری آمده
+    mid = getattr(g, "endq_mid", None)
+    g.endq_token = None
+    g.endq_mid = None
+    store.save()
+    if mid:
+        try:
+            await ctx.bot.delete_message(chat_id=g.god_id, message_id=mid)
+        except Exception:
+            pass
+
+
+async def _check_auto_end(ctx, chat_id, g, after_night=False):
+    """🏁 اگر شرطِ پایان برقرار شد، از گاد در پیوی می‌پرسد «بازی تمام شده؟»
+    (خودکار نمی‌بندد — چون هانتر/وارث و امثالش را بات نمی‌داند)."""
+    try:
+        cond = _win_condition(g)
+        if cond and not getattr(g, "endq_token", None):
+            side, clean, why = cond
+            token = str(int(datetime.now(timezone.utc).timestamp()))[-8:]
+            g.endq_token = token
+            store.save()
+            lbl = ("کلین‌شیت " if clean else "برد ") + side
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ بله، ببند", callback_data="endq_yes"),
+                InlineKeyboardButton("🚫 خیر، ادامه", callback_data="endq_no"),
+            ]])
+            try:
+                m = await ctx.bot.send_message(
+                    g.god_id,
+                    f"🏁 <b>آیا بازی تمام شده؟</b>\n\n{why}\n"
+                    f"نتیجه‌ی محاسبه‌شده: <b>{lbl}</b>\n\n"
+                    f"<i>اگر «بله» بزنی، بات لیست را می‌بندد و همه‌چیز را ثبت می‌کند.\n"
+                    f"اگر «خیر» بزنی، هر وقت خودت خواستی «اتمام بازی» را بزن.\n"
+                    f"بی‌پاسخ بماند، بعد از ۵ دقیقه این پیام پاک می‌شود.</i>",
+                    parse_mode="HTML", reply_markup=kb)
+                g.endq_mid = m.message_id
+                store.save()
+                asyncio.create_task(_expire_end_question(ctx, g, token))
+            except Exception as e:
+                print("⚠️ end question send:", e)
+                g.endq_token = None
+                store.save()
+
+        # 🌀 پایانِ شب با ۳ نفرِ باقی‌مانده (۲ شهر + ۱ مافیا) → حالتِ کی‌آس
+        if (after_night and not cond and len(_alive_seats(g)) == 3
+                and getattr(g, "assigned_roles", None)
+                and g.phase not in ("idle", "ended", "awaiting_winner")
+                and not getattr(g, "chaos_auto", False)):
+            g.chaos_auto = True
+            store.save()
+            try:
+                await ctx.bot.send_message(
+                    chat_id,
+                    "🌀 <b>بازی وارد حالتِ کی‌آس شد</b> — سه نفر باقی مانده‌اند.\n"
+                    "<i>موقعِ «اتمام بازی» فقط دو گزینه می‌آید و لازم نیست کی‌آسی‌ها را انتخاب کنی.</i>",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception as e:
+        print("⚠️ auto end err:", e)
+    return False
+
+
+async def handle_end_question_callback(update, ctx):
+    """🏁 پاسخِ گاد به «آیا بازی تمام شده؟»"""
+    q = update.callback_query
+    uid = q.from_user.id
+    g = None; chat_id = None
+    for cid, game in store.games.items():
+        if game.god_id == uid and getattr(game, "endq_token", None):
+            g, chat_id = game, cid
+            break
+    if g is None:
+        await safe_q_answer(q, "این سؤال دیگر معتبر نیست.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = getattr(g, "endq_mid", None) or (q.message.message_id if q.message else None)
+    g.endq_token = None
+    g.endq_mid = None
+    store.save()
+
+    if q.data == "endq_no":
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=uid, message_id=mid,
+                text="🚫 باشه — بازی ادامه دارد. هر وقت خواستی خودت «اتمام بازی» را بزن.")
+        except Exception:
+            pass
+        return
+
+    # ✅ بله → شرط را دوباره تازه حساب کن (شاید بین سؤال و جواب چیزی عوض شده باشد)
+    cond = _win_condition(g)
+    if not cond:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=uid, message_id=mid,
+                text="⚠️ شرایطِ پایان دیگر برقرار نیست — بازی بسته نشد. "
+                     "اگر باز هم تمام شده، خودت «اتمام بازی» را بزن.")
+        except Exception:
+            pass
+        return
+    side, clean, why = cond
+    try:
+        await ctx.bot.edit_message_text(chat_id=uid, message_id=mid,
+                                        text="✅ بازی بسته شد.")
+    except Exception:
+        pass
+    await _auto_end_game(ctx, chat_id, g, side, clean, why)
+
+
 async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     dead = {s for s in dead if s in g.seats and s not in (g.striked or set())}
     await _shot_outcome_report(ctx, g, dead, reasons, zereh_warn)
@@ -5017,6 +5206,7 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
         await publish_seating(ctx, chat_id, g, mode=CTRL)
     except Exception:
         pass
+    await _check_auto_end(ctx, chat_id, g, after_night=True)   # 🏁 پایانِ خودکار / 🌀 کی‌آس
 
 
 async def _resolve_night(ctx, chat_id, g):
@@ -5537,6 +5727,8 @@ async def _baz_duel_count(ctx, chat_id, g):
         await publish_seating(ctx, chat_id, g, mode=CTRL)
     except Exception:
         pass
+
+    await _check_auto_end(ctx, chat_id, g)   # 🏁
 
     # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
     _lside = _sc_side(g, loser)
@@ -8298,6 +8490,7 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
         pass
     await _night_report(ctx, g, f"🔫 گانِ روز: {shooter}. {sname} → {target}. {tname} "
                                 f"(جنگی — خارج شد، {_sc_side(g, target)})")
+    await _check_auto_end(ctx, chat_id, g)   # 🏁
 
     # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
     _tside = _sc_side(g, target)
@@ -8535,6 +8728,7 @@ async def _kp_gun_resolve(ctx, chat_id, g, opt):
             pass
         await _night_report(ctx, g, f"🔫 گانِ {lbl} (جنگی) → {target}. {_tn} خارج شد "
                                     f"({_sc_side(g, target)})")
+        await _check_auto_end(ctx, chat_id, g)   # 🏁
         _lside = _sc_side(g, target)
 
         async def _kp_side_later():
@@ -9562,7 +9756,8 @@ async def handle_kapu_callback(update, ctx):
             _sc_add(g, _seat_of_uid(g, uid), "inq", 5, f"استعلام مثبت ({s})")
         await _close_pm(ctx, uid, mid, f"🔎 استعلام {s}. {tname}: {res}")
         await _night_report(ctx, g, f"🔎 کاراگاه → استعلام {s}. {escape(tname, quote=False)}: <b>{res}</b>"
-                            + (" (جادو شده)" if witched else ""))
+                            + (f" (جادو شده — انتخابش {s}. {escape(tname, quote=False)} بود؛ "
+                               f"استعلام روی خودش برگشت و منفی شد)" if witched else ""))
         g.night_done.add("detective")
         store.save()
         return
@@ -9630,7 +9825,9 @@ async def handle_kapu_callback(update, ctx):
         _tu, tname = g.seats[target]
         await _close_pm(ctx, uid, mid, "🧪 سم ثبت شد.")
         await _night_report(ctx, g, f"🧪 عطار → سم به <b>{target}. {escape(tname, quote=False)}</b>"
-                            + (" (جادو شده)" if witched else ""))
+                            + (f" (جادو شده — انتخابش {s}. "
+                               f"{escape(g.seats[s][1], quote=False)} بود؛ سم روی خودش برگشت)"
+                               if witched else ""))
         g.night_done.add("attar")
         store.save()
         return
@@ -10000,7 +10197,11 @@ async def _kp_apply_poison(ctx, chat_id, g, target, survived):
     g.antidote_skipped = set()
     g.kp_vote_panel_mid = None
     store.save()
-    await _kp_check_heir_inherit(ctx, g)   # وارث ممکن است عطار جدید شود
+    # ⚠️ هیچ‌کدام از این‌ها نباید جلوی بازشدنِ اکت‌های شب را بگیرد
+    try:
+        await _kp_check_heir_inherit(ctx, g)   # وارث ممکن است عطار جدید شود
+    except Exception as e:
+        print("⚠️ heir inherit err:", e)
     try:
         await publish_seating(ctx, chat_id, g, mode=CTRL)
     except Exception:
@@ -10368,6 +10569,7 @@ async def handle_gamer_callback(update, ctx):
                     await publish_seating(ctx, chat_id, g, mode=CTRL)
                 except Exception:
                     pass
+                await _check_auto_end(ctx, chat_id, g)   # 🏁
             else:  # سرعت
                 await ctx.bot.send_message(
                     chat_id, "⏩ چاشنی سرعت! بمب پس از صحبتِ نیمی از بازیکنان منفجر می‌شود (با گاد).")
@@ -11125,6 +11327,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_god_rating_callback(update, ctx)
         return
 
+    # 🏁 «آیا بازی تمام شده؟» (پیویِ گاد)
+    if _q and _q.data and _q.data.startswith("endq_"):
+        await handle_end_question_callback(update, ctx)
+        return
+
     # 🧑‍⚖️ بازپرس: ادامه/ملغی + پایانِ دوئل
     if _q and _q.data and _q.data.startswith("bzd_"):
         await handle_baz_duel_callback(update, ctx)
@@ -11220,7 +11427,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند حذف کند!")
             return
         g.pending_delete = set()
         store.save()
@@ -11322,7 +11528,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── صدا زدن همه قبلِ شروع ──────────────────────────────────
     if data == BTN_CALL:
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند این دکمه را بزند!")
             return
 
         mentions = [
@@ -11339,7 +11544,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── تغییر ساعت شروع ───────────────────────────────────────
     if data == "change_time":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند زمان را عوض کند!")
             return
         g.vote_type = "awaiting_time"
         store.save()
@@ -11358,7 +11562,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not getattr(g, "preview_uid_to_role", None):
@@ -11407,7 +11610,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "shuffle_yes":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -11448,7 +11650,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "shuffle_no":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند بازی را شروع کند!")
             return
 
         if not g.awaiting_shuffle_decision:
@@ -11488,7 +11689,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ورود به حالت اخطار
     if data == "warn_mode":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند اخطار بدهد!")
             return
         if not isinstance(g.warnings, dict):
             g.warnings = {}
@@ -11941,6 +12141,21 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # 🔹 حالت کی‌آس: انتخاب ۳ بازیکن زنده
         # ────────────────────────────────────────────────
         alive = [s for s in sorted(g.seats) if s not in g.striked]
+
+        # 🌀 کی‌آسِ خودکار → کی‌آسی‌ها همان زنده‌ها هستند؛ مستقیم تأیید
+        if getattr(g, "chaos_auto", False):
+            g.chaos_selected = set(alive)
+            store.save()
+            _names = "، ".join(f"{s}. {g.seats[s][1]}" for s in alive)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data="confirm_winner")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="back_to_winner_select")],
+            ])
+            await set_hint_and_kb(
+                ctx, chat, g,
+                f"🌀 کی‌آس: {_names}\nبرای نهایی‌سازی «تأیید» را بزنید.",
+                kb)
+            return
         g.chaos_selected = set()
         kb = kb_pick_multi_seats(
             alive, g.chaos_selected, 3,
@@ -12102,7 +12317,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "shuffle_card":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⛔ فقط راوی می‌تواند کارت بکشد!")
             return
 
         cards = load_cards()
@@ -12148,6 +12362,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if getattr(g, "night_number", 0) == 0:
             for _s in sorted(_newly):
                 await _d1_guess_start(ctx, g, _s)
+        await _check_auto_end(ctx, chat, g)   # 🏁
         return
 
     if data.startswith("strike_toggle_") and uid == g.god_id:
@@ -12183,6 +12398,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _night_report(ctx, g, f"👢 کیکِ روز: <b>{s}. {escape(g.seats[s][1], quote=False)}</b> ({_kside})")
         store.save()
         await publish_seating(ctx, chat, g, mode=CTRL)
+        await _check_auto_end(ctx, chat, g)   # 🏁
         return
 
     if data == "kick_back" and uid == g.god_id:
@@ -12204,7 +12420,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == BTN_REROLL:
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⚠️ فقط راوی می‌تواند نقش‌ها را رندوم کند!")
             return
 
         if not g.scenario or len(g.seats) != g.max_seats:
@@ -12256,7 +12471,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── تغییر موضوع/مناسبت رویداد (گاد یا ادمین‌ها) ─────────────
     if data == "change_event":
         if not await _is_god_or_admin(ctx, chat, uid, g):
-            await ctx.bot.send_message(chat, "⛔ فقط راوی یا ادمین‌های گروه می‌توانند رویداد را تغییر دهند.")
             return
         g.awaiting_event_title = True
         store.save()
@@ -12271,7 +12485,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── رأی‌گیری‌ها ────────────────────────────────────────────
     if data == "init_vote":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند رأی‌گیری را شروع کند!")
             return
 
         kb = InlineKeyboardMarkup([
@@ -12540,7 +12753,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "status_auto":
         if uid != g.god_id:
-            await ctx.bot.send_message(chat, "⚠️ فقط راوی می‌تواند استعلام وضعیت بگیرد!")
             return
 
         mafia_roles = {_nz(x) for x in load_mafia_roles()}
@@ -12594,7 +12806,6 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("vote_"):
         if uid != g.god_id:
-            await ctx.bot.send_message(chat,"⛔ فقط راوی می‌تواند رأی بدهد!")
             return
         seat_str = data.split("_")[1]
         if seat_str.isdigit():
@@ -12789,6 +13000,9 @@ async def shuffle_and_assign(
 
     # 🔄 نقش‌های جدید = صفرشدنِ هرچه به نقش/سایدِ قبلی وابسته بود
     #    (بارِ اول همه‌چیز خالی است و بی‌اثر؛ در رندوم/پخشِ مجدد ریستِ واقعی است)
+    g.chaos_auto = False
+    g.endq_token = None
+    g.endq_mid = None
     g.score_events = {}
     g.score_kicked = set()
     g.score_act_impossible = set()
