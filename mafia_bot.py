@@ -979,6 +979,74 @@ def god_ban_info(uid):
     return (data.get("banned") or {}).get(str(uid))
 
 
+# ─── 👢 محرومیتِ نشستن (۳ بار کیک → ۳ روز) ──────────────────
+KICK_BAN_LIMIT = 3          # این تعداد کیک → محرومیت
+KICK_BAN_DAYS = 3           # مدتِ محرومیت (روز)
+
+
+def seat_ban_info(uid):
+    """اگر این نفر محرومِ نشستن است، اطلاعاتش را برمی‌گرداند؛ وگرنه None."""
+    now = datetime.now(timezone.utc).timestamp()
+    if _GOD_BAN_CACHE["data"] is None or (now - _GOD_BAN_CACHE["ts"]) > 900:
+        d = load_god_bans()
+        if d is not None:
+            _GOD_BAN_CACHE["data"] = d
+            _GOD_BAN_CACHE["ts"] = now
+    data = _GOD_BAN_CACHE["data"] or {}
+    rec = (data.get("seats") or {}).get(str(uid))
+    if not rec:
+        return None
+    if float(rec.get("until", 0) or 0) <= now:
+        return None      # منقضی شده
+    return rec
+
+
+def seat_ban_days_left(rec) -> int:
+    left = float(rec.get("until", 0) or 0) - datetime.now(timezone.utc).timestamp()
+    return max(1, int(left // 86400) + (1 if left % 86400 else 0))
+
+
+def record_kick(uid, name=None):
+    """👢 ثبتِ یک کیک. اگر به حدِ نصاب رسید، محرومیتِ نشستن اعمال می‌شود.
+    خروجی: تعدادِ روزهای محرومیت (۰ یعنی هنوز محروم نشده)."""
+    try:
+        stats = load_player_stats()
+        if stats is None:
+            print("⛔ record_kick: خواندنِ آمار ناموفق")
+            return 0
+        key = str(uid)
+        p = stats.get(key) or {"name": name or "بازیکن", "games": 0, "wins": 0}
+        if name:
+            p["name"] = name
+        p["kicks_total"] = int(p.get("kicks_total", 0) or 0) + 1
+        streak = int(p.get("kick_streak", 0) or 0) + 1
+        banned_days = 0
+        if streak >= KICK_BAN_LIMIT:
+            streak = 0            # شمارنده صفر می‌شود تا ۳ کیکِ بعدی دوباره محرومیت بیاورد
+            banned_days = KICK_BAN_DAYS
+        p["kick_streak"] = streak
+        stats[key] = p
+        save_player_stats(stats)
+
+        if banned_days:
+            data = load_god_bans()
+            if data is None:
+                return 0
+            seats = data.get("seats") or {}
+            seats[key] = {
+                "name": p.get("name", "بازیکن"),
+                "until": datetime.now(timezone.utc).timestamp() + banned_days * 86400,
+                "kicks": KICK_BAN_LIMIT,
+            }
+            data["seats"] = seats
+            if not save_god_bans(data):
+                return 0
+        return banned_days
+    except Exception as e:
+        print("❌ record_kick:", e)
+        return 0
+
+
 def god_rating_avg(p: dict):
     """(میانگین, تعدادِ رأی) از روی رکوردِ آمارِ یک نفر."""
     c = int(p.get("god_rating_count", 0) or 0)
@@ -1040,31 +1108,63 @@ def _is_unban_text(text: str) -> bool:
 
 
 def god_unban(uid) -> tuple[bool, str]:
-    """🔓 برداشتنِ محرومیتِ یک گاد تا پایانِ همین هفته."""
+    """🔓 برداشتنِ هر دو محرومیت: گاد شدن و نشستن در لیست."""
     data = load_god_bans()
     if data is None:
         return False, "خواندنِ لیستِ محرومان ناموفق بود — کمی بعد دوباره امتحان کن."
     banned = data.get("banned") or {}
+    seats = data.get("seats") or {}
     key = str(uid)
-    if key not in banned:
+    nm = ((banned.get(key) or {}).get("name")
+          or (seats.get(key) or {}).get("name") or "بازیکن")
+    kinds = []
+    if key in banned:
+        banned.pop(key, None)
+        kinds.append("گاد شدن")
+    if key in seats:
+        seats.pop(key, None)
+        kinds.append("نشستن در لیست")
+    if not kinds:
         return False, "این نفر محروم نیست."
-    nm = (banned[key] or {}).get("name", "بازیکن")
-    banned.pop(key, None)
     data["banned"] = banned
+    data["seats"] = seats
     if not save_god_bans(data):
         return False, "ذخیرهٔ تغییرات ناموفق بود."
     _GOD_BAN_CACHE["data"] = data
     _GOD_BAN_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
-    return True, nm
+    # 🔄 شمارندهٔ کیک هم صفر شود تا با یک کیکِ بعدی دوباره محروم نشود
+    try:
+        st = load_player_stats()
+        if st is not None and key in st:
+            st[key]["kick_streak"] = 0
+            save_player_stats(st)
+    except Exception:
+        pass
+    return True, f"{nm} ({'، '.join(kinds)})"
 
 
-async def _god_unban_from_reply(ctx, msg):
-    """«رفع محرومیت» با ریپلای روی پیامِ فرد (فقط مدیر اصلی)."""
+async def _can_unban(ctx, chat_id, uid) -> bool:
+    """مدیرِ اصلی یا ادمین‌های همان گروه می‌توانند رفعِ محرومیت کنند."""
+    if uid == ADMIN_ID:
+        return True
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat_id)
+        return uid in {a.user.id for a in admins}
+    except Exception:
+        return False
+
+
+async def _god_unban_from_reply(ctx, msg, by_uid=None):
+    """«رفع محرومیت» با ریپلای روی پیامِ فرد (مدیر اصلی یا ادمینِ گروه)."""
     rep = msg.reply_to_message
     if not rep or not rep.from_user:
         await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «رفع محرومیت».")
         return
     target = rep.from_user
+    # ⛔ ادمین نمی‌تواند محرومیتِ خودش را بردارد
+    if by_uid is not None and by_uid != ADMIN_ID and target.id == by_uid:
+        await msg.reply_text("⛔ محرومیتِ خودت را نمی‌توانی برداری.")
+        return
     ok, res = god_unban(target.id)
     if not ok:
         await msg.reply_text(f"ℹ️ {res}")
@@ -11298,9 +11398,13 @@ async def handle_night_kick_callback(update, ctx):
                 pass
         await _burn_advance(ctx, chat_id, g)   # ⛓ کیک هم صفِ اولویت‌دار را جلو ببرد
         _kside = _sc_side(g, s)
+        _bd = record_kick(g.seats[s][0], _tn)   # 👢 شمارشِ کیک + محرومیتِ احتمالی
         await _close_pm(ctx, uid, mid,
                         f"👢 کیک شب ثبت شد: {s}. {_tn} ({_kside})\n"
-                        f"(امشب اکت ندارد و هنگامِ روز خط می‌خورد)")
+                        f"(امشب اکت ندارد و هنگامِ روز خط می‌خورد)"
+                        + (f"\n\n⛔ به {KICK_BAN_LIMIT} کیک رسید — "
+                           f"{KICK_BAN_DAYS} روز حقِ نشستن در هیچ لیستی ندارد."
+                           if _bd else ""))
         await _night_report(ctx, g, f"👢 کیک شب: <b>{s}. {escape(_tn, quote=False)}</b> ({_kside})")
         # 📢 اعلامِ عمومی (با ساید) موقعِ «روز» فرستاده می‌شود، نه الان — که شب چیزی لو نرود
         store.save()
@@ -12447,9 +12551,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if g.seats[s][0] not in (g.night_burned_uids or set()):
                 g.night_burned.add(s)
                 g.night_burned_uids.add(g.seats[s][0])
+            _bd = record_kick(g.seats[s][0], g.seats[s][1])   # 👢 شمارشِ کیک
             try:
                 await ctx.bot.send_message(
-                    chat, f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_kside}</b>",
+                    chat, f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_kside}</b>"
+                          + (f"\n⛔ به {KICK_BAN_LIMIT} کیک رسید — {KICK_BAN_DAYS} روز "
+                             f"حقِ نشستن در هیچ لیستی ندارد." if _bd else ""),
                     parse_mode="HTML")
             except Exception:
                 pass
@@ -13223,6 +13330,15 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
+    _sb = seat_ban_info(uid)
+    if _sb:
+        await ctx.bot.send_message(
+            chat_id,
+            f"⛔ <b>{escape(_sb.get('name', 'این بازیکن'), quote=False)}</b> به‌خاطر "
+            f"{KICK_BAN_LIMIT} بار کیک، {seat_ban_days_left(_sb)} روز دیگر "
+            f"حقِ نشستن در لیست ندارد.", parse_mode="HTML")
+        return
+
     name = g.user_names.get(uid, "ناشناس")
     g.seats[seat_no] = (uid, name)
     store.save()
@@ -13267,10 +13383,11 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat.id
     g = gs(chat_id)
 
-    # 🔓 «رفع محرومیت» با ریپلای — فقط مدیر اصلی
-    if uid == ADMIN_ID and _is_unban_text(text):
-        await _god_unban_from_reply(ctx, msg)
-        return
+    # 🔓 «رفع محرومیت» با ریپلای — مدیرِ اصلی یا ادمین‌های گروه (نه روی خودش)
+    if _is_unban_text(text):
+        if await _can_unban(ctx, chat_id, uid):
+            await _god_unban_from_reply(ctx, msg, by_uid=uid)
+        return   # غیرِ ادمین: بی‌صدا نادیده گرفته می‌شود
 
     # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
     if _try_capture_vote(g, msg, uid, text):
@@ -13388,6 +13505,15 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     existing_seat = s
                     existing_name = n
                     break
+
+            _sb = seat_ban_info(uid)
+            if _sb and existing_seat is None:
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"⛔ <b>{escape(_sb.get('name', 'این بازیکن'), quote=False)}</b> به‌خاطر "
+                    f"{KICK_BAN_LIMIT} بار کیک، {seat_ban_days_left(_sb)} روز دیگر "
+                    f"حقِ نشستن در لیست ندارد.", parse_mode="HTML")
+                return
 
             final_name = preferred_name or existing_name or "ناشناس"
 
@@ -13668,6 +13794,14 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     target_uid = update.message.reply_to_message.from_user.id
+
+    _sb = seat_ban_info(target_uid)
+    if _sb:
+        await update.message.reply_text(
+            f"⛔ این بازیکن به‌خاطر {KICK_BAN_LIMIT} بار کیک، "
+            f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن در لیست ندارد.\n"
+            f"(برای رفعش، روی پیامش «رفع محرومیت» بنویس.)")
+        return
 
     # 🧠 بررسی نام ذخیره‌شده در gist
     name = g.user_names.get(target_uid, "ناشناس")
@@ -15468,6 +15602,13 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     new_uid = update.message.reply_to_message.from_user.id
+    _sb = seat_ban_info(new_uid)
+    if _sb:
+        await update.message.reply_text(
+            f"⛔ این بازیکن به‌خاطر {KICK_BAN_LIMIT} بار کیک، "
+            f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن در لیست ندارد.\n"
+            f"(برای رفعش، روی پیامش «رفع محرومیت» بنویس.)")
+        return
     new_name = g.user_names.get(new_uid, "ناشناس")
 
 
