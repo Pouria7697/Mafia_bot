@@ -5140,6 +5140,23 @@ def _win_condition(g):
 # 🖱 آخرین دکمه‌ای که همین الان زده شده — تا پاپ‌آپ روی «همان» دکمه بیاید
 _LAST_CB = {"q": None, "uid": None, "ts": 0.0}
 
+# دکمه‌هایی که ممکن است بازی را تمام کنند (پاسخشان تا بعدِ اجرا نگه داشته می‌شود)
+_MAY_END_CB = ("vote_done_final", "ctl_day", "strike_toggle_done", "kick_toggle_done")
+
+
+async def _late_ack(q, delay=3.0):
+    """⏱ اگر تا این مدت پاپ‌آپی نرفت، کال‌بک را ساده جواب بده تا دکمه گیر نکند."""
+    try:
+        await asyncio.sleep(delay)
+    except Exception:
+        return
+    if _LAST_CB.get("q") is q:
+        _LAST_CB["q"] = None
+        try:
+            await safe_q_answer(q)
+        except Exception:
+            pass
+
 
 async def _popup_now(text) -> bool:
     """پاپ‌آپ روی همان دکمه‌ای که همین لحظه زده شده (اگر هنوز تازه باشد)."""
@@ -5235,6 +5252,17 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
                 pass
     except Exception as e:
         print("⚠️ auto end err:", e)
+    finally:
+        # ✅ اگر پاسخِ کال‌بکِ گاد نگه داشته شده بود و پاپ‌آپی نرفت، ساده جوابش بده
+        #    تا دکمه‌اش روی حالتِ لودینگ نماند
+        try:
+            _q = _LAST_CB.get("q")
+            if _q is not None and _LAST_CB.get("uid") == g.god_id \
+                    and getattr(_q, "data", None) in _MAY_END_CB:
+                _LAST_CB["q"] = None
+                await safe_q_answer(_q)
+        except Exception:
+            pass
     return False
 
 
@@ -9560,7 +9588,7 @@ async def _kp_check_open_citizens(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[duid] = m.message_id
 
-    # 🛡 زره‌ساز — در شب جلادی استراحت
+    # 🛡 زره‌ساز — در شب جلادی و یاکوزایی استراحت
     if not g.night_doctor_blocked:
         arm = _find_seat_by_role(g, _R_ARMORER)
         if arm:
@@ -9784,6 +9812,7 @@ async def handle_kapu_callback(update, ctx):
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
+        g.night_doctor_blocked = True   # 🥷 شبِ یاکوزایی → زره‌ساز حقِ سیو ندارد
         g.night_done.add("mafia")
         store.save()
         await _kp_check_open_witch(ctx, chat_id, g)
@@ -10224,8 +10253,8 @@ async def _kp_begin_poison(ctx, chat_id, g):
     ]])
     expected = []
     for s in _alive_seats(g):
-        if s == attar:
-            continue
+        if s == attar or s == target:
+            continue   # نه عطار، نه خودِ سم‌خورده حقِ رأی دارند
         uid = g.seats[s][0]
         m = await _safe_pm(ctx, uid, "آیا موافق دادنِ پادزهر هستید؟", kb)
         if m:
@@ -11584,7 +11613,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid = q.from_user.id
         g = gs(chat)
 
-    await safe_q_answer(q)
+    # 🏁 دکمه‌هایی که ممکن است بازی را تمام کنند: پاسخِ کال‌بک را نگه می‌داریم
+    #    تا اگر شرطِ پایان برقرار شد، همان دکمه پاپ‌آپ بگیرد (تلگرام فقط یک پاسخ می‌پذیرد).
+    #    _check_auto_end در هر حالت این کال‌بک را تعیین‌تکلیف می‌کند.
+    if not (uid == g.god_id and data in _MAY_END_CB):
+        await safe_q_answer(q)
+    else:
+        asyncio.create_task(_late_ack(q))   # ⏱ تورِ ایمنی: دکمه هرگز گیر نکند
 
     # ─── حذف بازیکن توسط گاد ────────────────────────────────────
     if data == BTN_DELETE:
