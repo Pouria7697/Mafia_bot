@@ -87,6 +87,13 @@ def save_active_groups(active_groups: set[int]) -> bool:
         print("❌ save_active_groups error:", e)
         return False
 
+# ⚔️ تنظیم‌های سناریو «شاهنامه» (موتورش پایین‌تر است؛ اینجا چون در GameState لازم‌اند)
+SH_SIMORGH_FEATHERS = 5     # 🪶 کلِ پرهای سیمرغ در یک بازی
+SH_SIMORGH_PER_NIGHT = 2    # 🪶 حداکثر پر در یک شب
+SH_VOTE_THRESHOLD = 4       # 🗳 حدنصابِ ورود به رأی‌گیریِ نهایی (وقتی مبارزه‌ای شکل نگرفته)
+SH_ARROW_SIDE_DELAY = 55    # ⏳ ثانیه تا اعلامِ سایدِ تیرخورده
+
+
 @dataclass
 class Scenario:
     name: str
@@ -402,6 +409,53 @@ class GameState:
         self.gm_tf_target = getattr(self, "gm_tf_target", None)
         self.gm_tf_map = getattr(self, "gm_tf_map", {}) or {}
         self.gm_robin_steal_from = getattr(self, "gm_robin_steal_from", None)
+        # ── حالت شبِ خودکار (سناریو شاهنامه) ──
+        self.sh_decider_seat = getattr(self, "sh_decider_seat", None)
+        self.sh_shields = getattr(self, "sh_shields", set()) or set()        # 🛡 صاحبانِ سپر
+        self.sh_kaveh_used = getattr(self, "sh_kaveh_used", False)
+        self.sh_afr_used = getattr(self, "sh_afr_used", False)
+        self.sh_kaveh_out = getattr(self, "sh_kaveh_out", False)
+        self.sh_kaveh_block_night = getattr(self, "sh_kaveh_block_night", None)
+        # 🪶 پرها
+        self.sh_boof_used = getattr(self, "sh_boof_used", False)
+        self.sh_boof_holder = getattr(self, "sh_boof_holder", None)
+        self.sh_simorgh_left = getattr(self, "sh_simorgh_left", SH_SIMORGH_FEATHERS)
+        self.sh_simorgh_self_used = getattr(self, "sh_simorgh_self_used", False)
+        self.sh_sim_holders = getattr(self, "sh_sim_holders", []) or []
+        self.sh_sim_sel = getattr(self, "sh_sim_sel", []) or []
+        self.sh_sim_need = getattr(self, "sh_sim_need", 1)
+        self.sh_feather_own = getattr(self, "sh_feather_own", {}) or {}       # seat → ["boof"/"simorgh"]
+        self.sh_feather_wait = getattr(self, "sh_feather_wait", set()) or set()
+        self.sh_feather_final = getattr(self, "sh_feather_final", {}) or {}   # مالکِ نهاییِ هر پر
+        # 🌑 سایهٔ رستم و پیوندِ افراسیاب
+        self.sh_shadow_seat = getattr(self, "sh_shadow_seat", None)
+        self.sh_shadow_night = getattr(self, "sh_shadow_night", None)
+        self.sh_shadow_used = getattr(self, "sh_shadow_used", False)
+        self.sh_shadow_resolved = getattr(self, "sh_shadow_resolved", False)
+        self.sh_shadow_announced = getattr(self, "sh_shadow_announced", False)
+        self.sh_afr_guess = getattr(self, "sh_afr_guess", None)
+        self.sh_afr_guessed = getattr(self, "sh_afr_guessed", False)
+        self.sh_afr_correct = getattr(self, "sh_afr_correct", False)
+        self.sh_link_done = getattr(self, "sh_link_done", False)
+        # 🔎 جاماسب / 🏹 آرش
+        self.sh_blood_used = getattr(self, "sh_blood_used", False)
+        self.sh_arash_used = getattr(self, "sh_arash_used", False)
+        self.sh_bow_holder = getattr(self, "sh_bow_holder", None)
+        self.sh_bow_aiming = getattr(self, "sh_bow_aiming", None)
+        self.sh_bow_chain = getattr(self, "sh_bow_chain", []) or []
+        # ⚔️ رأی‌گیریِ شاهنامه (روز ۱) و انجمن
+        self.sh_button_used = getattr(self, "sh_button_used", False)
+        self.sh_vote_active = getattr(self, "sh_vote_active", False)
+        self.sh_vote_votes = getattr(self, "sh_vote_votes", {}) or {}
+        self.sh_vote_seq = getattr(self, "sh_vote_seq", 0)
+        self.sh_vote_unread = getattr(self, "sh_vote_unread", set()) or set()
+        self.sh_vote_kb_mid = getattr(self, "sh_vote_kb_mid", None)
+        self.sh_vote_high = getattr(self, "sh_vote_high", []) or []
+        self.sh_duels = getattr(self, "sh_duels", []) or []
+        self.sh_duel_final = getattr(self, "sh_duel_final", []) or []   # ⚔️ مبارزه‌های تأییدشده
+        self.sh_council_votes = getattr(self, "sh_council_votes", {}) or {}
+        self.sh_council_sel = getattr(self, "sh_council_sel", {}) or {}
+        self.sh_council_done = getattr(self, "sh_council_done", False)
         # ── اتاق چت مافیا ──
         self.mafia_room_id = getattr(self, "mafia_room_id", None)
         self.mafia_room_link = getattr(self, "mafia_room_link", None)
@@ -1377,6 +1431,34 @@ def _rank_block(delta: dict, win_key: str, game_key: str, top_n: int):
     return rows[:top_n]
 
 
+def _wk_total_pts(d):
+    """امتیازِ هفتگیِ یک بازیکن: امتیازهای ثبت‌شده + ۱۵×بازی‌های قدیمی + ۲۵×بردهای قدیمی.
+    (برد خودش داخلِ امتیاز لحاظ شده — هر برد ۲۵ امتیاز دارد.)"""
+    lg = max(0, d.get("games", 0) - d.get("score_games", 0))
+    lw = max(0, d.get("wins", 0) - d.get("score_wins", 0))
+    return d.get("score_total", 0) + 15.0 * lg + 25.0 * lw
+
+
+def weekly_top_players(delta: dict, top_n: int = 10):
+    """۱۰ بازیکنِ برترِ هفته — دقیقاً همان رتبه‌بندیِ لیدربردِ نمایشی
+    (ترکیبیِ مجموعِ امتیاز + میانگین). خروجی: [(uid, d, امتیاز), …]"""
+    rows = [(uid, d, _wk_total_pts(d)) for uid, d in (delta or {}).items()]
+    rows = [r for r in rows if r[2] > 0]
+    rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
+                              it[1].get("games", 0)), reverse=True)
+    return rows[:top_n]
+
+
+def weekly_top_candidates(delta: dict, top_n: int = 10):
+    """کاندیداهای لیستِ منتخب — همان ۱۰ نفرِ برترِ لیدربرد (با همان فالبک)."""
+    rows = weekly_top_players(delta, top_n)
+    if rows:
+        return [(uid, d.get("name", "بازیکن")) for uid, d, _t in rows]
+    # هنوز امتیازی ثبت نشده → مثلِ لیدربرد، بر اساسِ برد
+    return [(uid, d.get("name", "بازیکن"))
+            for uid, d in _rank_block(delta, "wins", "games", top_n)]
+
+
 def _medal(i: int) -> str:
     return ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i + 1}."
 
@@ -1408,10 +1490,7 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
     delta = _weekly_delta(current, snapshot)
 
     # ── این هفته — ترکیبی: مجموعِ امتیازِ هفته + میانگینِ هفته ──
-    def _wk_total(d):
-        lg = max(0, d.get("games", 0) - d.get("score_games", 0))
-        lw = max(0, d.get("wins", 0) - d.get("score_wins", 0))
-        return d.get("score_total", 0) + 15.0 * lg + 25.0 * lw
+    _wk_total = _wk_total_pts   # 🔗 همان فرمولی که لیستِ منتخب هم از آن استفاده می‌کند
 
     def _wk_side_total(d, sc_key, sg_key, g_key, w_key, sw_key):
         n = d.get(g_key, 0)
@@ -1428,7 +1507,7 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
                                   it[1].get(g_key, 0)), reverse=True)
         return rows[:top_n]
 
-    w_overall = _hyb_rows(delta, _wk_total, "games", 10)
+    w_overall = weekly_top_players(delta, 10)   # 🔗 مشترک با لیستِ منتخب
     if not w_overall:
         w_overall = [(u, d, None) for u, d in _rank_block(delta, "wins", "games", 10)]
     w_citizens = _hyb_rows(delta, lambda d: _wk_side_total(
@@ -1814,12 +1893,11 @@ async def launch_selected_round(bot, candidates=None) -> int:
     if candidates is None:
         current = load_player_stats() or {}
         meta = load_weekly_meta()
-        snapshot = meta.get("snapshot", {})
+        snapshot = (meta or {}).get("snapshot", {})
         delta = _weekly_delta(current, snapshot)
-        rows = _rank_block(delta, "wins", "games", 10)
-        if not rows:  # برای تست، اگر هفته خالی بود از کل دوران بگیر
-            rows = _rank_block(current, "wins", "games", 10)
-        candidates = [(uid, d.get("name", "بازیکن")) for uid, d in rows]
+        candidates = weekly_top_candidates(delta, 10)   # 🔗 همان رتبه‌بندیِ لیدربرد
+        if not candidates:   # برای تست، اگر هفته خالی بود از کل دوران بگیر
+            candidates = weekly_top_candidates(current, 10)
 
     if not candidates:
         return 0
@@ -2152,8 +2230,8 @@ async def broadcast_weekly_stats(bot, force: bool = False):
     if text:
         try:
             delta = _weekly_delta(current, snapshot)
-            rows = _rank_block(delta, "wins", "games", 10)
-            cands = [(uid, d.get("name", "بازیکن")) for uid, d in rows]
+            # 🔗 دقیقاً همان ۱۰ نفری که در آمار هفتگی نمایش داده شدند
+            cands = weekly_top_candidates(delta, 10)
             if cands:
                 await launch_selected_round(bot, cands)
         except Exception as e:
@@ -2493,6 +2571,12 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and getattr(g, "night_number", 0) == 0
             and not getattr(g, "kp_trust_button_used", False)):
         rows.append([InlineKeyboardButton("🤝 کاپو", callback_data="ctl_kapu")])
+
+    # ⚔️ دکمه‌ی یک‌بارمصرفِ شاهنامه — بعد از معارفه، فقط روز ۱
+    if (_is_shahname_scenario(g) and getattr(g, "maarefe_done", False)
+            and getattr(g, "night_number", 0) == 0
+            and not getattr(g, "sh_button_used", False)):
+        rows.append([InlineKeyboardButton("⚔️ شاهنامه", callback_data="ctl_shahname")])
 
     # 🔒/🔓 یک دکمه‌ی toggle برای چت اتاق مافیا (فقط وقتی اتاق فعال است)
     if getattr(g, "mafia_room_id", None):
@@ -3059,6 +3143,9 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
                 continue
         voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
         if not voter_seat or voter_seat == win_target or voter_seat in (g.striked or set()):
+            return False
+        # ⚔️ شاهنامه: دو طرفِ یک مبارزهٔ تن‌به‌تن هر دو در دفاع‌اند → به هم رأی نمی‌دهند
+        if _is_shahname_scenario(g) and _sh_duel_locked(g, voter_seat, win_target):
             return False
         g.votes_cast.setdefault(win_target, set())
         if uid not in g.votes_cast[win_target]:  # هر نفر برای «هر هدف» فقط یک رأی
@@ -4245,6 +4332,8 @@ def _mafia_role_set(g):
         return (_R_DON, _R_EXECUTIONER, _R_WITCH)
     if _is_gamer_scenario(g):
         return (_R_DONC, _R_TWOFACE, _R_MORIARTY)
+    if _is_shahname_scenario(g):
+        return _sh_dark_role_norms(g)
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
@@ -4318,7 +4407,7 @@ def _kb_add_back(kb, back_cb):
 # ═══════════ 🎛 اکتِ دستیِ گاد — جانشینیِ پیویِ بازیکن ═══════════
 _GOD_ONLY_CB = ("kpd_", "kpg_", "kpe_", "kpc_", "nemd_", "nemc_", "nrep_", "bzd_",
                 "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_", "kpv_",
-                "endq_")
+                "endq_", "shd_")
 
 
 def _kb_dump(kb):
@@ -4539,6 +4628,10 @@ def _night_all_done(g) -> bool:
             return False
         return (getattr(g, "gm_expected", set()) or set()) <= d
 
+    if _is_shahname_scenario(g):
+        return ({"kaveh", "shadow", "mafia", "afrasiab", "simorgh",
+                 "feathers", "rostam", "jamasb", "arash"} <= d)
+
     return False
 
 
@@ -4566,7 +4659,8 @@ async def start_night(ctx, chat_id, g):
     is_tk = _is_takavar_scenario(g)
     is_kp = _is_kapu_scenario(g)
     is_gm = _is_gamer_scenario(g)
-    if not (is_neg or is_bzp or is_nem or is_tk or is_kp or is_gm):
+    is_sh = _is_shahname_scenario(g)
+    if not (is_neg or is_bzp or is_nem or is_tk or is_kp or is_gm or is_sh):
         sc = getattr(g, "scenario", None)
         await ctx.bot.send_message(
             chat_id,
@@ -4684,6 +4778,16 @@ async def start_night(ctx, chat_id, g):
     g.gm_tf_target = None
     g.gm_tf_map = {}
     g.gm_robin_steal_from = None
+    # per-night شاهنامه (چیزهای «کلِ بازی» مثل سپر/کمان/سایه دست‌نخورده می‌مانند)
+    g.sh_decider_seat = None
+    g.sh_boof_holder = None
+    g.sh_sim_holders = []
+    g.sh_sim_sel = []
+    g.sh_sim_need = 1
+    g.sh_feather_own = {}
+    g.sh_feather_wait = set()
+    g.sh_feather_final = {}
+    g.sh_duel_final = []     # ⚔️ مبارزه‌های روزِ ۱ با آمدنِ شب تمام می‌شوند
     g.night_done = set()
     g.night_sel = {}
     g.night_doc_sel = {}
@@ -4734,6 +4838,10 @@ async def start_night(ctx, chat_id, g):
                 await _kp_begin_poison(ctx, chat_id, g)
             else:
                 await _kp_open_don(ctx, chat_id, g)
+        elif is_sh:
+            g.night_stage = "shahname"
+            store.save()
+            await _sh_start(ctx, chat_id, g)
         else:
             g.night_stage = "robin"
             store.save()
@@ -5002,13 +5110,25 @@ def _burn_seat_acts(g, seat, force=False):
         _R_MINER:       ("night_mine_sacrifice",),
     }
     empties = {"night_doc_saved": [], "night_guard_seats": [], "night_baz_targets": [],
-               "night_nato_correct": False, "night_jalad_correct": False}
+               "night_nato_correct": False, "night_jalad_correct": False,
+               "sh_sim_holders": []}
 
     fields = list(per_role.get(rn, ()))
 
+    # 🏹 شاهنامه — نام نقش‌ها ممکن است دوکلمه‌ای باشد («کاوه آهنگر»)، پس تطبیقِ جزئی
+    if _is_shahname_scenario(g):
+        if _R_BOOF in rn:
+            fields += ["sh_boof_holder"]
+        if _R_SIMORGH in rn:
+            fields += ["sh_sim_holders"]
+        if _R_ROSTAM in rn:
+            fields += ["sh_shadow_seat", "sh_shadow_night"]
+        if _R_ARASH in rn:
+            fields += ["sh_bow_holder"]
+
     # 🩸 تصمیم‌گیرندهٔ مافیا (شات/مذاکره/ناتویی/یاکوزایی/خنثی) — هر سناریو کلیدِ خودش را دارد
     decider_keys = ("night_decider_seat", "bzp_decider_seat", "nem_decider_seat",
-                    "tk_decider_seat", "kp_decider_seat")
+                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat")
     if any(getattr(g, k, None) == seat for k in decider_keys):
         fields += ["night_shot_target", "night_is_negotiation", "night_negotiation_target",
                    "night_don_act", "night_don_defuse", "night_yakuza_sacrifice"]
@@ -5065,6 +5185,10 @@ async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
         return   # خورد و در «کشته‌های شب» می‌آید — نیاز به توضیح نیست
     elif st in (zereh_warn or []):
         why = "زره‌پوش بود — بات خودکار خط نمی‌زند؛ اگر شات درست است خودت خط بزن"
+    elif _is_shahname_scenario(g) and _sh_kaveh_blocks(g):
+        why = "خشمِ کاوه — شاتِ امشب کشته نگرفت"
+    elif _is_shahname_scenario(g) and st in _sh_saved_seats(g):
+        why = "پر سیمرغ به او رسیده بود"
     elif _is_saved(g, st):
         why = "پزشک سیوش کرده بود"
     elif _armor_kind(g, st) == "rouin":
@@ -5197,6 +5321,12 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
     """🏁 اگر شرطِ پایان برقرار شد، از گاد در پیوی می‌پرسد «بازی تمام شده؟»
     (خودکار نمی‌بندد — چون هانتر/وارث و امثالش را بات نمی‌داند)."""
     try:
+        # 🔗 شاهنامه: با رفتنِ افراسیابِ بسته‌شده، رستم هم می‌رود (قبل از سنجشِ پایان)
+        if _is_shahname_scenario(g):
+            try:
+                await _sh_check_link(ctx, chat_id, g)
+            except Exception as _e:
+                print("⚠️ sh link err:", _e)
         cond = _win_condition(g)
         if cond and not getattr(g, "endq_token", None):
             side, clean, why = cond
@@ -5384,6 +5514,8 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_kapu(ctx, chat_id, g)
     elif _is_gamer_scenario(g):
         await _resolve_gamer(ctx, chat_id, g)
+    elif _is_shahname_scenario(g):
+        await _resolve_shahname(ctx, chat_id, g)
 
 
 async def _resolve_gamer(ctx, chat_id, g):
@@ -5712,6 +5844,11 @@ async def _do_room_open(ctx, chat_id, g):
                            _nem_reps_kb(g, list(g.nem_reps_tmp or [])))
         elif getattr(g, "nem_awaiting_ding", False):
             await _nem_ding_prompt_don(ctx, g)   # یادآوری به دن اگر هنوز انتخاب نکرده
+
+    # 🏛 شاهنامه: با «باز»، نظرِ انجمن دربارهٔ مبارزه‌ها پرسیده می‌شود
+    if (_is_shahname_scenario(g) and (getattr(g, "sh_duels", []) or [])
+            and not getattr(g, "sh_council_done", False)):
+        await _sh_council_ask(ctx, chat_id, g)
 
     if opened:
         try:
@@ -6052,6 +6189,23 @@ async def _burn_advance(ctx, chat_id, g):
                     and not getattr(g, "antidote_done", False)
                     and not _kp_antidote_pending(g)):
                 await _kp_after_vote(ctx, chat_id, g)
+        elif _is_shahname_scenario(g):
+            for _key, _mark in ((_R_KAVEH, "kaveh"), (_R_AFRASIAB, "afrasiab"),
+                                (_R_SIMORGH, "simorgh"), (_R_ROSTAM, "rostam"),
+                                (_R_JAMASB, "jamasb"), (_R_ARASH, "arash")):
+                if _sh_seat(g, _key) in burned:
+                    g.night_done.add(_mark)
+            if getattr(g, "sh_decider_seat", None) in burned:
+                g.night_done.add("mafia")
+            _w = set(getattr(g, "sh_feather_wait", set()) or set()) - burned
+            g.sh_feather_wait = _w
+            if not _w and "sh_feath_opened" in (g.night_done or set()):
+                g.night_done.add("feathers")
+            store.save()
+            await _sh_check_open_mafia(ctx, chat_id, g)
+            await _sh_check_open_mid(ctx, chat_id, g)
+            await _sh_check_open_feathers(ctx, chat_id, g)
+            await _sh_check_open_late(ctx, chat_id, g)
     except Exception as e:
         print("⚠️ burn advance err:", e)
 
@@ -6179,6 +6333,11 @@ async def _gact_try_open_stage(ctx, g, seat):
         await _nem_check_open_rest(ctx, chat_id, g)
     elif _is_kapu_scenario(g):
         await _kp_check_open_witch(ctx, chat_id, g)
+    elif _is_shahname_scenario(g):
+        await _sh_check_open_mafia(ctx, chat_id, g)
+        await _sh_check_open_mid(ctx, chat_id, g)
+        await _sh_check_open_feathers(ctx, chat_id, g)
+        await _sh_check_open_late(ctx, chat_id, g)
 
 
 async def handle_god_act_callback(update, ctx):
@@ -6776,6 +6935,11 @@ async def _do_room_close(ctx, chat_id, g):
             reply_markup=kb)
         g.kp_gun_msg_id = m.message_id
         store.save()
+
+    # 🏛 شاهنامه: با «بسته»، نتیجهٔ نظرِ انجمن اعلام و رأیِ نهایی ساخته می‌شود
+    if (_is_shahname_scenario(g) and (getattr(g, "sh_duels", []) or [])
+            and not getattr(g, "sh_council_done", False)):
+        await _sh_council_resolve(ctx, chat_id, g)
 
 
 async def handle_night_callback(update, ctx):
@@ -11320,6 +11484,8 @@ def _mafia_decider_key(g):
         return "kp_decider_seat"
     if _is_gamer_scenario(g):
         return None
+    if _is_shahname_scenario(g):
+        return "sh_decider_seat"
     return "night_decider_seat"
 
 
@@ -11353,6 +11519,13 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
                 rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="nem_don_nato")])
             kb = InlineKeyboardMarkup(rows)
             text = f"{head}\nاکت مافیا را انتخاب کن:"
+        elif _is_shahname_scenario(g):
+            rows = [[InlineKeyboardButton("🔫 شات", callback_data="sh_act_shot")]]
+            _bf = _sh_seat(g, _R_BOOF)
+            if _bf is not None and _bf != ks and not getattr(g, "sh_boof_used", False):
+                rows.append([InlineKeyboardButton("🪶 پر بوف", callback_data="sh_act_boof")])
+            kb = InlineKeyboardMarkup(rows)
+            text = f"{head}\nاکت تیم اهریمن را انتخاب کن:"
         else:
             prefix, confirm = {
                 "bzp_decider_seat": ("bzp_shot_", "bzp_shot_confirm"),
@@ -11369,6 +11542,1230 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
             await _night_report(ctx, g, f"🔫 اکتِ مافیا از {ks} به {nxt} منتقل شد (کیک شب).")
     except Exception as e:
         print("⚠️ pass shot err:", e)
+
+
+# ═════════════════════════════════════════════════════════════
+#  موتور شبِ خودکار — سناریو «شاهنامه»
+#  شب ۱ : کاوه → تیمِ اهریمن → افراسیاب → سیمرغ → صاحبانِ پر →
+#          رستم → جاماسب → آرش
+#  شب ۲ : حدسِ افراسیاب → تصمیمِ رستم (سایه) → اهریمن → سیمرغ →
+#          صاحبانِ پر → جاماسب
+#  شب ۳+: اهریمن → سیمرغ → صاحبانِ پر → جاماسب
+# ═════════════════════════════════════════════════════════════
+SHAHNAME_KEY = "شاهنامه"
+_R_ZAHHAK   = _nz("ضحاک")
+_R_BOOF     = _nz("بوف")
+_R_AFRASIAB = _nz("افراسیاب")
+_R_SIMORGH  = _nz("سیمرغ")
+_R_JAMASB   = _nz("جاماسب")
+_R_ROSTAM   = _nz("رستم")
+_R_KAVEH    = _nz("کاوه")      # «کاوه آهنگر»
+_R_ARASH    = _nz("آرش")       # «آرش کمانگیر»
+_SH_DARK    = (_R_ZAHHAK, _R_BOOF, _R_AFRASIAB)
+
+
+def _is_shahname_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(SHAHNAME_KEY) in _nz(g.scenario.name))
+
+
+def _sh_dark_role_norms(g):
+    """نامِ نقش‌های تیمِ اهریمن، همان‌طور که در خودِ سناریو نوشته شده‌اند."""
+    out = set()
+    for rname in ((g.scenario.roles.keys() if getattr(g, "scenario", None) else []) or []):
+        n = _nz(rname)
+        if any(k in n for k in _SH_DARK):
+            out.add(n)
+    return tuple(out) if out else _SH_DARK
+
+
+def _sh_seat(g, key, alive_only=True):
+    """صندلیِ یک نقشِ شاهنامه (با تطبیقِ جزئی: «کاوه آهنگر»، «آرش کمانگیر»)."""
+    s = _find_seat_by_role(g, key, alive_only=alive_only)
+    if s is not None:
+        return s
+    return _find_seat_role_sub(g, key, alive_only=alive_only)
+
+
+def _sh_shadow_positive(g, seat) -> bool:
+    """🌑 استعلامِ سایه: سیمرغ، بوف، افراسیاب مثبت‌اند."""
+    rn = _seat_role_norm(g, seat)
+    return any(k in rn for k in (_R_SIMORGH, _R_BOOF, _R_AFRASIAB))
+
+
+def _sh_blood_positive(g, seat) -> bool:
+    """🩸 استعلامِ خون: رستم و ضحاک مثبت‌اند."""
+    rn = _seat_role_norm(g, seat)
+    return any(k in rn for k in (_R_ROSTAM, _R_ZAHHAK))
+
+
+def _sh_saved_seats(g):
+    """🪶 کسانی که پر سیمرغ روی‌شان نشسته (مصون در برابرِ شات و پر سمی)."""
+    fin = getattr(g, "sh_feather_final", {}) or {}
+    return {s for s, ks in fin.items() if "simorgh" in (ks or [])}
+
+
+def _sh_boof_victim(g):
+    """🪶 دارندهٔ نهاییِ پر سمی می‌میرد — فقط عضوِ اهریمن مصون است.
+
+    ⚠️ ارجحیتِ پر سیمرغ فقط در «لحظهٔ توزیع» است: اگر بوف و سیمرغ هر دو به یک نفر
+    پر داده باشند، پر بوف همان‌جا می‌سوزد (در _sh_check_open_feathers). پر سیمرغی
+    که با پاس‌دادن به کسی می‌رسد جلوی پر سمی را نمی‌گیرد."""
+    fin = getattr(g, "sh_feather_final", {}) or {}
+    for s, ks in fin.items():
+        if "boof" not in (ks or []):
+            continue
+        if s not in g.seats or s in (g.striked or set()):
+            return None
+        if s in _mafia_seats(g):
+            return None
+        return s
+    return None
+
+
+def _sh_sync_kaveh(g):
+    """🔨 لحظهٔ خروجِ کاوه را ثبت می‌کند تا شبِ بعدش شاتِ اهریمن کشته نگیرد."""
+    kv = _sh_seat(g, _R_KAVEH, alive_only=False)
+    if kv is None:
+        return
+    if kv in (g.striked or set()) and not getattr(g, "sh_kaveh_out", False):
+        g.sh_kaveh_out = True
+        g.sh_kaveh_block_night = g.night_number
+        store.save()
+
+
+def _sh_kaveh_blocks(g) -> bool:
+    if getattr(g, "sh_kaveh_block_night", None) != g.night_number:
+        return False
+    return _sh_seat(g, _R_ZAHHAK) is not None    # فقط اگر ضحاک زنده باشد
+
+
+def _sh_duel_locked(g, voter_seat, target_seat) -> bool:
+    """⚔️ دو نفرِ یک مبارزهٔ تأییدشده هر دو در دفاع‌اند → حقِ رأی به یکدیگر ندارند."""
+    for pair in (getattr(g, "sh_duel_final", []) or []):
+        if voter_seat != target_seat and voter_seat in pair and target_seat in pair:
+            return True
+    return False
+
+
+# ─────────────────── 🌙 مراحلِ شب ───────────────────
+async def _sh_start(ctx, chat_id, g):
+    _sh_sync_kaveh(g)
+    if g.night_number == 1:
+        g.night_done.add("shadow")      # شبِ اول سایه‌ای برای تعیین‌تکلیف نیست
+        store.save()
+        await _sh_open_kaveh(ctx, chat_id, g)
+        return
+    g.night_done.add("kaveh")           # سپرِ کاوه فقط شبِ اول داده می‌شود
+    store.save()
+    await _sh_open_shadow_phase(ctx, chat_id, g)
+
+
+async def _sh_open_kaveh(ctx, chat_id, g):
+    kv = _sh_seat(g, _R_KAVEH)
+    if kv is None or getattr(g, "sh_kaveh_used", False):
+        g.night_done.add("kaveh")
+        store.save()
+        await _sh_check_open_mafia(ctx, chat_id, g)
+        return
+    kuid = g.seats[kv][0]
+    m = await _safe_pm(ctx, kuid, "🛡 سپرت را به چه کسی می‌دهی؟",
+                       _kb_night_seats(_sh_sel_targets(g, "sh_kv_", kv), g, "sh_kv_",
+                                       selected=g.night_sel.get(kuid), confirm_cb="sh_kv_confirm"))
+    if m:
+        g.night_pm_msgs[kuid] = m.message_id
+    store.save()
+
+
+async def _sh_open_shadow_phase(ctx, chat_id, g):
+    """🌑 شب‌های ۲+: اول حدسِ افراسیاب، بعد تصمیمِ رستم دربارهٔ سایه.
+
+    اگر هدفِ سایه همان شب کشته شده باشد، سایه به رستم برنمی‌گردد؛ افراسیاب همچنان
+    حدسش را می‌زند، ولی رستم رأیی ندارد چون شخصی نمانده."""
+    tgt = getattr(g, "sh_shadow_seat", None)
+    pending = (tgt is not None and tgt in g.seats
+               and not getattr(g, "sh_shadow_resolved", False)
+               and (getattr(g, "sh_shadow_night", None) or 0) < g.night_number)
+    if not pending:
+        g.night_done.add("shadow")
+        store.save()
+        await _sh_check_open_mafia(ctx, chat_id, g)
+        return
+    afr = _sh_seat(g, _R_AFRASIAB)
+    if afr is not None and not getattr(g, "sh_afr_guessed", False):
+        auid = g.seats[afr][0]
+        m = await _safe_pm(ctx, auid, "🕯 به‌نظرت رستم کیست؟",
+                           _kb_night_seats(_sh_sel_targets(g, "sh_afg_", afr), g, "sh_afg_",
+                                           selected=g.night_sel.get(auid),
+                                           confirm_cb="sh_afg_confirm"))
+        if m:
+            g.night_pm_msgs[auid] = m.message_id
+            store.save()
+            return
+    await _sh_ask_rostam(ctx, chat_id, g)
+
+
+async def _sh_ask_rostam(ctx, chat_id, g):
+    tgt = getattr(g, "sh_shadow_seat", None)
+    # 🌑 هدفِ سایه دیگر در بازی نیست → رستم تصمیمی ندارد (سایه هم برنمی‌گردد)
+    if tgt is None or tgt not in g.seats or tgt in (g.striked or set()):
+        g.sh_shadow_resolved = True
+        g.night_done.add("shadow")
+        store.save()
+        await _night_report(ctx, g, "🌑 هدفِ سایه در بازی نیست — رستم رأیی ندارد.")
+        await _sh_check_open_mafia(ctx, chat_id, g)
+        return
+    ros = _sh_seat(g, _R_ROSTAM)
+    if ros is not None:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ بله، بماند", callback_data="sh_shd_keep"),
+            InlineKeyboardButton("🚫 خیر", callback_data="sh_shd_kill"),
+        ]])
+        m = await _safe_pm(ctx, g.seats[ros][0],
+                           f"🌑 سایه‌ات روی {tgt}. {g.seats[tgt][1]} است.\n"
+                           f"می‌خواهی زنده بماند؟", kb)
+        if m:
+            g.night_pm_msgs[g.seats[ros][0]] = m.message_id
+            store.save()
+            return
+    # ⏳ رستم در بازی نیست (یا پیویش بسته است) → مکث تا کسی از سرعتِ کار چیزی نفهمد
+    asyncio.create_task(_sh_shadow_no_rostam(ctx, chat_id, g))
+
+
+async def _sh_shadow_no_rostam(ctx, chat_id, g, delay=30):
+    try:
+        await asyncio.sleep(delay)
+        if g.phase in ("idle", "ended") or getattr(g, "sh_shadow_resolved", False):
+            return
+        await _sh_apply_shadow(ctx, chat_id, g, keep=True, note="رستم اکتی نداد")
+    except Exception as e:
+        print("⚠️ sh shadow wait err:", e)
+
+
+async def _sh_apply_shadow(ctx, chat_id, g, keep: bool, note=""):
+    if getattr(g, "sh_shadow_resolved", False):
+        return
+    g.sh_shadow_resolved = True
+    store.save()
+    tgt = getattr(g, "sh_shadow_seat", None)
+    killed = False
+    if tgt in g.seats and tgt not in (g.striked or set()):
+        rn = _seat_role_norm(g, tgt)
+        immune = (_R_ZAHHAK in rn) or getattr(g, "sh_afr_correct", False)
+        if (not keep) and not immune:
+            g.striked.add(tgt)
+            killed = True
+        store.save()
+        nm = escape(g.seats[tgt][1], quote=False)
+        txt = (f"🌑 <b>نتیجهٔ سایه</b>: {tgt}. {nm} از بازی خارج شد."
+               if killed else f"🌑 <b>نتیجهٔ سایه</b>: {tgt}. {nm} کشته نشد.")
+        for s in sorted(g.seats):
+            try:
+                await ctx.bot.send_message(g.seats[s][0], txt, parse_mode="HTML")
+            except Exception:
+                pass
+        why = []
+        if note:
+            why.append(note)
+        if (not keep) and not killed:
+            why.append("مصون بود" if _R_ZAHHAK in rn else "حدسِ افراسیاب درست بود")
+        await _night_report(
+            ctx, g, f"🌑 سایهٔ رستم روی {tgt}. {nm} — " +
+            ("خارج شد" if killed else "ماند") + (f" ({'، '.join(why)})" if why else ""))
+        if killed:
+            try:
+                await publish_seating(ctx, chat_id, g, mode=CTRL)
+            except Exception:
+                pass
+    g.night_done.add("shadow")
+    store.save()
+    if killed:
+        await _check_auto_end(ctx, chat_id, g)
+    await _sh_check_open_mafia(ctx, chat_id, g)
+
+
+async def _sh_check_open_mafia(ctx, chat_id, g):
+    if "sh_mafia_opened" in (g.night_done or set()):
+        return
+    if not ({"kaveh", "shadow"} <= (g.night_done or set())):
+        return
+    g.night_done.add("sh_mafia_opened")
+    store.save()
+    zah  = _sh_seat(g, _R_ZAHHAK)
+    boof = _sh_seat(g, _R_BOOF)
+    afr  = _sh_seat(g, _R_AFRASIAB)
+    decider = zah or boof or afr           # ترتیبِ شات: ضحاک → بوف → افراسیاب
+    if not decider:
+        for _s in sorted(_mafia_seats(g, alive_only=True)):
+            decider = _s
+            break
+    if not decider:
+        g.night_done.add("mafia")
+        store.save()
+        await _sh_check_open_mid(ctx, chat_id, g)
+        return
+    g.sh_decider_seat = decider
+    duid = g.seats[decider][0]
+    m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nاکت تیم اهریمن را انتخاب کن:",
+                       _sh_dark_kb(g))
+    if m:
+        g.night_pm_msgs[duid] = m.message_id
+    store.save()
+
+
+def _sh_dark_kb(g):
+    rows = [[InlineKeyboardButton("🔫 شات", callback_data="sh_act_shot")]]
+    boof = _sh_seat(g, _R_BOOF)
+    if boof is not None and not getattr(g, "sh_boof_used", False):
+        rows.append([InlineKeyboardButton("🪶 پر بوف", callback_data="sh_act_boof")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _sh_check_open_mid(ctx, chat_id, g):
+    """🛡 سپرِ افراسیاب (شبِ اول) + 🪶 سیمرغ — بعد از ثبتِ اکتِ اهریمن."""
+    if "sh_mid_opened" in (g.night_done or set()):
+        return
+    if "mafia" not in (g.night_done or set()):
+        return
+    g.night_done.add("sh_mid_opened")
+    store.save()
+    afr = _sh_seat(g, _R_AFRASIAB)
+    if g.night_number == 1 and afr is not None and not getattr(g, "sh_afr_used", False):
+        auid = g.seats[afr][0]
+        m = await _safe_pm(ctx, auid, "🛡 سپرت را به چه کسی می‌دهی؟",
+                           _kb_night_seats(_sh_sel_targets(g, "sh_afs_", afr), g, "sh_afs_",
+                                           selected=g.night_sel.get(auid),
+                                           confirm_cb="sh_afs_confirm"))
+        if m:
+            g.night_pm_msgs[auid] = m.message_id
+    else:
+        g.night_done.add("afrasiab")
+    store.save()
+    await _sh_open_simorgh(ctx, chat_id, g)
+
+
+async def _sh_open_simorgh(ctx, chat_id, g):
+    sim = _sh_seat(g, _R_SIMORGH)
+    left = int(getattr(g, "sh_simorgh_left", 0) or 0)
+    if sim is None or left <= 0:
+        g.night_done.add("simorgh")
+        store.save()
+        await _sh_check_open_feathers(ctx, chat_id, g)
+        return
+    rows = [[InlineKeyboardButton("۱ پر", callback_data="sh_sim_1")]]
+    if left >= 2:
+        rows.append([InlineKeyboardButton("۲ پر", callback_data="sh_sim_2")])
+    suid = g.seats[sim][0]
+    m = await _safe_pm(ctx, suid, f"🪶 امشب چند پر استفاده می‌کنی؟ (باقی‌مانده: {left})",
+                       InlineKeyboardMarkup(rows))
+    if m:
+        g.night_pm_msgs[suid] = m.message_id
+    store.save()
+
+
+def _sh_sim_targets(g, sim):
+    """🪶 سیمرغ فقط یک‌بار در کلِ بازی می‌تواند به خودش پر بدهد."""
+    out = []
+    for s in _alive_seats(g):
+        if s == sim and getattr(g, "sh_simorgh_self_used", False):
+            continue
+        out.append(s)
+    return out
+
+
+def _sh_sim_text(n):
+    return "🪶 یک نفر را انتخاب کن و تأیید بزن." if n == 1 else "🪶 دو نفر را انتخاب کن و تأیید بزن."
+
+
+async def _sh_check_open_feathers(ctx, chat_id, g):
+    """🪶 پرسش از صاحبانِ پر — پیامِ هر دو نوعِ پر دقیقاً یکسان است."""
+    if "sh_feath_opened" in (g.night_done or set()):
+        return
+    if not ({"mafia", "simorgh"} <= (g.night_done or set())):
+        return
+    g.night_done.add("sh_feath_opened")
+    owners = {}
+    bh = getattr(g, "sh_boof_holder", None)
+    if bh and bh in g.seats and bh not in (g.striked or set()):
+        owners.setdefault(bh, []).append("boof")
+    for s in (getattr(g, "sh_sim_holders", []) or []):
+        if s in g.seats and s not in (g.striked or set()):
+            owners.setdefault(s, []).append("simorgh")
+    # 🪶 فقط همین‌جا (لحظهٔ توزیع) پر سیمرغ بر پر بوف ارجحیت دارد:
+    #    اگر هر دو به یک نفر رسیده باشد، پر بوف می‌سوزد و او فقط پر سیمرغ دارد.
+    for s, ks in owners.items():
+        if "boof" in ks and "simorgh" in ks:
+            ks.remove("boof")
+            await _night_report(
+                ctx, g,
+                f"🪶 هر دو پر به {s}. {escape(g.seats[s][1], quote=False)} رسید — "
+                f"پر سیمرغ ماند و پر بوف سوخت.")
+    g.sh_feather_own = {s: list(k) for s, k in owners.items()}
+    g.sh_feather_wait = set(owners.keys())
+    store.save()
+    if not owners:
+        g.night_done.add("feathers")
+        store.save()
+        await _sh_check_open_late(ctx, chat_id, g)
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🙋 خودم", callback_data="sh_fe_self"),
+        InlineKeyboardButton("👤 شخص دیگر", callback_data="sh_fe_other"),
+    ]])
+    for s in sorted(owners):
+        uid = g.seats[s][0]
+        m = await _safe_pm(ctx, uid,
+                           "🪶 شما پر دارید.\nبرای خودت استفاده می‌کنی یا به شخص دیگری می‌دهی؟", kb)
+        if m:
+            g.night_pm_msgs[uid] = m.message_id
+    store.save()
+
+
+async def _sh_feather_resolve(ctx, chat_id, g, holder, target):
+    kinds = list((getattr(g, "sh_feather_own", {}) or {}).get(holder, []))
+    fin = dict(getattr(g, "sh_feather_final", {}) or {})
+    fin[target] = sorted(set(fin.get(target, [])) | set(kinds))
+    g.sh_feather_final = fin
+    w = set(getattr(g, "sh_feather_wait", set()) or set())
+    w.discard(holder)
+    g.sh_feather_wait = w
+    store.save()
+    lbl = "خودش" if holder == target else f"{target}. {g.seats[target][1]}"
+    await _night_report(
+        ctx, g,
+        f"🪶 پرِ {holder}. {escape(g.seats[holder][1], quote=False)} → "
+        f"{escape(lbl, quote=False)} "
+        f"({'/'.join('سیمرغ' if k == 'simorgh' else 'بوف' for k in kinds)})")
+    if not w:
+        g.night_done.add("feathers")
+        store.save()
+        await _sh_check_open_late(ctx, chat_id, g)
+
+
+async def _sh_check_open_late(ctx, chat_id, g):
+    """🌑 رستم + 🔎 جاماسب + 🏹 آرش (آرش فقط شبِ اول)."""
+    if "sh_late_opened" in (g.night_done or set()):
+        return
+    if "feathers" not in (g.night_done or set()):
+        return
+    g.night_done.add("sh_late_opened")
+    store.save()
+
+    ros = _sh_seat(g, _R_ROSTAM)
+    if ros is not None and not getattr(g, "sh_shadow_used", False):
+        ruid = g.seats[ros][0]
+        kb = _kb_night_seats(_sh_sel_targets(g, "sh_ros_", ros), g, "sh_ros_",
+                             selected=g.night_sel.get(ruid), confirm_cb="sh_ros_confirm")
+        rows = list(kb.inline_keyboard) + [
+            [InlineKeyboardButton("⏭ امشب سایه نمی‌گذارم", callback_data="sh_ros_skip")]]
+        m = await _safe_pm(ctx, ruid, "🌑 روی چه کسی سایه می‌گذاری؟", InlineKeyboardMarkup(rows))
+        if m:
+            g.night_pm_msgs[ruid] = m.message_id
+    else:
+        g.night_done.add("rostam")
+
+    jam = _sh_seat(g, _R_JAMASB)
+    if jam is not None:
+        juid = g.seats[jam][0]
+        if not getattr(g, "sh_blood_used", False):
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🌑 استعلام سایه", callback_data="sh_jam_shadow"),
+                InlineKeyboardButton("🩸 استعلام خون", callback_data="sh_jam_blood"),
+            ]])
+            m = await _safe_pm(ctx, juid, "🔎 کدام استعلام را می‌گیری؟", kb)
+        else:
+            m = await _safe_pm(ctx, juid, "🌑 استعلام سایهٔ چه کسی را می‌گیری؟",
+                               _kb_night_seats(_sh_sel_targets(g, "sh_jsh_", jam), g, "sh_jsh_"))
+        if m:
+            g.night_pm_msgs[juid] = m.message_id
+    else:
+        g.night_done.add("jamasb")
+
+    ar = _sh_seat(g, _R_ARASH)
+    if g.night_number == 1 and ar is not None and not getattr(g, "sh_arash_used", False):
+        auid = g.seats[ar][0]
+        m = await _safe_pm(ctx, auid, "🏹 تیر و کمانت را به چه کسی می‌دهی؟",
+                           _kb_night_seats(_sh_sel_targets(g, "sh_ar_", ar), g, "sh_ar_",
+                                           selected=g.night_sel.get(auid),
+                                           confirm_cb="sh_ar_confirm"))
+        if m:
+            g.night_pm_msgs[auid] = m.message_id
+    else:
+        g.night_done.add("arash")
+    store.save()
+    await _maybe_notify_god_done(ctx, g)
+
+
+# ─────────────────── 🎯 لیستِ هدف‌ها ───────────────────
+_SH_SEL = {
+    "sh_kv_":  ("🛡 سپرت را به چه کسی می‌دهی؟",        "sh_kv_confirm",  None),
+    "sh_afs_": ("🛡 سپرت را به چه کسی می‌دهی؟",        "sh_afs_confirm", None),
+    "sh_afg_": ("🕯 به‌نظرت رستم کیست؟",               "sh_afg_confirm", None),
+    "sh_bf_":  ("🪶 پر سمی را به چه کسی می‌دهی؟",      "sh_bf_confirm",  None),
+    "sh_st_":  ("🔫 هدف شلیک را انتخاب کن:",           "sh_st_confirm",  "sh_act_back"),
+    "sh_ros_": ("🌑 روی چه کسی سایه می‌گذاری؟",        "sh_ros_confirm", None),
+    "sh_ar_":  ("🏹 تیر و کمانت را به چه کسی می‌دهی؟", "sh_ar_confirm",  None),
+    "sh_fo_":  ("🪶 پر را به چه کسی می‌دهی؟",          "sh_fo_confirm",  None),
+}
+
+
+def _sh_sel_targets(g, prefix, me):
+    if prefix == "sh_bf_":
+        # 🪶 بوف پرِ سمی را به یک روشنایی می‌دهد
+        out = [s for s in _alive_seats(g) if s != me and s not in _mafia_seats(g)]
+        return out or [s for s in _alive_seats(g) if s != me]
+    if prefix in ("sh_st_", "sh_ar_"):
+        return list(_alive_seats(g))
+    return [s for s in _alive_seats(g) if s != me]
+
+
+async def handle_shahname_callback(update, ctx):
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
+    g, chat_id = _find_active_night_game(uid, q)
+    if g is None:
+        g, chat_id = _sh_find_game(uid)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+    me = _seat_of_uid(g, uid)
+
+    # ── 🏛 انجمن (روز — بیرون از اکت‌گیری) ──
+    if data == "sh_cd_ok":
+        sel = sorted(set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or []))
+        cv = dict(getattr(g, "sh_council_votes", {}) or {})
+        cv[uid] = sel
+        g.sh_council_votes = cv
+        store.save()
+        await _close_pm(ctx, uid, mid, "✅ نظرت ثبت شد.")
+        rn = (g.assigned_roles or {}).get(me, "—")
+        parts = [("موافقِ " if i in sel else "مخالفِ ") + _sh_duel_label(g, d)
+                 for i, d in enumerate(getattr(g, "sh_duels", []) or [])]
+        await _night_report(
+            ctx, g,
+            f"🏛 {escape(str(rn), quote=False)} ({me}. {escape(g.seats[me][1], quote=False)}): "
+            + "، ".join(parts))
+        return
+
+    if data.startswith("sh_cd_"):
+        try:
+            i = int(data.rsplit("_", 1)[1])
+        except Exception:
+            return
+        sel = set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or [])
+        sel.discard(i) if i in sel else sel.add(i)
+        d = dict(getattr(g, "sh_council_sel", {}) or {})
+        d[uid] = sorted(sel)
+        g.sh_council_sel = d
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🏛 موافقِ برگزاری کدام مبارزه‌ها هستی؟",
+                       _sh_council_kb(g, sel))
+        return
+
+    # ── 🌑 تصمیمِ رستم دربارهٔ سایه ──
+    if data in ("sh_shd_keep", "sh_shd_kill"):
+        await _close_pm(ctx, uid, mid, "✅ تصمیمت ثبت شد.")
+        await _sh_apply_shadow(ctx, chat_id, g, keep=(data == "sh_shd_keep"))
+        return
+
+    # ── 🩸 اکتِ تیمِ اهریمن ──
+    if data == "sh_act_back":
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _edit_pm(ctx, uid, mid,
+                       f"🌙 شب {g.night_number}\nاکت تیم اهریمن را انتخاب کن:", _sh_dark_kb(g))
+        return
+
+    if data == "sh_act_shot":
+        await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
+                       _kb_add_back(_kb_night_seats(_sh_sel_targets(g, "sh_st_", me), g, "sh_st_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="sh_st_confirm"), "sh_act_back"))
+        return
+
+    if data == "sh_act_boof":
+        boof = _sh_seat(g, _R_BOOF)
+        if boof is None or getattr(g, "sh_boof_used", False):
+            await safe_q_answer(q, "پر سمی در دسترس نیست.", show_alert=True)
+            return
+        g.sh_boof_used = True
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, "🪶 پر سمی انتخاب شد.")
+        buid = g.seats[boof][0]
+        m = await _safe_pm(ctx, buid, "🪶 پر سمی را به چه کسی می‌دهی؟",
+                           _kb_night_seats(_sh_sel_targets(g, "sh_bf_", boof), g, "sh_bf_",
+                                           selected=g.night_sel.get(buid),
+                                           confirm_cb="sh_bf_confirm"))
+        if m:
+            g.night_pm_msgs[buid] = m.message_id
+        store.save()
+        return
+
+    if data == "sh_st_confirm":
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_shot_target = t
+        g.night_done.add("mafia")
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔫 شلیک به {t}. {g.seats[t][1]} ثبت شد.")
+        await _night_report(ctx, g,
+                            f"🔫 شلیکِ تیم اهریمن → {t}. {escape(g.seats[t][1], quote=False)}")
+        await _sh_check_open_mid(ctx, chat_id, g)
+        return
+
+    if data == "sh_bf_confirm":
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.sh_boof_holder = t
+        g.night_done.add("mafia")
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, "🪶 پر سمی داده شد.")
+        await _night_report(ctx, g,
+                            f"🪶 پر سمیِ بوف → {t}. {escape(g.seats[t][1], quote=False)}")
+        await _sh_check_open_mid(ctx, chat_id, g)
+        return
+
+    # ── 🛡 سپرها ──
+    if data in ("sh_kv_confirm", "sh_afs_confirm"):
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.sh_shields = set(getattr(g, "sh_shields", set()) or set()) | {t}
+        if data == "sh_kv_confirm":
+            g.sh_kaveh_used = True
+            g.night_done.add("kaveh")
+            who = "کاوه"
+        else:
+            g.sh_afr_used = True
+            g.night_done.add("afrasiab")
+            who = "افراسیاب"
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🛡 سپر به {t}. {g.seats[t][1]} داده شد.")
+        await _night_report(ctx, g,
+                            f"🛡 {who} → سپر به {t}. {escape(g.seats[t][1], quote=False)}")
+        try:
+            await ctx.bot.send_message(g.seats[t][0], "🛡 شما سپر دارید.")
+        except Exception:
+            pass
+        if data == "sh_kv_confirm":
+            await _sh_check_open_mafia(ctx, chat_id, g)
+        else:
+            await _maybe_notify_god_done(ctx, g)
+        return
+
+    # ── 🕯 حدسِ افراسیاب (بدون هیچ بازخوردی به خودش) ──
+    if data == "sh_afg_confirm":
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        ros = _sh_seat(g, _R_ROSTAM, alive_only=False)
+        g.sh_afr_guess = t
+        g.sh_afr_guessed = True
+        g.sh_afr_correct = (ros is not None and ros == t)
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, "✅ انتخابت ثبت شد.")
+        await _night_report(
+            ctx, g, f"🕯 حدسِ افراسیاب: {t}. {escape(g.seats[t][1], quote=False)} — "
+                    f"{'✅ درست (پیوند بسته شد)' if g.sh_afr_correct else '❌ غلط'}")
+        await _sh_ask_rostam(ctx, chat_id, g)
+        return
+
+    # ── 🪶 سیمرغ ──
+    if data in ("sh_sim_1", "sh_sim_2"):
+        n = 1 if data == "sh_sim_1" else 2
+        g.sh_sim_need = n
+        g.sh_sim_sel = []
+        store.save()
+        await _edit_pm(ctx, uid, mid, _sh_sim_text(n),
+                       _kb_night_seats(_sh_sim_targets(g, me), g, "sh_sm_",
+                                       selected=set(), confirm_cb="sh_sm_confirm"))
+        return
+
+    if data == "sh_sm_confirm":
+        need = int(getattr(g, "sh_sim_need", 1) or 1)
+        sel = list(getattr(g, "sh_sim_sel", []) or [])
+        if len(sel) != need:
+            await safe_q_answer(q, f"باید دقیقاً {need} نفر انتخاب کنی.", show_alert=True)
+            return
+        g.sh_sim_holders = list(sel)
+        if me in sel:
+            g.sh_simorgh_self_used = True
+        g.sh_simorgh_left = max(0, int(getattr(g, "sh_simorgh_left", 0) or 0) - len(sel))
+        g.sh_sim_sel = []
+        g.night_done.add("simorgh")
+        store.save()
+        names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sel)
+        await _close_pm(ctx, uid, mid,
+                        f"🪶 پر به {names} داده شد.\nپرهای باقی‌مانده: {g.sh_simorgh_left}")
+        await _night_report(ctx, g, f"🪶 سیمرغ → {escape(names, quote=False)} "
+                                    f"(باقی‌مانده: {g.sh_simorgh_left})")
+        await _sh_check_open_feathers(ctx, chat_id, g)
+        return
+
+    if data.startswith("sh_sm_"):
+        try:
+            s = int(data.rsplit("_", 1)[1])
+        except Exception:
+            return
+        need = int(getattr(g, "sh_sim_need", 1) or 1)
+        sel = list(getattr(g, "sh_sim_sel", []) or [])
+        if s in sel:
+            sel.remove(s)
+        else:
+            sel.append(s)
+        sel = sel[-need:]
+        g.sh_sim_sel = sel
+        store.save()
+        await _edit_pm(ctx, uid, mid, _sh_sim_text(need),
+                       _kb_night_seats(_sh_sim_targets(g, me), g, "sh_sm_",
+                                       selected=set(sel), confirm_cb="sh_sm_confirm"))
+        return
+
+    # ── 🪶 صاحبانِ پر ──
+    if data == "sh_fe_self":
+        if me is None:
+            await safe_q_answer(q, "این دکمه مالِ خودِ بازیکن است.", show_alert=True)
+            return
+        await _close_pm(ctx, uid, mid, "🪶 پر برای خودت استفاده شد.")
+        await _sh_feather_resolve(ctx, chat_id, g, me, me)
+        return
+
+    if data == "sh_fe_other":
+        await _edit_pm(ctx, uid, mid, "🪶 پر را به چه کسی می‌دهی؟",
+                       _kb_night_seats(_sh_sel_targets(g, "sh_fo_", me), g, "sh_fo_",
+                                       selected=g.night_sel.get(uid), confirm_cb="sh_fo_confirm"))
+        return
+
+    if data == "sh_fo_confirm":
+        t = g.night_sel.get(uid)
+        if not t or me is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🪶 پر به {t}. {g.seats[t][1]} داده شد.")
+        await _sh_feather_resolve(ctx, chat_id, g, me, t)
+        return
+
+    # ── 🌑 سایهٔ رستم ──
+    if data == "sh_ros_skip":
+        g.night_done.add("rostam")
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, "⏭ امشب سایه‌ای نگذاشتی.")
+        await _night_report(ctx, g, "🌑 رستم امشب سایه نگذاشت.")
+        await _maybe_notify_god_done(ctx, g)
+        return
+
+    if data == "sh_ros_confirm":
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.sh_shadow_seat = t
+        g.sh_shadow_night = g.night_number
+        g.sh_shadow_used = True
+        g.sh_shadow_resolved = False
+        g.sh_shadow_announced = False
+        g.night_done.add("rostam")
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🌑 سایه روی {t}. {g.seats[t][1]} گذاشته شد.")
+        await _night_report(ctx, g, f"🌑 سایهٔ رستم → {t}. {escape(g.seats[t][1], quote=False)}")
+        await _maybe_notify_god_done(ctx, g)
+        return
+
+    # ── 🔎 جاماسب ──
+    if data in ("sh_jam_shadow", "sh_jam_blood"):
+        blood = (data == "sh_jam_blood")
+        if blood:
+            g.sh_blood_used = True     # 🩸 فقط یک‌بار در کلِ بازی
+            store.save()
+        pfx = "sh_jbl_" if blood else "sh_jsh_"
+        await _edit_pm(ctx, uid, mid,
+                       ("🩸 استعلام خونِ چه کسی را می‌گیری؟" if blood
+                        else "🌑 استعلام سایهٔ چه کسی را می‌گیری؟"),
+                       _kb_night_seats(_sh_sel_targets(g, pfx, me), g, pfx))
+        return
+
+    if data.startswith(("sh_jsh_", "sh_jbl_")):
+        try:
+            t = int(data.rsplit("_", 1)[1])
+        except Exception:
+            return
+        blood = data.startswith("sh_jbl_")
+        pos = _sh_blood_positive(g, t) if blood else _sh_shadow_positive(g, t)
+        g.night_done.add("jamasb")
+        store.save()
+        await _close_pm(ctx, uid, mid,
+                        f"{'🩸 خون' if blood else '🌑 سایه'} — {t}. {g.seats[t][1]}: "
+                        + ("مثبت ✅" if pos else "منفی ❌"))
+        await _night_report(
+            ctx, g, f"🔎 جاماسب ({'خون' if blood else 'سایه'}) → "
+                    f"{t}. {escape(g.seats[t][1], quote=False)}: "
+                    f"{'مثبت' if pos else 'منفی'}")
+        await _maybe_notify_god_done(ctx, g)
+        return
+
+    # ── 🏹 آرش ──
+    if data == "sh_ar_confirm":
+        t = g.night_sel.get(uid)
+        if not t:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.sh_bow_holder = t
+        g.sh_bow_chain = []
+        g.sh_bow_aiming = None
+        g.sh_arash_used = True
+        g.night_done.add("arash")
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🏹 کمان به {t}. {g.seats[t][1]} داده شد.")
+        await _night_report(ctx, g, f"🏹 آرش → کمان به {t}. {escape(g.seats[t][1], quote=False)}")
+        try:
+            await ctx.bot.send_message(
+                g.seats[t][0],
+                "🏹 شما تیر و کمان دارید.\nدر روز با نوشتن «کمان» یا 🏹 در گروه می‌توانی شلیک کنی.")
+        except Exception:
+            pass
+        await _maybe_notify_god_done(ctx, g)
+        return
+
+    # ── انتخابِ صندلی (همهٔ منوهای بالا) ──
+    for _pfx, (_txt, _cfm, _back) in _SH_SEL.items():
+        if data.startswith(_pfx):
+            try:
+                s = int(data.rsplit("_", 1)[1])
+            except Exception:
+                return
+            g.night_sel[uid] = s
+            store.save()
+            kb = _kb_night_seats(_sh_sel_targets(g, _pfx, me), g, _pfx,
+                                 selected=s, confirm_cb=_cfm)
+            if _pfx == "sh_ros_":
+                kb = InlineKeyboardMarkup(
+                    list(kb.inline_keyboard)
+                    + [[InlineKeyboardButton("⏭ امشب سایه نمی‌گذارم", callback_data="sh_ros_skip")]])
+            if _back:
+                kb = _kb_add_back(kb, _back)
+            await _edit_pm(ctx, uid, mid, _txt, kb)
+            return
+
+
+# ─────────────────── 💀 محاسبهٔ مرگِ شب ───────────────────
+async def _resolve_shahname(ctx, chat_id, g):
+    dead, reasons = set(), {}
+    saved = _sh_saved_seats(g)
+    blocked = _sh_kaveh_blocks(g)
+    st = g.night_shot_target
+    if st and st in g.seats:
+        if blocked:
+            await _night_report(ctx, g, "🔨 خشمِ کاوه: شاتِ امشبِ تیم اهریمن کشته نگرفت.")
+        elif st in saved:
+            pass                       # 🪶 پر سیمرغ
+        else:
+            dead.add(st)
+            reasons[st] = "شلیک تیم اهریمن"
+    bv = _sh_boof_victim(g)
+    if bv:
+        dead.add(bv)
+        reasons[bv] = "پر سمی بوف"
+    _add_night_kick(g, dead, reasons)
+    await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+    # 🌑 اعلامِ سایه در روز (بدون لو رفتنِ خودِ رستم)
+    await _sh_announce_shadow(ctx, chat_id, g)
+
+    # 🏹 با رفتنِ دارندهٔ کمان، کمان هم از بین می‌رود
+    if getattr(g, "sh_bow_holder", None) and g.sh_bow_holder in (g.striked or set()):
+        g.sh_bow_holder = None
+        g.sh_bow_aiming = None
+        g.sh_bow_chain = []
+        store.save()
+        await _night_report(ctx, g, "🏹 دارندهٔ کمان از بازی خارج شد — کمان از بین رفت.")
+
+
+async def _sh_announce_shadow(ctx, chat_id, g):
+    tgt = getattr(g, "sh_shadow_seat", None)
+    if not tgt or getattr(g, "sh_shadow_announced", False):
+        return
+    if (getattr(g, "sh_shadow_night", None) or 0) != g.night_number:
+        return
+    g.sh_shadow_announced = True
+    store.save()
+    if tgt not in g.seats:
+        return
+    nm = escape(g.seats[tgt][1], quote=False)
+    if tgt in (g.striked or set()):
+        # 🌑 هدف همان شب رفت — سایه به رستم برنمی‌گردد، فقط اعلام می‌شود
+        await ctx.bot.send_message(
+            chat_id,
+            f"🌑 <b>سایهٔ رستم روی {tgt}. {nm} بود</b> — که همان شب از بازی خارج شد.",
+            parse_mode="HTML")
+        return
+    await ctx.bot.send_message(
+        chat_id, f"🌑 <b>سایهٔ رستم روی {tgt}. {nm} است.</b>", parse_mode="HTML")
+
+
+async def _sh_check_link(ctx, chat_id, g):
+    """🔗 اگر افراسیاب رستم را درست بسته باشد، با خروجِ افراسیاب رستم هم می‌رود (جز کیک)."""
+    if not getattr(g, "sh_afr_correct", False) or getattr(g, "sh_link_done", False):
+        return
+    afr = _sh_seat(g, _R_AFRASIAB, alive_only=False)
+    ros = _sh_seat(g, _R_ROSTAM, alive_only=False)
+    if afr is None or ros is None:
+        return
+    if afr not in (g.striked or set()):
+        return
+    g.sh_link_done = True
+    store.save()
+    if afr in (getattr(g, "score_kicked", set()) or set()):
+        await _night_report(ctx, g, "🔗 افراسیاب کیک شد — رستم با او خارج نمی‌شود.")
+        return
+    if ros in (g.striked or set()):
+        return
+    g.striked.add(ros)
+    store.save()
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            f"🔗 با رفتنِ افراسیاب، <b>{ros}. {escape(g.seats[ros][1], quote=False)}</b> "
+            f"هم از بازی خارج شد.", parse_mode="HTML")
+    except Exception:
+        pass
+    await _night_report(ctx, g, f"🔗 پیوندِ افراسیاب–رستم: {ros} خط خورد.")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+
+
+# ─────────────────── 🏹 کمانِ آرش (روز) ───────────────────
+def _sh_bow_shooter(g):
+    ch = list(getattr(g, "sh_bow_chain", []) or [])
+    return ch[-1] if ch else getattr(g, "sh_bow_holder", None)
+
+
+def _sh_bow_targets(g):
+    """هرکس که تا الان در زنجیرهٔ تیر بوده از هدف‌ها کنار می‌رود."""
+    used = set(getattr(g, "sh_bow_chain", []) or [])
+    h = getattr(g, "sh_bow_holder", None)
+    if h:
+        used.add(h)
+    return tuple(s for s in _alive_seats(g) if s not in used)
+
+
+async def _sh_arrow_fire(ctx, chat_id, g, shooter, target):
+    chain = list(getattr(g, "sh_bow_chain", []) or [])
+    shielded = target in (getattr(g, "sh_shields", set()) or set())
+    tname = escape(g.seats[target][1], quote=False)
+    g.sh_bow_aiming = None
+    # 🛡 سپردار: کمان به خودش می‌رسد — ولی نفرِ سوم دیگر منحرف نمی‌شود
+    if shielded and len(chain) < 2:
+        chain.append(target)
+        g.sh_bow_chain = chain
+        g.sh_bow_aiming = target
+        store.save()
+        await ctx.bot.send_message(
+            chat_id,
+            f"🛡 {target}. {tname} <b>سپر دارد</b> — تیر کارگر نشد.\n"
+            f"🏹 حالا نوبتِ اوست: فقط شماره‌ی صندلی را بنویسد.",
+            parse_mode="HTML")
+        await _night_report(ctx, g, f"🏹 تیر به {target}. {tname} خورد ولی سپر داشت — "
+                                    f"کمان به او رسید.")
+        return
+    g.sh_bow_holder = None
+    g.sh_bow_chain = []
+    g.striked.add(target)
+    store.save()
+    await ctx.bot.send_message(chat_id, f"💥 تیرِ آرش — {target}. {tname} وصیت کند.",
+                               parse_mode="HTML")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _night_report(ctx, g, f"🏹 تیرِ آرش: {shooter} → {target}. {tname} "
+                                f"(خارج شد، {_sc_side(g, target)})")
+    await _check_auto_end(ctx, chat_id, g)   # 🏁
+
+    _tside = _sc_side(g, target)
+
+    async def _sh_side_later():
+        try:
+            await asyncio.sleep(SH_ARROW_SIDE_DELAY)
+            if g.phase in ("idle", "ended"):
+                return
+            await ctx.bot.send_message(chat_id, f"ساید {target}. {tname}: <b>{_tside}</b>",
+                                       parse_mode="HTML")
+        except Exception as e:
+            print("⚠️ sh side announce err:", e)
+    asyncio.create_task(_sh_side_later())
+
+
+# ─────────────────── 🗳 رأی‌گیریِ شاهنامه (روز ۱) ───────────────────
+def _sh_find_game(uid):
+    """بازیِ شاهنامه‌ای که این کاربر بازیکن/گادِ آن است (برای دکمه‌های روز)."""
+    for cid, game in store.games.items():
+        if not _is_shahname_scenario(game):
+            continue
+        if game.phase in ("idle", "ended"):
+            continue
+        if _seat_of_uid(game, uid) is not None or game.god_id == uid:
+            return game, cid
+    return None, None
+
+
+def _sh_vote_end_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="shd_end")]])
+
+
+async def _sh_vote_msg(ctx, chat_id, g, text):
+    old = getattr(g, "sh_vote_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old,
+                                                    reply_markup=None)
+        except Exception:
+            pass
+    m = await ctx.bot.send_message(chat_id, text, parse_mode="HTML",
+                                   reply_markup=_sh_vote_end_kb())
+    g.sh_vote_kb_mid = m.message_id
+    store.save()
+
+
+async def _sh_vote_capture(ctx, g, msg, uid, text) -> bool:
+    vs = _seat_of_uid(g, uid)
+    if vs is None or vs in (g.striked or set()) or uid == g.god_id:
+        return False
+    v = _deng_parse_strict(text, tuple(s for s in _alive_seats(g) if s != vs))
+    if v is not None:
+        g.sh_vote_seq = int(getattr(g, "sh_vote_seq", 0) or 0) + 1
+        g.sh_vote_votes[uid] = (v, g.sh_vote_seq)
+        g.sh_vote_unread.discard(uid)
+        store.save()
+        if all(g.seats[s][0] in g.sh_vote_votes for s in _alive_seats(g)):
+            await _sh_vote_count(ctx, msg.chat.id, g)
+        return True
+    if uid not in (g.sh_vote_votes or {}):
+        _first = uid not in (g.sh_vote_unread or set())
+        g.sh_vote_unread.add(uid)
+        store.save()
+        if _first:
+            try:
+                await msg.reply_text(f"⚠️ {vs}. {g.seats[vs][1]} رأیت خوانده نشد — "
+                                     f"فقط شماره‌ی یکی از صندلی‌ها را بنویس (به‌جز خودت).")
+            except Exception:
+                pass
+        return True
+    return False
+
+
+async def _sh_vote_count(ctx, chat_id, g):
+    if not getattr(g, "sh_vote_active", False):
+        return
+    alive = set(_alive_seats(g))
+    picks = {}
+    for u, (t, _sq) in dict(g.sh_vote_votes or {}).items():
+        vs = _seat_of_uid(g, u)
+        if vs is None or vs not in alive or t not in alive or t == vs:
+            continue
+        picks[vs] = t
+    g.sh_vote_active = False
+    old = getattr(g, "sh_vote_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old,
+                                                    reply_markup=None)
+        except Exception:
+            pass
+    g.sh_vote_kb_mid = None
+    store.save()
+
+    duels = sorted((a, b) for a, b in picks.items() if a < b and picks.get(b) == a)
+    if duels:
+        g.sh_duels = [list(d) for d in duels]
+        g.sh_council_votes = {}
+        g.sh_council_sel = {}
+        g.sh_council_done = False
+        store.save()
+        lines = ["⚔️ <b>مبارزهٔ تن‌به‌تن</b> شکل گرفت:"]
+        for a, b in duels:
+            lines.append(f"• {a}. {escape(g.seats[a][1], quote=False)} ⚔️ "
+                         f"{b}. {escape(g.seats[b][1], quote=False)}")
+        lines.append("\n🏛 حالا نظرِ انجمن گرفته می‌شود.")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏛 پرسش از انجمن", callback_data="shd_cask")],
+            [InlineKeyboardButton("🏛 پایانِ نظرِ انجمن", callback_data="shd_cdone")],
+        ])
+        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+        await _night_report(ctx, g, "⚔️ مبارزه‌ها ثبت شد — با «باز کردن چت مافیا» (یا دکمهٔ "
+                                    "«پرسش از انجمن») نظرِ انجمن گرفته می‌شود.")
+        return
+
+    counts = {}
+    for _vs, t in picks.items():
+        counts[t] = counts.get(t, 0) + 1
+    high = sorted(s for s, c in counts.items() if c >= SH_VOTE_THRESHOLD)
+    g.sh_vote_high = high
+    store.save()
+    if not high:
+        await ctx.bot.send_message(
+            chat_id, f"🗳 مبارزه‌ای شکل نگرفت و کسی هم به حدنصابِ {SH_VOTE_THRESHOLD} رأی نرسید.")
+        return
+    txt = "🗳 <b>به رأی‌گیریِ نهایی می‌روند:</b>\n" + "\n".join(
+        f"• {s}. {escape(g.seats[s][1], quote=False)} — {counts[s]} رأی" for s in high)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید و ساختِ رأی نهایی",
+                                                     callback_data="shd_ok")]])
+    await ctx.bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=kb)
+
+
+# ─────────────────── 🏛 انجمن ───────────────────
+def _sh_council_seats(g):
+    """اعضای زندهٔ انجمن: ضحاک، رستم، کاوه."""
+    out = set()
+    for key in (_R_ZAHHAK, _R_ROSTAM, _R_KAVEH):
+        s = _sh_seat(g, key)
+        if s is not None:
+            out.add(s)
+    return sorted(out)
+
+
+def _sh_duel_label(g, d):
+    return f"{d[0]} و {d[1]}"
+
+
+def _sh_council_kb(g, sel):
+    rows = []
+    for i, d in enumerate(getattr(g, "sh_duels", []) or []):
+        mark = "✅ " if i in sel else ""
+        rows.append([InlineKeyboardButton(f"{mark}{_sh_duel_label(g, d)}",
+                                          callback_data=f"sh_cd_{i}")])
+    rows.append([InlineKeyboardButton("✅ تأیید", callback_data="sh_cd_ok")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _sh_council_ask(ctx, chat_id, g):
+    duels = getattr(g, "sh_duels", []) or []
+    if not duels or getattr(g, "sh_council_done", False):
+        return
+    members = _sh_council_seats(g)
+    if not members:
+        await _night_report(ctx, g, "🏛 هیچ عضوِ زنده‌ای در انجمن نمانده.")
+        return
+    for s in members:
+        uid = g.seats[s][0]
+        sel = set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or [])
+        await _safe_pm(ctx, uid, "🏛 موافقِ برگزاری کدام مبارزه‌ها هستی؟", _sh_council_kb(g, sel))
+    await _night_report(ctx, g, f"🏛 پرسشِ انجمن برای {len(members)} نفر فرستاده شد.")
+
+
+async def _sh_council_resolve(ctx, chat_id, g):
+    """🏛 جمع‌بندیِ نظرِ انجمن → ساختِ رأی نهایی، یا رفتن به شب."""
+    duels = getattr(g, "sh_duels", []) or []
+    if not duels or getattr(g, "sh_council_done", False):
+        return
+    g.sh_council_done = True
+    members = _sh_council_seats(g)
+    votes = getattr(g, "sh_council_votes", {}) or {}
+    total = len(members)
+    approved = []
+    for i, _d in enumerate(duels):
+        yes = sum(1 for s in members if i in (votes.get(g.seats[s][0], []) or []))
+        if total and yes * 2 > total:      # اکثریتِ اعضای زندهٔ انجمن
+            approved.append(i)
+    store.save()
+
+    if not approved:
+        await ctx.bot.send_message(chat_id, "🏛 انجمن با هیچ مبارزه‌ای موافقت نکرد — شب می‌شود.")
+        await _night_report(ctx, g, "🏛 هیچ مبارزه‌ای تأیید نشد → شب خودکار شروع شد.")
+        await start_night(ctx, chat_id, g)
+        return
+
+    lines = ["🏛 <b>اعضای انجمن موافقِ برگزاری این مبارزه‌ها بودند:</b>"]
+    seats, pairs = [], []
+    for i in approved:
+        a, b = duels[i][0], duels[i][1]
+        lines.append(f"• {a}. {escape(g.seats[a][1], quote=False)} ⚔️ "
+                     f"{b}. {escape(g.seats[b][1], quote=False)}")
+        pairs.append([a, b])
+        for s in (a, b):
+            if s in g.seats and s not in (g.striked or set()) and s not in seats:
+                seats.append(s)
+    lines.append("\n<i>⚔️ هر دو طرفِ یک مبارزه در دفاع‌اند و به یکدیگر رأی نمی‌دهند.</i>")
+    g.sh_duel_final = pairs
+    store.save()
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await _sh_open_final_vote(ctx, chat_id, g, seats)
+
+
+async def _sh_open_final_vote(ctx, chat_id, g, seats):
+    seats = [s for s in seats if s in g.seats and s not in (g.striked or set())]
+    if not seats:
+        await ctx.bot.send_message(chat_id, "ℹ️ کسی برای رأی‌گیریِ نهایی نماند.")
+        return
+    g.votes_cast = {}
+    g.vote_logs = {}
+    g.current_vote_target = None
+    g.voted_targets = set()
+    g.defense_selection = []
+    g.defense_seats = list(seats)
+    g.vote_type = "defense_selected"
+    store.save()
+    await ctx.bot.send_message(
+        chat_id, f"🛡 صندلی‌های دفاع: {'، '.join(map(str, seats))}")
+    await start_vote(ctx, chat_id, g, "final")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+
+
+async def handle_shahname_god_callback(update, ctx):
+    """⚔️ دکمه‌های گادِ شاهنامه (در گروه): پایانِ شمارش / تأیید / انجمن."""
+    q = update.callback_query
+    uid = q.from_user.id
+    g, chat_id = _sh_find_game(uid)
+    if g is None or uid != g.god_id:
+        await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    data = q.data
+
+    if data == "shd_end":
+        await _sh_vote_count(ctx, chat_id, g)
+        return
+
+    if data == "shd_ok":
+        high = [s for s in (getattr(g, "sh_vote_high", []) or [])
+                if s in g.seats and s not in (g.striked or set())]
+        if not high:
+            await safe_q_answer(q, "کسی در فهرست نیست.", show_alert=True)
+            return
+        g.sh_vote_high = []
+        store.save()
+        await _sh_open_final_vote(ctx, chat_id, g, high)
+        return
+
+    if data == "shd_cask":
+        await _sh_council_ask(ctx, chat_id, g)
+        return
+
+    if data == "shd_cdone":
+        await _sh_council_resolve(ctx, chat_id, g)
+        return
 
 
 async def handle_night_kick_callback(update, ctx):
@@ -11549,8 +12946,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # ⚔️ دکمه‌های گادِ شاهنامه (در گروه) — قبل از مسیرِ اکت‌های شب
+    if _q and _q.data and _q.data.startswith("shd_"):
+        await handle_shahname_god_callback(update, ctx)
+        return
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
-    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_")):
+    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_", "sh_")):
         _dt = _q.data
         if _dt.startswith("night_"):
             await handle_night_callback(update, ctx)
@@ -11562,6 +12964,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_takavar_callback(update, ctx)
         elif _dt.startswith("kp_"):
             await handle_kapu_callback(update, ctx)
+        elif _dt.startswith("sh_"):
+            await handle_shahname_callback(update, ctx)
         else:
             await handle_gamer_callback(update, ctx)
         # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
@@ -11969,9 +13373,38 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
-                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu"):
+                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if data == "ctl_shahname":
+            if getattr(g, "sh_button_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if not (_is_shahname_scenario(g) and getattr(g, "maarefe_done", False)
+                    and getattr(g, "night_number", 0) == 0):
+                await safe_q_answer(q, "فقط روزِ ۱ سناریوی شاهنامه.", show_alert=True)
+                return
+            g.sh_button_used = True
+            g.sh_vote_active = True
+            g.sh_vote_votes = {}
+            g.sh_vote_seq = 0
+            g.sh_vote_unread = set()
+            g.sh_vote_high = []
+            g.sh_duels = []
+            g.sh_council_votes = {}
+            g.sh_council_sel = {}
+            g.sh_council_done = False
+            store.save()
+            await _sh_vote_msg(
+                ctx, chat, g,
+                "⚔️ <b>رأی‌گیریِ شاهنامه</b> — از صندلی ۱ به‌ترتیب: شماره‌ی صندلیِ موردِ نظرت "
+                "را بنویس (به‌جز خودت).\n"
+                "<i>اگر دو نفر شماره‌ی هم را بنویسند، بینشان مبارزهٔ تن‌به‌تن شکل می‌گیرد.</i>")
+            try:
+                await publish_seating(ctx, chat, g, mode=CTRL)
+            except Exception:
+                pass
             return
         if data == "ctl_kapu":
             if getattr(g, "kp_trust_button_used", False):
@@ -13261,6 +14694,49 @@ async def shuffle_and_assign(
     g.kp_gun_msg_id = None
     g.kp_gun_done = False
     g.kp_pair_tmp = []
+    # ⚔️ شاهنامه — همه‌چیزِ کلِ بازی با نقش‌های تازه ریست می‌شود
+    g.sh_decider_seat = None
+    g.sh_shields = set()
+    g.sh_kaveh_used = False
+    g.sh_afr_used = False
+    g.sh_kaveh_out = False
+    g.sh_kaveh_block_night = None
+    g.sh_boof_used = False
+    g.sh_boof_holder = None
+    g.sh_simorgh_left = SH_SIMORGH_FEATHERS
+    g.sh_simorgh_self_used = False
+    g.sh_sim_holders = []
+    g.sh_sim_sel = []
+    g.sh_sim_need = 1
+    g.sh_feather_own = {}
+    g.sh_feather_wait = set()
+    g.sh_feather_final = {}
+    g.sh_shadow_seat = None
+    g.sh_shadow_night = None
+    g.sh_shadow_used = False
+    g.sh_shadow_resolved = False
+    g.sh_shadow_announced = False
+    g.sh_afr_guess = None
+    g.sh_afr_guessed = False
+    g.sh_afr_correct = False
+    g.sh_link_done = False
+    g.sh_blood_used = False
+    g.sh_arash_used = False
+    g.sh_bow_holder = None
+    g.sh_bow_aiming = None
+    g.sh_bow_chain = []
+    g.sh_button_used = False
+    g.sh_vote_active = False
+    g.sh_vote_votes = {}
+    g.sh_vote_seq = 0
+    g.sh_vote_unread = set()
+    g.sh_vote_kb_mid = None
+    g.sh_vote_high = []
+    g.sh_duels = []
+    g.sh_duel_final = []
+    g.sh_council_votes = {}
+    g.sh_council_sel = {}
+    g.sh_council_done = False
     g.gm_don_sentence = None
     g.gm_awaiting_don_sentence = False
     g.gm_holmes_sentence = None
@@ -13491,6 +14967,32 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if getattr(g, "kp_deng_active", False):
         if await _kp_deng_capture(ctx, g, msg, uid, text):
             return
+
+    # ⚔️ شمارشِ رأی‌گیریِ شاهنامه (روز ۱)
+    if getattr(g, "sh_vote_active", False):
+        if await _sh_vote_capture(ctx, g, msg, uid, text):
+            return
+
+    # 🏹 کمانِ آرش: «کمان» یا 🏹 → نشانه‌گیری؛ بعد یک عدد → شلیک
+    if (_is_shahname_scenario(g) and not getattr(g, "night_active", False)
+            and getattr(g, "sh_bow_holder", None)):
+        _bseat = _seat_of_uid(g, uid)
+        if (_bseat is not None and _bseat == _sh_bow_shooter(g)
+                and _bseat not in (g.striked or set())):
+            if _nz(text) == _nz("کمان") or "🏹" in text:
+                g.sh_bow_aiming = _bseat
+                store.save()
+                try:
+                    await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
+                                         f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                except Exception:
+                    pass
+                return
+            if getattr(g, "sh_bow_aiming", None) == _bseat:
+                _bv = _deng_parse_strict(text, _sh_bow_targets(g))
+                if _bv is not None:
+                    await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+                    return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -14783,6 +16285,32 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if getattr(g, "kp_deng_active", False):
         if await _kp_deng_capture(ctx, g, msg, uid, text):
             return
+
+    # ⚔️ شمارشِ رأی‌گیریِ شاهنامه (روز ۱)
+    if getattr(g, "sh_vote_active", False):
+        if await _sh_vote_capture(ctx, g, msg, uid, text):
+            return
+
+    # 🏹 کمانِ آرش: «کمان» یا 🏹 → نشانه‌گیری؛ بعد یک عدد → شلیک
+    if (_is_shahname_scenario(g) and not getattr(g, "night_active", False)
+            and getattr(g, "sh_bow_holder", None)):
+        _bseat = _seat_of_uid(g, uid)
+        if (_bseat is not None and _bseat == _sh_bow_shooter(g)
+                and _bseat not in (g.striked or set())):
+            if _nz(text) == _nz("کمان") or "🏹" in text:
+                g.sh_bow_aiming = _bseat
+                store.save()
+                try:
+                    await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
+                                         f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                except Exception:
+                    pass
+                return
+            if getattr(g, "sh_bow_aiming", None) == _bseat:
+                _bv = _deng_parse_strict(text, _sh_bow_targets(g))
+                if _bv is not None:
+                    await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+                    return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
