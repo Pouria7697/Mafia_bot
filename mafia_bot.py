@@ -90,8 +90,11 @@ def save_active_groups(active_groups: set[int]) -> bool:
 # ⚔️ تنظیم‌های سناریو «شاهنامه» (موتورش پایین‌تر است؛ اینجا چون در GameState لازم‌اند)
 SH_SIMORGH_FEATHERS = 5     # 🪶 کلِ پرهای سیمرغ در یک بازی
 SH_SIMORGH_PER_NIGHT = 2    # 🪶 حداکثر پر در یک شب
+# ⏳ ثانیه تا اعلامِ سایدِ کسی که خارج شد — مشترکِ همهٔ سناریوها
+# (بلنداست تا وسطِ وصیتِ طرف نیفتد)
+SIDE_ANNOUNCE_DELAY = 75
+SH_BOW_DEFENSE_DELAY = 60   # ⏳ ثانیه‌ی دفاعِ هدفِ کمان، تا بعدش دکمه‌های تصمیم بیاید
 SH_VOTE_THRESHOLD = 4       # 🗳 حدنصابِ ورود به رأی‌گیریِ نهایی (وقتی مبارزه‌ای شکل نگرفته)
-SH_ARROW_SIDE_DELAY = 55    # ⏳ ثانیه تا اعلامِ سایدِ تیرخورده
 
 
 @dataclass
@@ -442,6 +445,10 @@ class GameState:
         self.sh_arash_used = getattr(self, "sh_arash_used", False)
         self.sh_bow_holder = getattr(self, "sh_bow_holder", None)
         self.sh_bow_aiming = getattr(self, "sh_bow_aiming", None)
+        self.sh_bow_pending = getattr(self, "sh_bow_pending", None)   # هدفِ منتظرِ تأیید
+        self.sh_bow_changed = getattr(self, "sh_bow_changed", False)  # یک‌بار حقِ تغییر
+        self.sh_bow_btn_mid = getattr(self, "sh_bow_btn_mid", None)
+        self.sh_bow_token = getattr(self, "sh_bow_token", 0)
         self.sh_bow_chain = getattr(self, "sh_bow_chain", []) or []
         # ⚔️ رأی‌گیریِ شاهنامه (روز ۱) و انجمن
         self.sh_button_used = getattr(self, "sh_button_used", False)
@@ -452,7 +459,7 @@ class GameState:
         self.sh_vote_kb_mid = getattr(self, "sh_vote_kb_mid", None)
         self.sh_vote_high = getattr(self, "sh_vote_high", []) or []
         self.sh_duels = getattr(self, "sh_duels", []) or []
-        self.sh_duel_final = getattr(self, "sh_duel_final", []) or []   # ⚔️ مبارزه‌های تأییدشده
+        self.sh_duel_msg_id = getattr(self, "sh_duel_msg_id", None)     # پیامِ دکمه‌های انجمن
         self.sh_council_votes = getattr(self, "sh_council_votes", {}) or {}
         self.sh_council_sel = getattr(self, "sh_council_sel", {}) or {}
         self.sh_council_done = getattr(self, "sh_council_done", False)
@@ -4787,7 +4794,10 @@ async def start_night(ctx, chat_id, g):
     g.sh_feather_own = {}
     g.sh_feather_wait = set()
     g.sh_feather_final = {}
-    g.sh_duel_final = []     # ⚔️ مبارزه‌های روزِ ۱ با آمدنِ شب تمام می‌شوند
+    g.sh_bow_aiming = None      # 🏹 نشانه‌گیریِ نیمه‌کاره با آمدنِ شب باطل می‌شود
+    g.sh_bow_pending = None
+    g.sh_bow_changed = False
+    g.sh_bow_btn_mid = None
     g.night_done = set()
     g.night_sel = {}
     g.night_doc_sel = {}
@@ -6029,12 +6039,12 @@ async def _baz_duel_count(ctx, chat_id, g):
 
     await _check_auto_end(ctx, chat_id, g)   # 🏁
 
-    # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
     _lside = _sc_side(g, loser)
 
     async def _side_after_will():
         try:
-            await asyncio.sleep(50)
+            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(
@@ -8795,7 +8805,7 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
 
         async def _tk_shield_later():
             try:
-                await asyncio.sleep(50)
+                await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
                 if g.phase in ("idle", "ended"):
                     return
                 await ctx.bot.send_message(
@@ -8818,12 +8828,12 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
                                 f"(جنگی — خارج شد، {_sc_side(g, target)})")
     await _check_auto_end(ctx, chat_id, g)   # 🏁
 
-    # ⏳ ساید بعد از وصیت اعلام می‌شود (۵۰ ثانیه بعد)
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
     _tside = _sc_side(g, target)
 
     async def _tk_side_later():
         try:
-            await asyncio.sleep(50)
+            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(
@@ -9059,7 +9069,7 @@ async def _kp_gun_resolve(ctx, chat_id, g, opt):
 
         async def _kp_side_later():
             try:
-                await asyncio.sleep(50)
+                await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
                 if g.phase in ("idle", "ended"):
                     return
                 await ctx.bot.send_message(chat_id, f"ساید {target}. {_tn}: <b>{_lside}</b>",
@@ -11639,12 +11649,22 @@ def _sh_kaveh_blocks(g) -> bool:
     return _sh_seat(g, _R_ZAHHAK) is not None    # فقط اگر ضحاک زنده باشد
 
 
+def _sh_final_pair(g):
+    """صندلی‌های زندهٔ رأی‌گیریِ نهایی — اگر دقیقاً دو نفر باشند."""
+    if getattr(g, "vote_stage", None) != "final":
+        return None
+    seats = [s for s in (getattr(g, "defense_seats", []) or [])
+             if s in g.seats and s not in (g.striked or set())]
+    return seats if len(seats) == 2 else None
+
+
 def _sh_duel_locked(g, voter_seat, target_seat) -> bool:
-    """⚔️ دو نفرِ یک مبارزهٔ تأییدشده هر دو در دفاع‌اند → حقِ رأی به یکدیگر ندارند."""
-    for pair in (getattr(g, "sh_duel_final", []) or []):
-        if voter_seat != target_seat and voter_seat in pair and target_seat in pair:
-            return True
-    return False
+    """⚔️ فقط وقتی دقیقاً «دو نفر» در رأی‌گیریِ نهایی‌اند، آن دو به هم رأی نمی‌دهند.
+    با سه نفر یا بیشتر (چند مبارزه)، همه به همه می‌توانند رأی بدهند."""
+    pair = _sh_final_pair(g)
+    if not pair:
+        return False
+    return voter_seat != target_seat and voter_seat in pair and target_seat in pair
 
 
 # ─────────────────── 🌙 مراحلِ شب ───────────────────
@@ -12033,6 +12053,12 @@ async def handle_shahname_callback(update, ctx):
     me = _seat_of_uid(g, uid)
 
     # ── 🏛 انجمن (روز — بیرون از اکت‌گیری) ──
+    if data.startswith("sh_cd_"):
+        # 🔒 نظرِ ثبت‌شده قابلِ تغییر نیست (دکمه‌ی کهنه هم کاری نکند)
+        if uid in (getattr(g, "sh_council_votes", {}) or {}):
+            await _close_pm(ctx, uid, mid, "🏛 نظرت قبلاً ثبت شده و قابلِ تغییر نیست.")
+            return
+
     if data == "sh_cd_ok":
         sel = sorted(set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or []))
         cv = dict(getattr(g, "sh_council_votes", {}) or {})
@@ -12060,8 +12086,7 @@ async def handle_shahname_callback(update, ctx):
         d[uid] = sorted(sel)
         g.sh_council_sel = d
         store.save()
-        await _edit_pm(ctx, uid, mid, "🏛 موافقِ برگزاری کدام مبارزه‌ها هستی؟",
-                       _sh_council_kb(g, sel))
+        await _edit_pm(ctx, uid, mid, _SH_COUNCIL_Q, _sh_council_kb(g, sel))
         return
 
     # ── 🌑 تصمیمِ رستم دربارهٔ سایه ──
@@ -12154,10 +12179,8 @@ async def handle_shahname_callback(update, ctx):
         await _close_pm(ctx, uid, mid, f"🛡 سپر به {t}. {g.seats[t][1]} داده شد.")
         await _night_report(ctx, g,
                             f"🛡 {who} → سپر به {t}. {escape(g.seats[t][1], quote=False)}")
-        try:
-            await ctx.bot.send_message(g.seats[t][0], "🛡 شما سپر دارید.")
-        except Exception:
-            pass
+        # 🤫 به گیرندهٔ سپر چیزی گفته نمی‌شود — تازه وقتی تیر بهش بخورد،
+        #    وسطِ گروه معلوم می‌شود که سپر داشته
         if data == "sh_kv_confirm":
             await _sh_check_open_mafia(ctx, chat_id, g)
         else:
@@ -12393,6 +12416,9 @@ async def _resolve_shahname(ctx, chat_id, g):
     if getattr(g, "sh_bow_holder", None) and g.sh_bow_holder in (g.striked or set()):
         g.sh_bow_holder = None
         g.sh_bow_aiming = None
+        g.sh_bow_pending = None
+        g.sh_bow_changed = False
+        g.sh_bow_btn_mid = None
         g.sh_bow_chain = []
         store.save()
         await _night_report(ctx, g, "🏹 دارندهٔ کمان از بازی خارج شد — کمان از بین رفت.")
@@ -12468,11 +12494,110 @@ def _sh_bow_targets(g):
     return tuple(s for s in _alive_seats(g) if s not in used)
 
 
+async def _sh_bow_clear_buttons(ctx, chat_id, g):
+    mid = getattr(g, "sh_bow_btn_mid", None)
+    if not mid:
+        return
+    try:
+        await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid,
+                                                reply_markup=None)
+    except Exception:
+        pass
+    g.sh_bow_btn_mid = None
+    store.save()
+
+
+async def _sh_arrow_aim(ctx, chat_id, g, shooter, target):
+    """🏹 نشانه‌گیریِ اولین کمان‌دار: هدف اعلام می‌شود تا دفاع کند؛ بعد از وقتِ دفاع،
+    دو دکمهٔ تصمیم می‌آید. فقط همین یک‌بار حقِ عوض‌کردنِ نظر دارد."""
+    g.sh_bow_pending = target
+    g.sh_bow_aiming = None
+    g.sh_bow_token = int(getattr(g, "sh_bow_token", 0) or 0) + 1
+    tok = g.sh_bow_token
+    store.save()
+    tname = escape(g.seats[target][1], quote=False)
+    sname = escape(g.seats[shooter][1], quote=False)
+    await ctx.bot.send_message(
+        chat_id,
+        f"🏹 {shooter}. {sname} کمان را روی <b>{target}. {tname}</b> نشانه گرفت — "
+        f"او دفاع کند.\n"
+        f"<i>بعد از دفاع، دکمه‌های تصمیم برای {shooter}. {sname} می‌آید.</i>",
+        parse_mode="HTML")
+    await _night_report(ctx, g, f"🏹 نشانه‌گیریِ {shooter} → {target}. {tname} (منتظرِ دفاع)")
+    asyncio.create_task(_sh_bow_ask_later(ctx, chat_id, g, shooter, target, tok))
+
+
+async def _sh_bow_ask_later(ctx, chat_id, g, shooter, target, tok,
+                            delay=SH_BOW_DEFENSE_DELAY):
+    """⏳ بعد از وقتِ دفاع، دو دکمه‌ی «عوض می‌کنم / همینو می‌زنم» در گروه می‌آید."""
+    try:
+        await asyncio.sleep(delay)
+        if g.phase in ("idle", "ended") or getattr(g, "night_active", False):
+            return
+        if getattr(g, "sh_bow_token", None) != tok:
+            return
+        if getattr(g, "sh_bow_pending", None) != target:
+            return
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔁 عوض می‌کنم", callback_data="sh_bw_change"),
+            InlineKeyboardButton("🎯 همینو می‌زنم", callback_data="sh_bw_keep"),
+        ]])
+        m = await ctx.bot.send_message(
+            chat_id,
+            f"🏹 {shooter}. {escape(g.seats[shooter][1], quote=False)} — "
+            f"هدفت <b>{target}. {escape(g.seats[target][1], quote=False)}</b> است. تصمیمت؟",
+            parse_mode="HTML", reply_markup=kb)
+        g.sh_bow_btn_mid = m.message_id
+        store.save()
+    except Exception as e:
+        print("⚠️ sh bow ask err:", e)
+
+
+async def handle_sh_bow_callback(update, ctx):
+    """🏹 دکمه‌های تصمیمِ کمان — فقط کسی که کمان دستش است."""
+    q = update.callback_query
+    uid = q.from_user.id
+    g, chat_id = _sh_find_game(uid)
+    if g is None or not getattr(g, "sh_bow_holder", None):
+        await safe_q_answer(q, "کمانی در جریان نیست.", show_alert=True)
+        return
+    seat = _seat_of_uid(g, uid)
+    if seat is None or seat != _sh_bow_shooter(g):
+        await safe_q_answer(q, "⛔ فقط کسی که کمان دستش است.", show_alert=True)
+        return
+    pend = getattr(g, "sh_bow_pending", None)
+    if pend is None:
+        await safe_q_answer(q, "تصمیم قبلاً گرفته شده.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    await _sh_bow_clear_buttons(ctx, chat_id, g)
+    g.sh_bow_pending = None
+
+    if q.data == "sh_bw_keep":
+        store.save()
+        await _sh_arrow_fire(ctx, chat_id, g, seat, pend)
+        return
+
+    # 🔁 عوض می‌کنم — تنها فرصتش؛ عددِ بعدی مستقیم شلیک می‌شود
+    g.sh_bow_changed = True
+    g.sh_bow_aiming = seat
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"🔁 {seat}. {escape(g.seats[seat][1], quote=False)} نظرش را عوض کرد — "
+        f"حالا شماره‌ی صندلیِ جدید را بنویس.\n"
+        f"<i>این تیر دیگر برگشت ندارد.</i>", parse_mode="HTML")
+    await _night_report(ctx, g, f"🏹 {seat} نظرش را عوض کرد — منتظرِ عددِ جدید.")
+
+
 async def _sh_arrow_fire(ctx, chat_id, g, shooter, target):
     chain = list(getattr(g, "sh_bow_chain", []) or [])
     shielded = target in (getattr(g, "sh_shields", set()) or set())
     tname = escape(g.seats[target][1], quote=False)
     g.sh_bow_aiming = None
+    g.sh_bow_pending = None
+    g.sh_bow_changed = False
+    await _sh_bow_clear_buttons(ctx, chat_id, g)
     # 🛡 سپردار: کمان به خودش می‌رسد — ولی نفرِ سوم دیگر منحرف نمی‌شود
     if shielded and len(chain) < 2:
         chain.append(target)
@@ -12482,12 +12607,14 @@ async def _sh_arrow_fire(ctx, chat_id, g, shooter, target):
         await ctx.bot.send_message(
             chat_id,
             f"🛡 {target}. {tname} <b>سپر دارد</b> — تیر کارگر نشد.\n"
-            f"🏹 حالا نوبتِ اوست: فقط شماره‌ی صندلی را بنویسد.",
+            f"🏹 حالا <b>کمان دستِ اوست</b>: فقط شماره‌ی صندلی را بنویسد "
+            f"(دیگر حقِ عوض‌کردنِ نظر نیست).",
             parse_mode="HTML")
         await _night_report(ctx, g, f"🏹 تیر به {target}. {tname} خورد ولی سپر داشت — "
                                     f"کمان به او رسید.")
         return
     g.sh_bow_holder = None
+    g.sh_bow_pending = None
     g.sh_bow_chain = []
     g.striked.add(target)
     store.save()
@@ -12505,7 +12632,7 @@ async def _sh_arrow_fire(ctx, chat_id, g, shooter, target):
 
     async def _sh_side_later():
         try:
-            await asyncio.sleep(SH_ARROW_SIDE_DELAY)
+            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(chat_id, f"ساید {target}. {tname}: <b>{_tside}</b>",
@@ -12610,7 +12737,10 @@ async def _sh_vote_count(ctx, chat_id, g):
             [InlineKeyboardButton("🏛 پرسش از انجمن", callback_data="shd_cask")],
             [InlineKeyboardButton("🏛 پایانِ نظرِ انجمن", callback_data="shd_cdone")],
         ])
-        await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+        _dm = await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML",
+                                         reply_markup=kb)
+        g.sh_duel_msg_id = _dm.message_id
+        store.save()
         await _night_report(ctx, g, "⚔️ مبارزه‌ها ثبت شد — با «باز کردن چت مافیا» (یا دکمهٔ "
                                     "«پرسش از انجمن») نظرِ انجمن گرفته می‌شود.")
         return
@@ -12643,6 +12773,10 @@ def _sh_council_seats(g):
     return sorted(out)
 
 
+_SH_COUNCIL_Q = ("🏛 موافقِ برگزاری کدام مبارزه‌ها هستی؟\n"
+                 "⚠️ بعد از «تأیید» دیگر قابلِ تغییر نیست.")
+
+
 def _sh_duel_label(g, d):
     return f"{d[0]} و {d[1]}"
 
@@ -12665,11 +12799,17 @@ async def _sh_council_ask(ctx, chat_id, g):
     if not members:
         await _night_report(ctx, g, "🏛 هیچ عضوِ زنده‌ای در انجمن نمانده.")
         return
-    for s in members:
+    # 🔒 هرکس نظرش را داده دیگر پرسیده نمی‌شود (تا نتواند عوضش کند)
+    done = getattr(g, "sh_council_votes", {}) or {}
+    pending = [s for s in members if g.seats[s][0] not in done]
+    if not pending:
+        await _night_report(ctx, g, "🏛 همهٔ اعضای انجمن نظرشان را داده‌اند.")
+        return
+    for s in pending:
         uid = g.seats[s][0]
         sel = set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or [])
-        await _safe_pm(ctx, uid, "🏛 موافقِ برگزاری کدام مبارزه‌ها هستی؟", _sh_council_kb(g, sel))
-    await _night_report(ctx, g, f"🏛 پرسشِ انجمن برای {len(members)} نفر فرستاده شد.")
+        await _safe_pm(ctx, uid, _SH_COUNCIL_Q, _sh_council_kb(g, sel))
+    await _night_report(ctx, g, f"🏛 پرسشِ انجمن برای {len(pending)} نفر فرستاده شد.")
 
 
 async def _sh_council_resolve(ctx, chat_id, g):
@@ -12678,6 +12818,15 @@ async def _sh_council_resolve(ctx, chat_id, g):
     if not duels or getattr(g, "sh_council_done", False):
         return
     g.sh_council_done = True
+    # 🧹 دکمه‌های «پرسش از انجمن / پایانِ نظرِ انجمن» از گروه برداشته شوند
+    _dm = getattr(g, "sh_duel_msg_id", None)
+    if _dm:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=_dm,
+                                                    reply_markup=None)
+        except Exception:
+            pass
+        g.sh_duel_msg_id = None
     members = _sh_council_seats(g)
     votes = getattr(g, "sh_council_votes", {}) or {}
     total = len(members)
@@ -12695,18 +12844,14 @@ async def _sh_council_resolve(ctx, chat_id, g):
         return
 
     lines = ["🏛 <b>اعضای انجمن موافقِ برگزاری این مبارزه‌ها بودند:</b>"]
-    seats, pairs = [], []
+    seats = []
     for i in approved:
         a, b = duels[i][0], duels[i][1]
         lines.append(f"• {a}. {escape(g.seats[a][1], quote=False)} ⚔️ "
                      f"{b}. {escape(g.seats[b][1], quote=False)}")
-        pairs.append([a, b])
         for s in (a, b):
             if s in g.seats and s not in (g.striked or set()) and s not in seats:
                 seats.append(s)
-    lines.append("\n<i>⚔️ هر دو طرفِ یک مبارزه در دفاع‌اند و به یکدیگر رأی نمی‌دهند.</i>")
-    g.sh_duel_final = pairs
-    store.save()
     await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
     await _sh_open_final_vote(ctx, chat_id, g, seats)
 
@@ -12724,8 +12869,11 @@ async def _sh_open_final_vote(ctx, chat_id, g, seats):
     g.defense_seats = list(seats)
     g.vote_type = "defense_selected"
     store.save()
+    note = ("\n⚠️ چون فقط دو نفر در رأی‌گیریِ نهایی‌اند، به یکدیگر رأی نمی‌دهند."
+            if len(seats) == 2 else
+            "\nℹ️ چون بیش از دو نفر در رأی‌گیریِ نهایی‌اند، همه به همه می‌توانند رأی بدهند.")
     await ctx.bot.send_message(
-        chat_id, f"🛡 صندلی‌های دفاع: {'، '.join(map(str, seats))}")
+        chat_id, f"🛡 صندلی‌های دفاع: {'، '.join(map(str, seats))}{note}")
     await start_vote(ctx, chat_id, g, "final")
     try:
         await publish_seating(ctx, chat_id, g, mode=CTRL)
@@ -12949,6 +13097,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ⚔️ دکمه‌های گادِ شاهنامه (در گروه) — قبل از مسیرِ اکت‌های شب
     if _q and _q.data and _q.data.startswith("shd_"):
         await handle_shahname_god_callback(update, ctx)
+        return
+
+    # 🏹 تصمیمِ کمانِ آرش (در گروه، توسطِ کمان‌دار)
+    if _q and _q.data and _q.data.startswith("sh_bw_"):
+        await handle_sh_bow_callback(update, ctx)
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
@@ -13392,6 +13545,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.sh_vote_unread = set()
             g.sh_vote_high = []
             g.sh_duels = []
+            g.sh_duel_msg_id = None
             g.sh_council_votes = {}
             g.sh_council_sel = {}
             g.sh_council_done = False
@@ -14724,6 +14878,10 @@ async def shuffle_and_assign(
     g.sh_arash_used = False
     g.sh_bow_holder = None
     g.sh_bow_aiming = None
+    g.sh_bow_pending = None
+    g.sh_bow_changed = False
+    g.sh_bow_btn_mid = None
+    g.sh_bow_token = 0
     g.sh_bow_chain = []
     g.sh_button_used = False
     g.sh_vote_active = False
@@ -14733,7 +14891,7 @@ async def shuffle_and_assign(
     g.sh_vote_kb_mid = None
     g.sh_vote_high = []
     g.sh_duels = []
-    g.sh_duel_final = []
+    g.sh_duel_msg_id = None
     g.sh_council_votes = {}
     g.sh_council_sel = {}
     g.sh_council_done = False
@@ -14979,20 +15137,28 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _bseat = _seat_of_uid(g, uid)
         if (_bseat is not None and _bseat == _sh_bow_shooter(g)
                 and _bseat not in (g.striked or set())):
-            if _nz(text) == _nz("کمان") or "🏹" in text:
-                g.sh_bow_aiming = _bseat
-                store.save()
-                try:
-                    await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
-                                         f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
-                except Exception:
-                    pass
-                return
-            if getattr(g, "sh_bow_aiming", None) == _bseat:
-                _bv = _deng_parse_strict(text, _sh_bow_targets(g))
-                if _bv is not None:
-                    await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+            # ⏸ منتظرِ دفاع و دکمه‌های تصمیم — هیچ متنی اینجا کاری نمی‌کند
+            if getattr(g, "sh_bow_pending", None) is None:
+                if _nz(text) == _nz("کمان") or "🏹" in text:
+                    g.sh_bow_aiming = _bseat
+                    store.save()
+                    try:
+                        await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
+                                             f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                    except Exception:
+                        pass
                     return
+                if getattr(g, "sh_bow_aiming", None) == _bseat:
+                    _bv = _deng_parse_strict(text, _sh_bow_targets(g))
+                    if _bv is not None:
+                        # 🏹 دفاع+تصمیم فقط برای اولین کمان‌دار و فقط یک‌بار؛
+                        #    سپردارهای بعدی و تیرِ بعد از «عوض می‌کنم» فوری‌اند
+                        if (getattr(g, "sh_bow_chain", []) or []) \
+                                or getattr(g, "sh_bow_changed", False):
+                            await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+                        else:
+                            await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
+                        return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -16297,20 +16463,28 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         _bseat = _seat_of_uid(g, uid)
         if (_bseat is not None and _bseat == _sh_bow_shooter(g)
                 and _bseat not in (g.striked or set())):
-            if _nz(text) == _nz("کمان") or "🏹" in text:
-                g.sh_bow_aiming = _bseat
-                store.save()
-                try:
-                    await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
-                                         f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
-                except Exception:
-                    pass
-                return
-            if getattr(g, "sh_bow_aiming", None) == _bseat:
-                _bv = _deng_parse_strict(text, _sh_bow_targets(g))
-                if _bv is not None:
-                    await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+            # ⏸ منتظرِ دفاع و دکمه‌های تصمیم — هیچ متنی اینجا کاری نمی‌کند
+            if getattr(g, "sh_bow_pending", None) is None:
+                if _nz(text) == _nz("کمان") or "🏹" in text:
+                    g.sh_bow_aiming = _bseat
+                    store.save()
+                    try:
+                        await msg.reply_text(f"🏹 {_bseat}. {g.seats[_bseat][1]} — "
+                                             f"به چه شخصی شلیک می‌کنی؟ (شماره‌ی صندلی)")
+                    except Exception:
+                        pass
                     return
+                if getattr(g, "sh_bow_aiming", None) == _bseat:
+                    _bv = _deng_parse_strict(text, _sh_bow_targets(g))
+                    if _bv is not None:
+                        # 🏹 دفاع+تصمیم فقط برای اولین کمان‌دار و فقط یک‌بار؛
+                        #    سپردارهای بعدی و تیرِ بعد از «عوض می‌کنم» فوری‌اند
+                        if (getattr(g, "sh_bow_chain", []) or []) \
+                                or getattr(g, "sh_bow_changed", False):
+                            await _sh_arrow_fire(ctx, msg.chat.id, g, _bseat, _bv)
+                        else:
+                            await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
+                        return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
