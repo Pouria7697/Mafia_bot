@@ -5199,6 +5199,8 @@ async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
         why = "خشمِ کاوه — شاتِ امشب کشته نگرفت"
     elif _is_shahname_scenario(g) and st in _sh_saved_seats(g):
         why = "پر سیمرغ به او رسیده بود"
+    elif _is_shahname_scenario(g) and _sh_rostam_immune(g, st):
+        why = "رستم بود و در شب نامیراست (افراسیاب هنوز نبسته‌اش)"
     elif _is_saved(g, st):
         why = "پزشک سیوش کرده بود"
     elif _armor_kind(g, st) == "rouin":
@@ -11615,12 +11617,10 @@ def _sh_saved_seats(g):
 
 
 def _sh_boof_victim(g):
-    """🪶 دارندهٔ نهاییِ پر سمی می‌میرد — فقط عضوِ اهریمن مصون است.
-
-    ⚠️ ارجحیتِ پر سیمرغ فقط در «لحظهٔ توزیع» است: اگر بوف و سیمرغ هر دو به یک نفر
-    پر داده باشند، پر بوف همان‌جا می‌سوزد (در _sh_check_open_feathers). پر سیمرغی
-    که با پاس‌دادن به کسی می‌رسد جلوی پر سمی را نمی‌گیرد."""
+    """🪶 دارندهٔ نهاییِ پر سمی می‌میرد — مگر عضوِ اهریمن باشد،
+    یا پر سیمرغ هم دستش باشد (چه مستقیم گرفته باشد چه پاس‌شده)."""
     fin = getattr(g, "sh_feather_final", {}) or {}
+    saved = _sh_saved_seats(g)
     for s, ks in fin.items():
         if "boof" not in (ks or []):
             continue
@@ -11628,8 +11628,19 @@ def _sh_boof_victim(g):
             return None
         if s in _mafia_seats(g):
             return None
+        if s in saved:
+            return None      # 🪶 پر سیمرغ سیوش می‌کند
         return s
     return None
+
+
+def _sh_rostam_immune(g, seat) -> bool:
+    """🛡 رستم در شب نامیراست — تا وقتی افراسیاب درست نبسته باشدش.
+    (پر سمی از این نامیرایی مستثناست و جدا حساب می‌شود.)"""
+    if getattr(g, "sh_afr_correct", False):
+        return False
+    ros = _sh_seat(g, _R_ROSTAM, alive_only=False)
+    return ros is not None and seat == ros
 
 
 def _sh_sync_kaveh(g):
@@ -12399,6 +12410,8 @@ async def _resolve_shahname(ctx, chat_id, g):
             await _night_report(ctx, g, "🔨 خشمِ کاوه: شاتِ امشبِ تیم اهریمن کشته نگرفت.")
         elif st in saved:
             pass                       # 🪶 پر سیمرغ
+        elif _sh_rostam_immune(g, st):
+            await _night_report(ctx, g, "🛡 رستم در شب نامیراست — شات روی او کارگر نشد.")
         else:
             dead.add(st)
             reasons[st] = "شلیک تیم اهریمن"
@@ -12430,18 +12443,24 @@ async def _sh_announce_shadow(ctx, chat_id, g):
         return
     if (getattr(g, "sh_shadow_night", None) or 0) != g.night_number:
         return
-    g.sh_shadow_announced = True
-    store.save()
     if tgt not in g.seats:
         return
     nm = escape(g.seats[tgt][1], quote=False)
     if tgt in (g.striked or set()):
-        # 🌑 هدف همان شب رفت — سایه به رستم برنمی‌گردد، فقط اعلام می‌شود
-        await ctx.bot.send_message(
-            chat_id,
-            f"🌑 <b>سایهٔ رستم روی {tgt}. {nm} بود</b> — که همان شب از بازی خارج شد.",
-            parse_mode="HTML")
+        # 🌑 هدف همان شب رفت → سایه به رستم برمی‌گردد و در گروه هیچ اعلامی نمی‌شود
+        g.sh_shadow_seat = None
+        g.sh_shadow_night = None
+        g.sh_shadow_used = False
+        g.sh_shadow_resolved = False
+        g.sh_shadow_announced = False
+        store.save()
+        await _night_report(
+            ctx, g,
+            f"🌑 هدفِ سایه ({tgt}. {nm}) همان شب از بازی خارج شد — "
+            f"سایه به رستم برگشت و چیزی در گروه اعلام نشد.")
         return
+    g.sh_shadow_announced = True
+    store.save()
     await ctx.bot.send_message(
         chat_id, f"🌑 <b>سایهٔ رستم روی {tgt}. {nm} است.</b>", parse_mode="HTML")
 
