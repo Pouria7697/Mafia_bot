@@ -201,6 +201,8 @@ class GameState:
         self.warning_mode = getattr(self, "warning_mode", False)
         self.remaining_cards = self.remaining_cards or {}
         self.votes_cast = self.votes_cast or {}
+        self.vote_logs = getattr(self, "vote_logs", {}) or {}
+        self.voted_targets = getattr(self, "voted_targets", set()) or set()
         self.pending_defense = getattr(self, "pending_defense", []) or []
         self.purchased_player = getattr(self, "purchased_player", None)
         self.purchase_pm_msg_id = getattr(self, "purchase_pm_msg_id", None)
@@ -314,6 +316,7 @@ class GameState:
         self.night_god_notified = getattr(self, "night_god_notified", False)
         self.night_kick_seat = getattr(self, "night_kick_seat", None)
         self.vote_prev_window = getattr(self, "vote_prev_window", None)
+        self.auto_vote_running = getattr(self, "auto_vote_running", False)
         self.maarefe_done = getattr(self, "maarefe_done", False)
         self.vote_bounds = getattr(self, "vote_bounds", None)
         self.vote_prev_bounds = getattr(self, "vote_prev_bounds", None)
@@ -3208,11 +3211,49 @@ def _final_vote_threshold(alive_count: int) -> int:
     return alive_count // 2
 
 
-async def _offer_auto_defense(ctx, chat_id, g):
-    """بعد از پایانِ رأی اولیه: محاسبه‌ی حدنصاب، اعلامِ واجدانِ دفاعیه و پیشنهاد ساختِ رأی نهایی."""
+def _day_speak_order(g):
+    """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) در هر روز — چرخهٔ ۴روزه:
+    روز ۱: از اولین زنده رو به پایین | روز ۲: از آخرین زنده رو به بالا
+    روز ۳: از نفرِ وسط رو به پایین    | روز ۴: از نفرِ وسط رو به بالا
+    روز ۵ دوباره مثل روز ۱. در هر حالت یک دورِ کامل می‌چرخد."""
+    alive = _alive_seats(g)
+    n = len(alive)
+    if n == 0:
+        return []
+    day = (getattr(g, "night_number", 0) or 0) + 1
+    k = ((day - 1) % 4) + 1
+    mid = (n - 1) // 2
+    start, step = {1: (0, 1), 2: (n - 1, -1), 3: (mid, 1), 4: (mid, -1)}[k]
+    return [alive[(start + step * i) % n] for i in range(n)]
+
+
+async def _announce_speak_order(ctx, chat_id, g):
+    """🗣 اعلامِ سرِ صحبتِ امروز در گروه."""
+    if not getattr(g, "assigned_roles", None) or g.phase in ("idle", "ended"):
+        return
+    order = _day_speak_order(g)
+    if not order:
+        return
+    first = order[0]
+    day = (getattr(g, "night_number", 0) or 0) + 1
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            f"🗣 <b>روز {day}</b> — سرِ صحبت: "
+            f"<b>{first}. {escape(g.seats[first][1], quote=False)}</b>\n"
+            f"ترتیب: {' ← '.join(str(s) for s in order)}",
+            parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ speak order:", e)
+
+
+async def _offer_auto_defense(ctx, chat_id, g, counts=None):
+    """بعد از پایانِ رأی اولیه: محاسبه‌ی حدنصاب، اعلامِ واجدانِ دفاعیه و پیشنهاد ساختِ رأی نهایی.
+    counts (اختیاری): شمارشِ آماده — برای رأی‌گیری از طریقِ «پل»."""
     alive = len(_alive_seats(g))
     thr = _final_vote_threshold(alive)
-    counts = {t: len(v) for t, v in (g.votes_cast or {}).items()}
+    counts = ({t: len(v) for t, v in (g.votes_cast or {}).items()}
+              if counts is None else {int(k): int(v) for k, v in counts.items()})
     order, seen = [], set()
     for t in (getattr(g, "vote_order", []) or []):
         if t not in seen and t in counts:
@@ -3746,6 +3787,23 @@ async def _finalize_final_vote(ctx, chat_id, g):
         await _d1_guess_start(ctx, g, exiter)
 
 
+def _autovote_pending(g):
+    """🤖 کسانی که هنوز ازشان رأی گرفته نشده.
+    تا وقتی خالی نشده، دکمهٔ «رأی‌گیریِ اتومات» در کیبورد می‌ماند."""
+    cands = [x for x in (g.vote_candidates or [])
+             if x in g.seats and x not in (g.striked or set())]
+    done = set(getattr(g, "voted_targets", set()) or set())
+    return [x for x in cands if x not in done]
+
+
+def _autovote_row(g, stage):
+    """ردیفِ دکمهٔ اتومات — اگر از همه رأی گرفته شده یا در حالِ اجراست، هیچ."""
+    if getattr(g, "auto_vote_running", False) or not _autovote_pending(g):
+        return []
+    cb = "autovote_initial" if stage == "initial_vote" else "autovote_final"
+    return [[InlineKeyboardButton("🤖 رأی‌گیریِ اتومات", callback_data=cb)]]
+
+
 async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     g.vote_stage = stage
     g.tally = {}
@@ -3765,9 +3823,11 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
 
     if stage == "initial_vote":
         btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_initial")])
+        btns.extend(_autovote_row(g, "initial_vote"))
         btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_initial")])
     else:  # final
         btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_final")])
+        btns.extend(_autovote_row(g, "final"))
         btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_final")])
 
     back_code = "back_vote_init" if stage == "initial_vote" else "back_vote_final"
@@ -3788,6 +3848,92 @@ async def start_vote(ctx, chat_id: int, g: GameState, stage: str):
     store.save()
 
 
+async def _finish_initial_vote(ctx, chat_id, g):
+    await ctx.bot.send_message(chat_id, "✅ رأی‌گیری اولیه تمام شد.")
+    await _offer_auto_defense(ctx, chat_id, g)   # 🧍 دفاعیه‌ی خودکار (قبل از پاک شدن آرا)
+    _score_votes_initial(g)                      # 🏅 تشخیصِ رأی اولیه (قبل از پاک شدن آرا)
+    g.votes_cast = {}
+    g.vote_logs = {}
+    g.current_vote_target = None
+    g.vote_window = None
+    g.vote_prev_window = None
+    g.vote_bounds = None
+    g.vote_prev_bounds = None
+    g.vote_has_ended_initial = True
+    g.vote_order = []
+    store.save()
+
+
+async def _finish_final_vote(ctx, chat_id, g):
+    await ctx.bot.send_message(chat_id, "✅ رأی‌گیری نهایی تمام شد.")
+    await _finalize_final_vote(ctx, chat_id, g)   # 🚪 خروج/سابقه/افتادنِ زره و شیلد
+    g.votes_cast = {}
+    g.vote_logs = {}
+    g.current_vote_target = None
+    g.vote_window = None
+    g.vote_prev_window = None
+    g.vote_bounds = None
+    g.vote_prev_bounds = None
+    g.vote_has_ended_final = True
+    g.vote_order = []
+    store.save()
+
+
+AUTO_VOTE_GAP = 2         # ⏳ مکث بینِ دو نفر در رأی‌گیریِ اتومات
+POLL_VOTE_SECONDS = 15    # ⏳ فرصتِ رأی‌دادن در حالتِ «پل»
+
+
+async def _run_auto_vote(ctx, chat_id, g, stage):
+    """🤖 رأی‌گیریِ اتومات: بات خودش به‌ترتیب از همه رأی می‌گیرد و آخرش جمع‌بندی می‌کند.
+    دیگر لازم نیست گاد روی تک‌تکِ دکمه‌ها بزند (تا نتِ ضعیفش پنجره را کوتاه نکند)."""
+    if getattr(g, "auto_vote_running", False):
+        await ctx.bot.send_message(chat_id, "⏳ رأی‌گیریِ اتومات همین الان در جریان است.")
+        return
+    cands = [s for s in (g.vote_candidates or [])
+             if s in g.seats and s not in (g.striked or set())]
+    if stage == "initial_vote":
+        order = [s for s in _day_speak_order(g) if s in cands]
+    else:
+        order = [s for s in (g.defense_seats or []) if s in cands]
+    for s in cands:                       # هرکس از قلم افتاد ته صف
+        if s not in order:
+            order.append(s)
+    done = set(getattr(g, "voted_targets", set()) or set())
+    todo = [s for s in order if s not in done]
+    if not todo:
+        await ctx.bot.send_message(chat_id, "ℹ️ از همه رأی گرفته شده — «پایان رأی‌گیری» را بزن.")
+        return
+
+    g.auto_vote_running = True
+    store.save()
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            "🤖 <b>رأی‌گیریِ اتومات شروع شد</b>\n"
+            f"ترتیب: {' ← '.join(str(s) for s in todo)}\n"
+            "<i>گاد لازم نیست دکمه بزند؛ بات خودش تا آخر می‌رود.</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⏹ توقف", callback_data="autovote_stop")]]))
+        for s in todo:
+            if g.phase in ("idle", "ended") or not getattr(g, "auto_vote_running", False):
+                await ctx.bot.send_message(chat_id, "⏹ رأی‌گیریِ اتومات متوقف شد.")
+                return
+            if s in (g.striked or set()):
+                continue
+            await handle_vote(ctx, chat_id, g, s)
+            await asyncio.sleep(AUTO_VOTE_GAP)
+    finally:
+        g.auto_vote_running = False
+        store.save()
+
+    # ✅ نفرِ آخر هم تیک خورد → خودکار جمع‌بندی
+    if stage == "initial_vote":
+        await _finish_initial_vote(ctx, chat_id, g)
+    else:
+        await _finish_final_vote(ctx, chat_id, g)
+
+
 async def update_vote_buttons(ctx, chat_id: int, g: GameState):
     btns = []
     for s in g.vote_candidates:
@@ -3797,10 +3943,12 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
 
     if g.vote_stage == "initial_vote":
         btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_initial")])
+        btns.extend(_autovote_row(g, "initial_vote"))
         btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_initial")])
         btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_init")])
     elif g.vote_stage == "final":
         btns.append([InlineKeyboardButton("🧹 پاک کردن رأی‌گیری", callback_data="clear_vote_final")])
+        btns.extend(_autovote_row(g, "final"))
         btns.append([InlineKeyboardButton("✅ پایان رأی‌گیری", callback_data="vote_done_final")])
         btns.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_vote_final")])
 
@@ -5767,6 +5915,7 @@ async def _resolve_nemayande(ctx, chat_id, g):
 
 async def _do_day(ctx, chat_id, g):
     """☀️ روز — هم برای دستورِ متنی /روز هم دکمه‌ی پنل."""
+    _started_day = bool(g.night_active or getattr(g, "maarefe_active", False))
     if g.night_active:
         await end_night(ctx, chat_id, g)
     elif getattr(g, "maarefe_active", False):
@@ -5783,6 +5932,10 @@ async def _do_day(ctx, chat_id, g):
                 pass
     else:
         await end_night(ctx, chat_id, g)
+
+    # 🗣 اعلامِ سرِ صحبتِ امروز (بعد از خط‌خوردنِ کشته‌های شب)
+    if _started_day:
+        await _announce_speak_order(ctx, chat_id, g)
 
 
 async def _do_room_open(ctx, chat_id, g):
@@ -13096,6 +13249,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # 🛠 پنلِ مدیریت (پیویِ سازندهٔ بات)
+    if _q and _q.data and _q.data.startswith("adm_"):
+        await handle_admin_panel_callback(update, ctx)
+        return
+
     # ⚔️ دکمه‌های گادِ شاهنامه (در گروه) — قبل از مسیرِ اکت‌های شب
     if _q and _q.data and _q.data.startswith("shd_"):
         await handle_shahname_god_callback(update, ctx)
@@ -14036,36 +14194,22 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if g.phase == "ended":
         return
     if data == "vote_done_initial" and uid == g.god_id:
-        await ctx.bot.send_message(chat, "✅ رأی‌گیری اولیه تمام شد.")
-        # await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست — شمارش تأیید شد، غیرفعال
-        await _offer_auto_defense(ctx, chat, g)        # 🧍 پیشنهادِ دفاعیه‌ی خودکار (قبل از پاک شدن آرا)
-        _score_votes_initial(g)                        # 🏅 تشخیصِ رأی اولیه (قبل از پاک شدن آرا)
-        g.votes_cast = {}
-        g.vote_logs = {}
-        g.current_vote_target = None
-        g.vote_window = None
-        g.vote_prev_window = None
-        g.vote_bounds = None
-        g.vote_prev_bounds = None
-        g.vote_has_ended_initial = True
-        g.vote_order = []
-        store.save()
+        await _finish_initial_vote(ctx, chat, g)
         return
 
     if data == "vote_done_final" and uid == g.god_id:
-        await ctx.bot.send_message(chat, "✅ رأی‌گیری نهایی تمام شد.")
-        # await _send_vote_timing_report(ctx, g, chat)   # 🕒 گزارش تست — شمارش تأیید شد، غیرفعال
-        await _finalize_final_vote(ctx, chat, g)       # 🚪 خروج/سابقه/افتادنِ زره و شیلد
-        g.votes_cast = {}
-        g.vote_logs = {}
-        g.current_vote_target = None
-        g.vote_window = None
-        g.vote_prev_window = None
-        g.vote_bounds = None
-        g.vote_prev_bounds = None
-        g.vote_has_ended_final = True
-        g.vote_order = []
+        await _finish_final_vote(ctx, chat, g)
+        return
+
+    if data in ("autovote_initial", "autovote_final") and uid == g.god_id:
+        await _run_auto_vote(ctx, chat, g,
+                             "initial_vote" if data == "autovote_initial" else "final")
+        return
+
+    if data == "autovote_stop" and uid == g.god_id:
+        g.auto_vote_running = False
         store.save()
+        await ctx.bot.send_message(chat, "⏹ رأی‌گیریِ اتومات بعد از همین نفر متوقف می‌شود.")
         return
 
 
@@ -14299,49 +14443,65 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
 
         alive = [s for s in sorted(g.seats) if s not in g.striked]
-        options = [f"{s}. {g.seats[s][1]}" for s in alive]
         max_per_poll = 9  # حداکثر بازیکن در هر poll (۱۰مین گزینه برای "دیدن نتایج")
 
-        # تقسیم گزینه‌ها به چند poll هر 9 نفر
-        chunks = [options[i:i + max_per_poll] for i in range(0, len(options), max_per_poll)]
-
+        # تقسیم به چند poll هر ۹ نفر — صندلی‌ها را نگه می‌داریم تا نتیجه را بخوانیم
+        chunks = [alive[i:i + max_per_poll] for i in range(0, len(alive), max_per_poll)]
         total_polls = len(chunks)
         if total_polls == 0:
             await ctx.bot.send_message(chat, "⚠️ هیچ بازیکنی برای رأی‌گیری وجود ندارد.")
             return
 
-        poll_ids = []
+        polls = []   # [(message_id, [صندلی‌های همین poll])]
 
         # --- مرحله ۱: ارسال همه pollها پشت‌سر‌هم ---
-        for idx, chunk in enumerate(chunks, start=1):
-            # افزودن گزینه‌ی نتایج برای هر poll
-            chunk.append(f"📊 دیدن نتایج ({idx}/{total_polls})")
-
+        for idx, seats_chunk in enumerate(chunks, start=1):
+            opts = [f"{s}. {g.seats[s][1]}" for s in seats_chunk]
+            opts.append(f"📊 دیدن نتایج ({idx}/{total_polls})")
             try:
                 poll_msg = await ctx.bot.send_poll(
                     chat_id=chat,
                     question=f"🗳 رأی‌گیری اولیه – بخش {idx}/{total_polls}",
-                    options=chunk,
+                    options=opts,
                     is_anonymous=False,
                     allows_multiple_answers=True
                 )
-                poll_ids.append(poll_msg.message_id)
+                polls.append((poll_msg.message_id, list(seats_chunk)))
                 g.last_poll_ids = getattr(g, "last_poll_ids", []) + [poll_msg.message_id]
                 store.save()
-
             except Exception as e:
                 print(f"❌ poll send error (part {idx}):", e)
 
-        # --- مرحله ۲: مکث برای رأی دادن، سپس بستن همه pollها ---
-        await asyncio.sleep(15)
+        # --- مرحله ۲: مکث برای رأی دادن، سپس بستن و خواندنِ نتیجه ---
+        await ctx.bot.send_message(chat, f"⏳ {POLL_VOTE_SECONDS} ثانیه فرصت دارید…")
+        await asyncio.sleep(POLL_VOTE_SECONDS)
 
-        for idx, poll_id in enumerate(poll_ids, start=1):
+        counts = {}
+        for idx, (poll_id, seats_chunk) in enumerate(polls, start=1):
             try:
-                await ctx.bot.stop_poll(chat_id=chat, message_id=poll_id)
+                p = await ctx.bot.stop_poll(chat_id=chat, message_id=poll_id)
+                for s, opt in zip(seats_chunk, list(getattr(p, "options", []) or [])):
+                    counts[s] = counts.get(s, 0) + int(getattr(opt, "voter_count", 0) or 0)
             except Exception as e:
                 print(f"⚠️ stop_poll error (part {idx}):", e)
 
-        await ctx.bot.send_message(chat, f"✅ {total_polls} رأی‌گیری بسته شد.")
+        if not counts:
+            await ctx.bot.send_message(chat, "⚠️ نتیجهٔ پل خوانده نشد — دستی بشمار.")
+            return
+
+        # 📊 گزارشِ شمارش + حدنصاب و واجدانِ دفاعیه
+        rows = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        lines = ["📊 <b>نتیجهٔ رأی‌گیری (پل)</b>:"]
+        for s, c in rows:
+            if c:
+                lines.append(f"• {s}. {escape(g.seats[s][1], quote=False)} — <b>{c}</b> رأی")
+        if len(lines) == 1:
+            lines.append("— کسی رأی نگرفت")
+        await ctx.bot.send_message(chat, "\n".join(lines), parse_mode="HTML")
+
+        g.vote_order = list(alive)
+        store.save()
+        await _offer_auto_defense(ctx, chat, g, counts=counts)
         return
 
 
@@ -15813,6 +15973,14 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ نتونستم نقش‌ها رو به پیوی گاد جدید بفرستم.")
 
 
+def _pm_keyboard(uid=None):
+    """کیبوردِ پیوی — برای سازندهٔ بات یک دکمهٔ اضافه‌ی «پنل مدیریت» هم دارد."""
+    rows = [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]]
+    if uid == ADMIN_ID:
+        rows.append(["🛠 پنل مدیریت"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
 async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """پیام خوش‌آمد برای کسانی که بات را استارت می‌کنند (پیوی)."""
     try:
@@ -15822,12 +15990,276 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "در همین پیوی انجام می‌شود.\n\n"
             "از دکمه‌های پایین استفاده کنید 👇\n\n"
             "موفق باشید! 🌙",
-            reply_markup=ReplyKeyboardMarkup(
-                [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]],
-                resize_keyboard=True, is_persistent=True)
+            reply_markup=_pm_keyboard(update.effective_user.id)
         )
     except Exception:
         pass
+
+
+# ═════════════════════════════════════════════════════════════
+#  🛠 پنلِ مدیریت (فقط سازندهٔ بات، در پیوی)
+# ═════════════════════════════════════════════════════════════
+class _AdmMsg:
+    """پیامِ ساختگی تا بشود همان تابعِ دستور را از روی دکمه صدا زد."""
+    def __init__(self, bot, uid):
+        self._bot, self._uid = bot, uid
+        self.reply_to_message = None
+        self.text = ""
+
+    async def reply_text(self, text, **kw):
+        kw.pop("reply_markup", None)
+        return await self._bot.send_message(self._uid, text, **kw)
+
+
+class _AdmUpdate:
+    def __init__(self, bot, uid):
+        self.message = _AdmMsg(bot, uid)
+        self.effective_user = type("U", (), {"id": uid})()
+        self.effective_chat = type("C", (), {"id": uid, "type": "private"})()
+
+
+class _AdmCtx:
+    def __init__(self, bot, args=None):
+        self.bot = bot
+        self.args = list(args or [])
+
+
+def _adm_panel_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 اتاق‌های مافیا", callback_data="adm_rooms"),
+         InlineKeyboardButton("🌍 گروه‌های فعال", callback_data="adm_groups")],
+        [InlineKeyboardButton("🎬 سناریوها", callback_data="adm_scen"),
+         InlineKeyboardButton("😈 نقش‌های مافیا", callback_data="adm_mafia")],
+        [InlineKeyboardButton("🕵️ نقش‌های مستقل", callback_data="adm_indep"),
+         InlineKeyboardButton("🃏 کارت‌ها", callback_data="adm_cards")],
+        [InlineKeyboardButton("📡 چنلِ آرشیو", callback_data="adm_chan"),
+         InlineKeyboardButton("🏆 وضعیتِ فصل", callback_data="adm_season")],
+        [InlineKeyboardButton("📋 لیستِ منتخب", callback_data="adm_sel"),
+         InlineKeyboardButton("🚫 محرومیت‌ها", callback_data="adm_bans")],
+        [InlineKeyboardButton("📢 ارسالِ آمار هفتگی", callback_data="adm_ask_weekly")],
+        [InlineKeyboardButton("📨 ارسالِ دعوت‌نامهٔ منتخب", callback_data="adm_ask_invite")],
+        [InlineKeyboardButton("🏁 بستنِ فصل و دادنِ مدال", callback_data="adm_ask_season")],
+        [InlineKeyboardButton("📖 دستورهایی که تایپ می‌خواهند", callback_data="adm_help")],
+    ])
+
+
+_ADM_CONFIRM = {
+    "adm_ask_weekly": ("📢 آمارِ هفتگی به <b>همهٔ گروه‌های فعال</b> فرستاده (و پین) می‌شود.",
+                       "adm_do_weekly"),
+    "adm_ask_invite": ("📨 دعوت‌نامهٔ لیستِ منتخب به پیویِ نفراتِ برتر فرستاده می‌شود.",
+                       "adm_do_invite"),
+    "adm_ask_season": ("🏁 اگر کسی به سقفِ فصل رسیده باشد، مدال‌ها ثبت، همهٔ امتیازها صفر، "
+                       "و در همهٔ گروه‌ها اعلام می‌شود. <b>این کار برگشت‌ناپذیر است.</b>",
+                       "adm_do_season"),
+}
+
+_ADM_HELP = (
+    "📖 <b>دستورهایی که باید تایپ کنی</b> (دکمه نمی‌شوند چون ورودی می‌خواهند):\n\n"
+    "<b>در پیوی:</b>\n"
+    "• <code>/sendtoall</code> — روی یک پیام ریپلای کن → به همهٔ گروه‌های فعال می‌رود و پین می‌شود\n"
+    "• <code>/channel @name</code> یا <code>/channel -100…</code> — ثبتِ چنلِ آرشیو | "
+    "<code>/channel off</code> — حذف\n"
+    "• <code>/addsticker &lt;نامِ نقش&gt;</code> — روی یک استیکر ریپلای کن\n"
+    "• <code>/leave &lt;آیدیِ گروه&gt;</code> — خروجِ بات از یک گروه\n\n"
+    "<b>در گروه:</b>\n"
+    "• <code>/active</code> / <code>/deactivate</code> — فعال/غیرفعال کردنِ گروه برای آمار\n"
+    "• <code>/addroom</code> / <code>/delroom</code> — ثبت/حذفِ گروه به‌عنوان اتاقِ چتِ مافیا\n"
+    "• <code>/addscenario</code> ، <code>/removescenario</code> — سناریو\n"
+    "• <code>/addmafia &lt;نقش&gt;</code> — افزودن به فهرستِ نقش‌های مافیا\n"
+    "• <code>/addindep &lt;سناریو&gt; &lt;نقش&gt;</code> — نقشِ مستقل\n"
+    "• <code>/addcard &lt;سناریو&gt; &lt;متن&gt;</code> — کارت (متنی است، نه عکس)\n"
+    "• <code>/newgame</code> ، <code>/resetgame</code> ، <code>/god</code> ، "
+    "<code>/sub</code> ، <code>/add</code> ، <code>/setevent</code>\n"
+    "• <code>/چک</code> — تشخیصِ سناریو و نقش‌ها (عیب‌یابی)\n\n"
+    "<b>روی پیامِ یک نفر ریپلای کن و بنویس:</b> <code>رفع محرومیت</code>"
+)
+
+
+async def _adm_send(ctx, uid, text):
+    try:
+        await ctx.bot.send_message(uid, text, parse_mode="HTML",
+                                   disable_web_page_preview=True)
+    except Exception as e:
+        print("⚠️ adm send:", e)
+
+
+async def open_admin_panel(ctx, uid):
+    await ctx.bot.send_message(
+        uid, "🛠 <b>پنلِ مدیریت</b>\nهر دکمه کارش را زیرش نوشته — کارهای اجرایی تأیید می‌خواهند.",
+        parse_mode="HTML", reply_markup=_adm_panel_kb())
+
+
+async def handle_admin_panel_callback(update, ctx):
+    q = update.callback_query
+    uid = q.from_user.id
+    if uid != ADMIN_ID:
+        await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    data = q.data
+    bot = ctx.bot
+
+    # ── تأییدِ کارهای اجرایی ──
+    if data in _ADM_CONFIRM:
+        txt, go = _ADM_CONFIRM[data]
+        await bot.send_message(
+            uid, f"⚠️ {txt}\n\nمطمئنی؟", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ بله، انجام بده", callback_data=go),
+                InlineKeyboardButton("🚫 انصراف", callback_data="adm_cancel"),
+            ]]))
+        return
+
+    if data == "adm_cancel":
+        try:
+            await bot.edit_message_text(chat_id=uid, message_id=q.message.message_id,
+                                        text="🚫 انصراف داده شد.")
+        except Exception:
+            pass
+        return
+
+    if data == "adm_do_weekly":
+        res = await broadcast_weekly_stats(bot, force=True) or {}
+        n = res.get("sent", 0)
+        await _adm_send(ctx, uid, f"📢 آمارِ هفتگی به <b>{n}</b> گروه فرستاده شد."
+                                  + (f"\nدلیلِ نفرستادن: <code>{res.get('reason')}</code>"
+                                     if not n and res.get("reason") else ""))
+        return
+
+    if data == "adm_do_invite":
+        res = await launch_selected_round(bot) or {}
+        sent = res.get("sent", []) if isinstance(res, dict) else []
+        failed = res.get("failed", []) if isinstance(res, dict) else []
+        await _adm_send(ctx, uid,
+                        f"📨 دعوت‌نامه فرستاده شد.\n✅ موفق: <b>{len(sent)}</b>"
+                        + (f"\n⚠️ ناموفق: <b>{len(failed)}</b>" if failed else ""))
+        return
+
+    if data == "adm_do_season":
+        await season_cmd(_AdmUpdate(bot, uid), _AdmCtx(bot))
+        return
+
+    # ── گزارش‌های فقط‌خواندنی ──
+    if data == "adm_rooms":
+        await rooms_status_cmd(_AdmUpdate(bot, uid), _AdmCtx(bot))
+        return
+
+    if data == "adm_sel":
+        await selected_report_cmd(_AdmUpdate(bot, uid), _AdmCtx(bot))
+        return
+
+    if data == "adm_scen":
+        await list_scenarios(_AdmUpdate(bot, uid), _AdmCtx(bot))
+        return
+
+    if data == "adm_chan":
+        ch = get_archive_channel()
+        await _adm_send(ctx, uid,
+                        f"📡 چنلِ آرشیو: <code>{escape(str(ch), quote=False)}</code>" if ch
+                        else "📡 چنلِ آرشیو ثبت نشده.\nبا <code>/channel @name</code> ثبتش کن.")
+        return
+
+    if data == "adm_groups":
+        gs_ = sorted(store.active_groups or [])
+        if not gs_:
+            await _adm_send(ctx, uid, "🌍 هیچ گروهِ فعالی ثبت نشده.")
+            return
+        lines = [f"🌍 <b>گروه‌های فعال ({len(gs_)})</b>:"]
+        for cid in gs_:
+            try:
+                ch = await bot.get_chat(cid)
+                nm = escape(ch.title or str(cid), quote=False)
+            except Exception:
+                nm = "—"
+            lines.append(f"• <code>{cid}</code> — {nm}")
+        await _adm_send(ctx, uid, "\n".join(lines))
+        return
+
+    if data == "adm_mafia":
+        roles = sorted(load_mafia_roles() or [])
+        await _adm_send(ctx, uid,
+                        ("😈 <b>نقش‌های مافیا</b>:\n" + "\n".join(f"• {escape(r, quote=False)}"
+                                                                  for r in roles))
+                        if roles else "😈 فهرستِ نقش‌های مافیا خالی است.")
+        return
+
+    if data == "adm_indep":
+        d = load_indep_roles() or {}
+        if not d:
+            await _adm_send(ctx, uid, "🕵️ هیچ نقشِ مستقلی ثبت نشده.")
+            return
+        lines = ["🕵️ <b>نقش‌های مستقل</b>:"]
+        for scn, rs in d.items():
+            lines.append(f"• <b>{escape(str(scn), quote=False)}</b>: "
+                         + "، ".join(escape(str(r), quote=False) for r in (rs or [])))
+        await _adm_send(ctx, uid, "\n".join(lines))
+        return
+
+    if data == "adm_cards":
+        d = load_cards() or {}
+        if not d:
+            await _adm_send(ctx, uid, "🃏 هیچ کارتی ثبت نشده.")
+            return
+        lines = ["🃏 <b>کارت‌ها</b> (متنی):"]
+        for scn, cs in d.items():
+            lines.append(f"• <b>{escape(str(scn), quote=False)}</b> — {len(cs or [])} کارت")
+        await _adm_send(ctx, uid, "\n".join(lines))
+        return
+
+    if data == "adm_season":
+        stats = load_player_stats()
+        if stats is None:
+            await _adm_send(ctx, uid, "⚠️ آمار خوانده نشد (خطای جیست) — دوباره بزن.")
+            return
+        rows = sorted(((_season_total(d), d.get("name", "بازیکن"))
+                       for d in stats.values()), reverse=True)[:5]
+        lines = [f"🏆 <b>وضعیتِ فصل</b> — سقف: <b>{int(SEASON_TARGET)}</b>", ""]
+        for i, (pts, nm) in enumerate(rows, 1):
+            lines.append(f"{i}. {escape(str(nm), quote=False)} — <b>{pts:.0f}</b>")
+        if rows:
+            lines.append("")
+            lines.append("✅ کسی به سقف رسیده — با «🏁 بستنِ فصل» ببندش."
+                         if rows[0][0] >= SEASON_TARGET
+                         else f"⏳ تا سقف: <b>{SEASON_TARGET - rows[0][0]:.0f}</b> امتیاز")
+        await _adm_send(ctx, uid, "\n".join(lines))
+        return
+
+    if data == "adm_bans":
+        bans = load_god_bans()
+        if bans is None:
+            await _adm_send(ctx, uid, "⚠️ فهرستِ محرومیت‌ها خوانده نشد (خطای جیست) — دوباره بزن.")
+            return
+        stats = load_player_stats() or {}
+        now = datetime.now(timezone.utc).timestamp()
+
+        def _nm(k):
+            return escape(str((stats.get(str(k)) or {}).get("name") or k), quote=False)
+
+        gods = bans.get("banned") or {}
+        seats = {k: v for k, v in (bans.get("seats") or {}).items()
+                 if float((v or {}).get("until", 0) or 0) > now}
+        lines = ["🚫 <b>محرومیت‌ها</b>", ""]
+        lines.append(f"🎩 <b>محرومِ گاد شدن ({len(gods)})</b>:")
+        for k, v in list(gods.items())[:30]:
+            why = v.get("reason") if isinstance(v, dict) else v
+            lines.append(f"• {_nm(k)} — {escape(str(why), quote=False)}")
+        if not gods:
+            lines.append("— کسی نیست")
+        lines.append("")
+        lines.append(f"👢 <b>محرومِ نشستن ({len(seats)})</b>:")
+        for k, v in list(seats.items())[:30]:
+            left = max(0, (float(v.get("until", 0) or 0) - now) / 86400)
+            lines.append(f"• {_nm(k)} — {left:.1f} روزِ دیگر")
+        if not seats:
+            lines.append("— کسی نیست")
+        lines.append("")
+        lines.append("<i>برای رفعش، روی پیامِ طرف ریپلای کن و بنویس «رفع محرومیت».</i>")
+        await _adm_send(ctx, uid, "\n".join(lines))
+        return
+
+    if data == "adm_help":
+        await _adm_send(ctx, uid, _ADM_HELP)
+        return
 
 
 async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -15837,6 +16269,11 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = msg.text.strip()
     uid = msg.from_user.id
+    # 🛠 پنلِ مدیریت (فقط سازندهٔ بات)
+    if text.endswith("پنل مدیریت"):
+        if uid == ADMIN_ID:
+            await open_admin_panel(ctx, uid)
+        return
     # دکمه‌های کیبورد ایموجی دارند («📊 آمار من») → تطبیقِ پسوندی
     if text.endswith("آمار من"):
         stats = load_player_stats() or {}
