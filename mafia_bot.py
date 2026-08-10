@@ -5199,8 +5199,6 @@ async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
         why = "خشمِ کاوه — شاتِ امشب کشته نگرفت"
     elif _is_shahname_scenario(g) and st in _sh_saved_seats(g):
         why = "پر سیمرغ به او رسیده بود"
-    elif _is_shahname_scenario(g) and _sh_rostam_immune(g, st):
-        why = "رستم بود و در شب نامیراست (افراسیاب هنوز نبسته‌اش)"
     elif _is_saved(g, st):
         why = "پزشک سیوش کرده بود"
     elif _armor_kind(g, st) == "rouin":
@@ -10207,16 +10205,12 @@ async def handle_kapu_callback(update, ctx):
 
 
 def _kp_yakuza_recruit_targets(g):
-    out = []
-    for s in _alive_seats(g):
-        if s in _mafia_seats(g, alive_only=True):
-            continue
-        rn = _seat_role_norm(g, s)
-        if rn in _R_CITIZEN or rn == _R_SUSPECT:
-            if s == g.heir_seat and g.heir_no_yakuza:
-                continue
-            out.append(s)
-    return out
+    """🥷 همهٔ زنده‌های غیرِمافیا — دقیقاً مثلِ بازپرس.
+
+    ⚠️ این فهرست نباید فیلتر شود: اگر فقط «قابلِ جذب‌ها» را نشان بدهیم، دن از روی
+    بود‌ونبودِ اسم‌ها می‌فهمد چه کسانی نقش‌دارند. موفق/ناموفق بودنِ جذب موقعِ
+    تأیید (kp_yakrec_confirm) تعیین می‌شود، نه با پنهان‌کردنِ گزینه‌ها."""
+    return [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
 
 
 async def _kp_broadcast_jalad(ctx, g):
@@ -11634,15 +11628,6 @@ def _sh_boof_victim(g):
     return None
 
 
-def _sh_rostam_immune(g, seat) -> bool:
-    """🛡 رستم در شب نامیراست — تا وقتی افراسیاب درست نبسته باشدش.
-    (پر سمی از این نامیرایی مستثناست و جدا حساب می‌شود.)"""
-    if getattr(g, "sh_afr_correct", False):
-        return False
-    ros = _sh_seat(g, _R_ROSTAM, alive_only=False)
-    return ros is not None and seat == ros
-
-
 def _sh_sync_kaveh(g):
     """🔨 لحظهٔ خروجِ کاوه را ثبت می‌کند تا شبِ بعدش شاتِ اهریمن کشته نگیرد."""
     kv = _sh_seat(g, _R_KAVEH, alive_only=False)
@@ -12410,8 +12395,6 @@ async def _resolve_shahname(ctx, chat_id, g):
             await _night_report(ctx, g, "🔨 خشمِ کاوه: شاتِ امشبِ تیم اهریمن کشته نگرفت.")
         elif st in saved:
             pass                       # 🪶 پر سیمرغ
-        elif _sh_rostam_immune(g, st):
-            await _night_report(ctx, g, "🛡 رستم در شب نامیراست — شات روی او کارگر نشد.")
         else:
             dead.add(st)
             reasons[st] = "شلیک تیم اهریمن"
