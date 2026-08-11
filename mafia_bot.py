@@ -3880,6 +3880,10 @@ async def _finish_final_vote(ctx, chat_id, g):
 
 
 AUTO_VOTE_GAP = 3         # ⏳ مکثِ ساکت بینِ دو نفر در رأی‌گیریِ اتومات
+# ⏳ بعد از نفرِ آخر، قبل از شمارش. رأی با «ساعتِ ارسال» ثبت می‌شود ولی فقط وقتی
+#    به بات برسد؛ در حالتِ دستی گاد چند ثانیه بعد «پایان» را می‌زند و رأی‌های
+#    در راه می‌رسند. اتومات چون بلافاصله می‌شمرد، آن‌ها را جا می‌گذاشت.
+AUTO_VOTE_SETTLE = 6
 POLL_VOTE_SECONDS = 15    # ⏳ فرصتِ رأی‌دادن در حالتِ «پل»
 
 
@@ -3918,7 +3922,10 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⏹ توقف", callback_data="autovote_stop")]]))
         panel_mid = _m.message_id
-        for i, s in enumerate(todo):
+        for s in todo:
+            # ⏳ مهلتِ ساکت پیش از هر نفر — شاملِ نفرِ اول، تا بعدِ زدنِ دکمه
+            #    یکهو شروع نشود. هیچ پیامی نوشته نمی‌شود.
+            await asyncio.sleep(AUTO_VOTE_GAP)
             if g.phase in ("idle", "ended") or not getattr(g, "auto_vote_running", False):
                 await ctx.bot.send_message(chat_id, "⏹ رأی‌گیریِ اتومات متوقف شد.")
                 stopped = True
@@ -3927,9 +3934,6 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
                 continue
             # 🔇 کیبورد وسطِ کار به‌روز نمی‌شود تا سقفِ پیامِ تلگرام پُر نشود
             await handle_vote(ctx, chat_id, g, s, refresh_buttons=False)
-            # ⏳ مهلتِ ساکت تا نفرِ بعدی (هیچ پیامی نوشته نمی‌شود)
-            if i < len(todo) - 1:
-                await asyncio.sleep(AUTO_VOTE_GAP)
     finally:
         g.auto_vote_running = False
         store.save()
@@ -3950,6 +3954,20 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
 
     if stopped:
         return
+
+    # ⏳ فرصت به رأی‌های در راه تا برسند، بعد شمارش
+    try:
+        await ctx.bot.send_message(chat_id, "⏳ چند لحظه — رأی‌های دیررسیده هم شمرده می‌شوند…")
+    except Exception:
+        pass
+    await asyncio.sleep(AUTO_VOTE_SETTLE)
+
+    # 🕒 گزارشِ زمان‌بندیِ رأی‌ها به پیویِ سازندهٔ بات (برای عیب‌یابیِ شمارش)
+    try:
+        await _send_vote_timing_report(ctx, g, chat_id)
+    except Exception as e:
+        print("⚠️ vote timing report:", e)
+
     # ✅ نفرِ آخر هم تیک خورد → خودکار جمع‌بندی
     if stage == "initial_vote":
         await _finish_initial_vote(ctx, chat_id, g)
@@ -4842,14 +4860,9 @@ async def start_night(ctx, chat_id, g):
     is_kp = _is_kapu_scenario(g)
     is_gm = _is_gamer_scenario(g)
     is_sh = _is_shahname_scenario(g)
-    if not (is_neg or is_bzp or is_nem or is_tk or is_kp or is_gm or is_sh):
-        sc = getattr(g, "scenario", None)
-        await ctx.bot.send_message(
-            chat_id,
-            f"ℹ️ اکت خودکار برای سناریو «{escape(sc.name if sc else '—', quote=False)}» فعال نشد — "
-            f"نامش با هیچ سناریوی خودکاری نمی‌خواند. با /چک بررسی کن.",
-            parse_mode="HTML")
-        return
+    # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
+    #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
+    is_manual = not (is_neg or is_bzp or is_nem or is_tk or is_kp or is_gm or is_sh)
     # فازهای رأی‌گیریِ روز هم قابل قبول‌اند؛ فقط قبل از شروع/بعد از پایان بازی رد می‌شود
     if g.phase in ("idle", "ended", "awaiting_winner") or not getattr(g, "assigned_roles", None):
         await ctx.bot.send_message(chat_id, "⛔ ابتدا باید بازی شروع شده باشد.")
@@ -4983,24 +4996,33 @@ async def start_night(ctx, chat_id, g):
     store.save()
 
     god_link = f"<a href='tg://user?id={g.god_id}'>{escape(g.god_name or 'گاد', quote=False)}</a>"
+    if is_manual:
+        _body = f"اکت خود را در پیویِ گاد بدهید: {god_link}"
+    else:
+        _body = ("اکت خود را در پیوی بات انجام دهید (دکمه‌ها برایتان ارسال شد).\n"
+                 f"در صورت مشکل، اکت خود را به پیوی گاد بفرستید: {god_link}")
     await ctx.bot.send_message(
-        chat_id,
-        f"🌙 <b>شب {g.night_number} شروع شد.</b>\n"
-        f"اکت خود را در پیوی بات انجام دهید (دکمه‌ها برایتان ارسال شد).\n"
-        f"در صورت مشکل، اکت خود را به پیوی گاد بفرستید: {god_link}",
-        parse_mode="HTML",
-    )
+        chat_id, f"🌙 <b>شب {g.night_number} شروع شد.</b>\n{_body}", parse_mode="HTML")
     await _night_report(ctx, g, f"━━━━━━━━━━━━\n🌙 <b>شب {g.night_number}</b>")
 
     try:
         # 🔗 اتاق مافیا: باز کردن چت + حذف مافیای مرده + لینکِ معوقِ مذاکره
         await _room_sync_on_night(ctx, g)
         # ⚠️ هشدار درباره بازیکن‌هایی که بات را استارت نکرده‌اند
-        await _report_unreachable(ctx, chat_id, g)
+        #    (در سناریوی دستی بی‌معناست — بات اصلاً پرامپتی نمی‌فرستد)
+        if not is_manual:
+            await _report_unreachable(ctx, chat_id, g)
 
         # 👢 کیکِ شب دیگر پرسیده نمی‌شود — دکمه‌اش در پنلِ گاد همیشه در دسترس است
 
-        if is_neg:
+        if is_manual:
+            g.night_stage = "manual"
+            store.save()
+            await _night_report(
+                ctx, g,
+                "✋ این سناریو موتورِ اکتِ خودکار ندارد — اکت‌ها را خودت در پیوی بگیر.\n"
+                "هر وقت تمام شد «☀️ روز» را بزن.")
+        elif is_neg:
             g.night_stage = "mafia_decision"
             store.save()
             await _night_open_mafia_decision(ctx, chat_id, g)
@@ -5701,6 +5723,20 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_gamer(ctx, chat_id, g)
     elif _is_shahname_scenario(g):
         await _resolve_shahname(ctx, chat_id, g)
+    else:
+        await _resolve_manual(ctx, chat_id, g)
+
+
+async def _resolve_manual(ctx, chat_id, g):
+    """✋ سناریوی بدونِ موتورِ خودکار: بات ادعایی دربارهٔ کشته‌ها نمی‌کند —
+    خطِ روی اسم‌ها با خودِ گاد است. فقط «کیکِ شب» اگر ثبت شده باشد اعمال می‌شود."""
+    dead, reasons = set(), {}
+    _add_night_kick(g, dead, reasons)
+    if dead:
+        await _apply_deaths(ctx, chat_id, g, dead, reasons)
+    else:
+        await _night_report(ctx, g, "✋ اکتِ خودکاری نبود — کشته‌های شب را خودت خط بزن.")
+    await _check_auto_end(ctx, chat_id, g, after_night=True)   # 🏁
 
 
 async def _resolve_gamer(ctx, chat_id, g):
