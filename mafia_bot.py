@@ -3879,7 +3879,7 @@ async def _finish_final_vote(ctx, chat_id, g):
     store.save()
 
 
-AUTO_VOTE_GAP = 2         # ⏳ مکث بینِ دو نفر در رأی‌گیریِ اتومات
+AUTO_VOTE_GAP = 3         # ⏳ مکثِ ساکت بینِ دو نفر در رأی‌گیریِ اتومات
 POLL_VOTE_SECONDS = 15    # ⏳ فرصتِ رأی‌دادن در حالتِ «پل»
 
 
@@ -3906,8 +3906,10 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
 
     g.auto_vote_running = True
     store.save()
+    panel_mid = None
+    stopped = False
     try:
-        await ctx.bot.send_message(
+        _m = await ctx.bot.send_message(
             chat_id,
             "🤖 <b>رأی‌گیریِ اتومات شروع شد</b>\n"
             f"ترتیب: {' ← '.join(str(s) for s in todo)}\n"
@@ -3915,18 +3917,39 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⏹ توقف", callback_data="autovote_stop")]]))
-        for s in todo:
+        panel_mid = _m.message_id
+        for i, s in enumerate(todo):
             if g.phase in ("idle", "ended") or not getattr(g, "auto_vote_running", False):
                 await ctx.bot.send_message(chat_id, "⏹ رأی‌گیریِ اتومات متوقف شد.")
+                stopped = True
                 return
             if s in (g.striked or set()):
                 continue
-            await handle_vote(ctx, chat_id, g, s)
-            await asyncio.sleep(AUTO_VOTE_GAP)
+            # 🔇 کیبورد وسطِ کار به‌روز نمی‌شود تا سقفِ پیامِ تلگرام پُر نشود
+            await handle_vote(ctx, chat_id, g, s, refresh_buttons=False)
+            # ⏳ مهلتِ ساکت تا نفرِ بعدی (هیچ پیامی نوشته نمی‌شود)
+            if i < len(todo) - 1:
+                await asyncio.sleep(AUTO_VOTE_GAP)
     finally:
         g.auto_vote_running = False
         store.save()
+        # 🧹 پیامِ «شروع شد» با دکمهٔ توقف دیگر لازم نیست
+        if panel_mid:
+            try:
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=panel_mid)
+            except Exception:
+                try:
+                    await ctx.bot.edit_message_reply_markup(
+                        chat_id=chat_id, message_id=panel_mid, reply_markup=None)
+                except Exception:
+                    pass
+        try:
+            await update_vote_buttons(ctx, chat_id, g)   # یک‌بار، در پایان
+        except Exception:
+            pass
 
+    if stopped:
+        return
     # ✅ نفرِ آخر هم تیک خورد → خودکار جمع‌بندی
     if stage == "initial_vote":
         await _finish_initial_vote(ctx, chat_id, g)
@@ -3962,7 +3985,8 @@ async def update_vote_buttons(ctx, chat_id: int, g: GameState):
         pass
 
 
-async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
+async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int,
+                      refresh_buttons: bool = True):
     g.current_vote_target = target_seat
 
     g.vote_collecting = True
@@ -4028,7 +4052,10 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int):
         g.last_vote_msg_id_final = end_msg.message_id
 
     g.voted_targets.add(target_seat)
-    await update_vote_buttons(ctx, chat_id, g)
+    # ⏱ در رأی‌گیریِ اتومات کیبورد هر دور به‌روز نمی‌شود — یک درخواستِ کمتر
+    # در هر نوبت یعنی تلگرام دیرتر محدودمان می‌کند و پیام‌ها عقب نمی‌افتند
+    if refresh_buttons:
+        await update_vote_buttons(ctx, chat_id, g)
     store.save()
 
 
@@ -17899,7 +17926,8 @@ async def main():
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT
-            & filters.Regex(r"^\s*(?:\S+\s+)?(آمار من|آمار کل|آمار هفتگی|بازی من)\s*$"),
+            & filters.Regex(
+                r"^\s*(?:\S+\s+)?(آمار من|آمار کل|آمار هفتگی|بازی من|پنل مدیریت)\s*$"),
             handle_stats_pm
         )
     )
