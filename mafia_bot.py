@@ -2556,10 +2556,13 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
     ])
 
     # 🌙 دکمه‌های شب/روز/معارفه (به‌جای دستورهای متنی)
+    # 🎭 تا معارفه انجام نشده، «شب» اصلاً نمایش داده نمی‌شود و جایش معارفه است —
+    #    وگرنه گاد اشتباهی شب را می‌زند و معارفه رد می‌شود.
     night_row = []
     if not getattr(g, "maarefe_done", False):
         night_row.append(InlineKeyboardButton("🎭 معارفه", callback_data="ctl_maarefe"))
-    night_row.append(InlineKeyboardButton("🌙 شب", callback_data="ctl_night"))
+    else:
+        night_row.append(InlineKeyboardButton("🌙 شب", callback_data="ctl_night"))
     night_row.append(InlineKeyboardButton("☀️ روز", callback_data="ctl_day"))
     night_row.append(InlineKeyboardButton("👢 کیک", callback_data="ctl_kick"))
     rows.append(night_row)
@@ -3211,20 +3214,34 @@ def _final_vote_threshold(alive_count: int) -> int:
     return alive_count // 2
 
 
+SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳ از صندلی ۵ به سمتِ ۱
+SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴ از صندلی ۶ به سمتِ ۱۰
+
+
 def _day_speak_order(g):
-    """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) در هر روز — چرخهٔ ۴روزه:
+    """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) — چرخهٔ ۴روزه، بعدش ریست:
     روز ۱: از اولین زنده رو به پایین | روز ۲: از آخرین زنده رو به بالا
-    روز ۳: از نفرِ وسط رو به پایین    | روز ۴: از نفرِ وسط رو به بالا
-    روز ۵ دوباره مثل روز ۱. در هر حالت یک دورِ کامل می‌چرخد."""
+    روز ۳: از صندلی ۵ رو به بالا      | روز ۴: از صندلی ۶ رو به پایین
+    اگر خودِ آن صندلی زنده نباشد، نزدیک‌ترین زنده در همان جهت جایش را می‌گیرد.
+    در هر حالت یک دورِ کامل می‌چرخد و به نفرِ پشتِ سرِ شروع‌کننده ختم می‌شود."""
     alive = _alive_seats(g)
     n = len(alive)
     if n == 0:
         return []
     day = (getattr(g, "night_number", 0) or 0) + 1
     k = ((day - 1) % 4) + 1
-    mid = (n - 1) // 2
-    start, step = {1: (0, 1), 2: (n - 1, -1), 3: (mid, 1), 4: (mid, -1)}[k]
-    return [alive[(start + step * i) % n] for i in range(n)]
+    if k == 1:
+        start_seat, step = alive[0], 1
+    elif k == 2:
+        start_seat, step = alive[-1], -1
+    elif k == 3:
+        step = -1
+        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D3), alive[-1])
+    else:
+        step = 1
+        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D4), alive[0])
+    i = alive.index(start_seat)
+    return [alive[(i + step * j) % n] for j in range(n)]
 
 
 async def _announce_speak_order(ctx, chat_id, g):
@@ -3796,8 +3813,15 @@ def _autovote_pending(g):
     return [x for x in cands if x not in done]
 
 
+AUTOVOTE_SEATS = 10      # 🤖 رأی‌گیریِ اتومات فقط برای بازیِ ۱۰نفره
+
+
 def _autovote_row(g, stage):
-    """ردیفِ دکمهٔ اتومات — اگر از همه رأی گرفته شده یا در حالِ اجراست، هیچ."""
+    """ردیفِ دکمهٔ اتومات — اگر از همه رأی گرفته شده، در حالِ اجراست،
+    یا ظرفیتِ سناریو ۱۰ نیست، هیچ (ترتیبِ سرِ صحبت برای ۱۰ نفر تعریف شده).
+    ملاک «ظرفیتِ سناریو»ست نه تعدادِ زنده‌ها — با مردنِ چند نفر دکمه نمی‌رود."""
+    if int(getattr(g, "max_seats", 0) or len(g.seats or {})) != AUTOVOTE_SEATS:
+        return []
     if getattr(g, "auto_vote_running", False) or not _autovote_pending(g):
         return []
     cb = "autovote_initial" if stage == "initial_vote" else "autovote_final"
@@ -14265,8 +14289,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data in ("autovote_initial", "autovote_final") and uid == g.god_id:
-        await _run_auto_vote(ctx, chat, g,
-                             "initial_vote" if data == "autovote_initial" else "final")
+        # ⚠️ حتماً در پس‌زمینه: تلگرام‌بات آپدیت‌ها را پشتِ‌سرِ‌هم پردازش می‌کند، پس اگر
+        #    این هندلر ۷۰ ثانیه طول بکشد، پیامِ رأیِ هیچ بازیکنی تا آخرِ کار خوانده
+        #    نمی‌شود و شمارش خالی درمی‌آید. با create_task هندلر فوراً برمی‌گردد.
+        asyncio.create_task(_run_auto_vote(
+            ctx, chat, g, "initial_vote" if data == "autovote_initial" else "final"))
         return
 
     if data == "autovote_stop" and uid == g.god_id:
