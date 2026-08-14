@@ -3214,14 +3214,14 @@ def _final_vote_threshold(alive_count: int) -> int:
     return alive_count // 2
 
 
-SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳ از صندلی ۵ به سمتِ ۱
-SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴ از صندلی ۶ به سمتِ ۱۰
+SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳ از صندلی ۵ به سمتِ ۱۰
+SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴ از صندلی ۶ به سمتِ ۱
 
 
 def _day_speak_order(g):
     """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) — چرخهٔ ۴روزه، بعدش ریست:
     روز ۱: از اولین زنده رو به پایین | روز ۲: از آخرین زنده رو به بالا
-    روز ۳: از صندلی ۵ رو به بالا      | روز ۴: از صندلی ۶ رو به پایین
+    روز ۳: از صندلی ۵ رو به پایین     | روز ۴: از صندلی ۶ رو به بالا
     اگر خودِ آن صندلی زنده نباشد، نزدیک‌ترین زنده در همان جهت جایش را می‌گیرد.
     در هر حالت یک دورِ کامل می‌چرخد و به نفرِ پشتِ سرِ شروع‌کننده ختم می‌شود."""
     alive = _alive_seats(g)
@@ -3235,11 +3235,11 @@ def _day_speak_order(g):
     elif k == 2:
         start_seat, step = alive[-1], -1
     elif k == 3:
-        step = -1
-        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D3), alive[-1])
-    else:
         step = 1
-        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D4), alive[0])
+        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D3), alive[0])
+    else:
+        step = -1
+        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D4), alive[-1])
     i = alive.index(start_seat)
     return [alive[(i + step * j) % n] for j in range(n)]
 
@@ -11832,6 +11832,11 @@ def _sh_seat(g, key, alive_only=True):
     return _find_seat_role_sub(g, key, alive_only=alive_only)
 
 
+def _sh_burned(g, seat) -> bool:
+    """🔥 اکتِ این صندلی را گاد سوزانده؟ (نقشش هست ولی امشب اکتی ندارد)"""
+    return seat is not None and seat in (getattr(g, "night_burned", set()) or set())
+
+
 def _sh_shadow_positive(g, seat) -> bool:
     """🌑 استعلامِ سایه: سیمرغ، بوف، افراسیاب مثبت‌اند."""
     rn = _seat_role_norm(g, seat)
@@ -11918,7 +11923,7 @@ async def _sh_start(ctx, chat_id, g):
 
 async def _sh_open_kaveh(ctx, chat_id, g):
     kv = _sh_seat(g, _R_KAVEH)
-    if kv is None or getattr(g, "sh_kaveh_used", False):
+    if kv is None or getattr(g, "sh_kaveh_used", False) or _sh_burned(g, kv):
         g.night_done.add("kaveh")
         store.save()
         await _sh_check_open_mafia(ctx, chat_id, g)
@@ -12049,11 +12054,13 @@ async def _sh_check_open_mafia(ctx, chat_id, g):
     zah  = _sh_seat(g, _R_ZAHHAK)
     boof = _sh_seat(g, _R_BOOF)
     afr  = _sh_seat(g, _R_AFRASIAB)
-    decider = zah or boof or afr           # ترتیبِ شات: ضحاک → بوف → افراسیاب
+    # ترتیبِ شات: ضحاک → بوف → افراسیاب (سوخته‌ها رد می‌شوند)
+    decider = next((x for x in (zah, boof, afr) if x and not _sh_burned(g, x)), None)
     if not decider:
         for _s in sorted(_mafia_seats(g, alive_only=True)):
-            decider = _s
-            break
+            if not _sh_burned(g, _s):
+                decider = _s
+                break
     if not decider:
         g.night_done.add("mafia")
         store.save()
@@ -12071,7 +12078,8 @@ async def _sh_check_open_mafia(ctx, chat_id, g):
 def _sh_dark_kb(g):
     rows = [[InlineKeyboardButton("🔫 شات", callback_data="sh_act_shot")]]
     boof = _sh_seat(g, _R_BOOF)
-    if boof is not None and not getattr(g, "sh_boof_used", False):
+    # 🪶 بوفِ سوخته/مرده گزینه‌ای ندارد، وگرنه شب پشتِ پرامپتِ بی‌جواب گیر می‌کند
+    if boof is not None and not getattr(g, "sh_boof_used", False) and not _sh_burned(g, boof):
         rows.append([InlineKeyboardButton("🪶 پر بوف", callback_data="sh_act_boof")])
     return InlineKeyboardMarkup(rows)
 
@@ -12085,7 +12093,8 @@ async def _sh_check_open_mid(ctx, chat_id, g):
     g.night_done.add("sh_mid_opened")
     store.save()
     afr = _sh_seat(g, _R_AFRASIAB)
-    if g.night_number == 1 and afr is not None and not getattr(g, "sh_afr_used", False):
+    if (g.night_number == 1 and afr is not None
+            and not getattr(g, "sh_afr_used", False) and not _sh_burned(g, afr)):
         auid = g.seats[afr][0]
         m = await _safe_pm(ctx, auid, "🛡 سپرت را به چه کسی می‌دهی؟",
                            _kb_night_seats(_sh_sel_targets(g, "sh_afs_", afr), g, "sh_afs_",
@@ -12102,7 +12111,7 @@ async def _sh_check_open_mid(ctx, chat_id, g):
 async def _sh_open_simorgh(ctx, chat_id, g):
     sim = _sh_seat(g, _R_SIMORGH)
     left = int(getattr(g, "sh_simorgh_left", 0) or 0)
-    if sim is None or left <= 0:
+    if sim is None or left <= 0 or _sh_burned(g, sim):
         g.night_done.add("simorgh")
         store.save()
         await _sh_check_open_feathers(ctx, chat_id, g)
@@ -12155,6 +12164,7 @@ async def _sh_check_open_feathers(ctx, chat_id, g):
                 ctx, g,
                 f"🪶 هر دو پر به {s}. {escape(g.seats[s][1], quote=False)} رسید — "
                 f"پر سیمرغ ماند و پر بوف سوخت.")
+    owners = {s: k for s, k in owners.items() if not _sh_burned(g, s)}
     g.sh_feather_own = {s: list(k) for s, k in owners.items()}
     g.sh_feather_wait = set(owners.keys())
     store.save()
@@ -12207,7 +12217,7 @@ async def _sh_check_open_late(ctx, chat_id, g):
     store.save()
 
     ros = _sh_seat(g, _R_ROSTAM)
-    if ros is not None and not getattr(g, "sh_shadow_used", False):
+    if ros is not None and not getattr(g, "sh_shadow_used", False) and not _sh_burned(g, ros):
         ruid = g.seats[ros][0]
         kb = _kb_night_seats(_sh_sel_targets(g, "sh_ros_", ros), g, "sh_ros_",
                              selected=g.night_sel.get(ruid), confirm_cb="sh_ros_confirm")
@@ -12220,7 +12230,7 @@ async def _sh_check_open_late(ctx, chat_id, g):
         g.night_done.add("rostam")
 
     jam = _sh_seat(g, _R_JAMASB)
-    if jam is not None:
+    if jam is not None and not _sh_burned(g, jam):
         juid = g.seats[jam][0]
         if not getattr(g, "sh_blood_used", False):
             kb = InlineKeyboardMarkup([[
@@ -12237,7 +12247,8 @@ async def _sh_check_open_late(ctx, chat_id, g):
         g.night_done.add("jamasb")
 
     ar = _sh_seat(g, _R_ARASH)
-    if g.night_number == 1 and ar is not None and not getattr(g, "sh_arash_used", False):
+    if (g.night_number == 1 and ar is not None
+            and not getattr(g, "sh_arash_used", False) and not _sh_burned(g, ar)):
         auid = g.seats[ar][0]
         m = await _safe_pm(ctx, auid, "🏹 تیر و کمانت را به چه کسی می‌دهی؟",
                            _kb_night_seats(_sh_sel_targets(g, "sh_ar_", ar), g, "sh_ar_",
@@ -12294,6 +12305,10 @@ async def handle_shahname_callback(update, ctx):
         if uid in (getattr(g, "sh_council_votes", {}) or {}):
             await _close_pm(ctx, uid, mid, "🏛 نظرت قبلاً ثبت شده و قابلِ تغییر نیست.")
             return
+        # ⏰ بعد از جمع‌بندی دیگر رأی پذیرفته نمی‌شود
+        if getattr(g, "sh_council_done", False):
+            await _close_pm(ctx, uid, mid, "⏰ نظرگیریِ انجمن تمام شده — دیر شد.")
+            return
 
     if data == "sh_cd_ok":
         sel = sorted(set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or []))
@@ -12305,10 +12320,14 @@ async def handle_shahname_callback(update, ctx):
         rn = (g.assigned_roles or {}).get(me, "—")
         parts = [("موافقِ " if i in sel else "مخالفِ ") + _sh_duel_label(g, d)
                  for i, d in enumerate(getattr(g, "sh_duels", []) or [])]
+        _miss = _sh_council_missing(g)
+        _left = ("— همه جواب دادند ✅" if not _miss else
+                 "— مانده: " + "، ".join(f"{x}. {escape(g.seats[x][1], quote=False)}"
+                                          for x in _miss))
         await _night_report(
             ctx, g,
             f"🏛 {escape(str(rn), quote=False)} ({me}. {escape(g.seats[me][1], quote=False)}): "
-            + "، ".join(parts))
+            + "، ".join(parts) + f"\n{_left}")
         return
 
     if data.startswith("sh_cd_"):
@@ -13047,17 +13066,61 @@ async def _sh_council_ask(ctx, chat_id, g):
     if not pending:
         await _night_report(ctx, g, "🏛 همهٔ اعضای انجمن نظرشان را داده‌اند.")
         return
+    unreachable = []
     for s in pending:
         uid = g.seats[s][0]
         sel = set((getattr(g, "sh_council_sel", {}) or {}).get(uid, []) or [])
-        await _safe_pm(ctx, uid, _SH_COUNCIL_Q, _sh_council_kb(g, sel))
-    await _night_report(ctx, g, f"🏛 پرسشِ انجمن برای {len(pending)} نفر فرستاده شد.")
+        if not await _safe_pm(ctx, uid, _SH_COUNCIL_Q, _sh_council_kb(g, sel)):
+            unreachable.append(s)
+    rep = f"🏛 پرسشِ انجمن برای {len(pending)} نفر فرستاده شد."
+    if unreachable:
+        # ⚠️ پیامش نرسیده (آفلاین/پیویِ بسته) → گاد باید بداند، وگرنه «مخالف» حساب می‌شود
+        rep += ("\n⚠️ به این‌ها نرسید: "
+                + "، ".join(f"{s}. {escape(g.seats[s][1], quote=False)}" for s in unreachable)
+                + "\nمی‌توانی با «🎛 اکت دستی» جای‌شان جواب بدهی.")
+    await _night_report(ctx, g, rep)
 
 
-async def _sh_council_resolve(ctx, chat_id, g):
-    """🏛 جمع‌بندیِ نظرِ انجمن → ساختِ رأی نهایی، یا رفتن به شب."""
+def _sh_council_missing(g):
+    """🏛 اعضای زندهٔ انجمن که هنوز نظرشان را نداده‌اند."""
+    votes = getattr(g, "sh_council_votes", {}) or {}
+    return [s for s in _sh_council_seats(g) if g.seats[s][0] not in votes]
+
+
+async def _sh_council_resolve(ctx, chat_id, g, force=False):
+    """🏛 جمع‌بندیِ نظرِ انجمن → ساختِ رأی نهایی، یا رفتن به شب.
+
+    ⚠️ اگر کسی هنوز جواب نداده (آفلاین/پیویِ بسته)، ساکت جمع‌بندی نمی‌کند —
+    اسمِ جامانده‌ها را به گاد می‌گوید و منتظرِ تأییدِ صریحش می‌ماند."""
     duels = getattr(g, "sh_duels", []) or []
     if not duels or getattr(g, "sh_council_done", False):
+        return
+    missing = _sh_council_missing(g)
+    if missing and not force:
+        nm = "\n".join(f"• {s}. {escape(g.seats[s][1], quote=False)} "
+                       f"({escape(str((g.assigned_roles or {}).get(s, '—')), quote=False)})"
+                       for s in missing)
+        # 📩 مستقیم به پیویِ گاد (نه _safe_pm — که اگر گاد خودش بازیکنِ سوخته باشد رد می‌شود)
+        try:
+            await ctx.bot.send_message(
+                g.god_id,
+                f"⚠️ <b>هنوز {len(missing)} نفر از انجمن نظر نداده‌اند:</b>\n{nm}\n\n"
+                f"<i>اگر آفلاین‌اند یا پیویشان بسته است، می‌توانی جای‌شان با «🎛 اکت دستی» "
+                f"جواب بدهی. اگر همین‌طور جمع‌بندی کنی، نظرنداده «مخالف» حساب می‌شود.</i>\n\n"
+                f"🏛 جمع‌بندی کنم؟",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ همین‌طور جمع‌بندی کن", callback_data="shd_cforce"),
+                    InlineKeyboardButton("⏳ صبر می‌کنم", callback_data="shd_cwait"),
+                ]]))
+        except Exception as e:
+            print("⚠️ council warn:", e)
+            # اگر پیویِ گاد بسته بود، دستِ‌کم در گروه بگو چرا جمع‌بندی نشد
+            try:
+                await ctx.bot.send_message(
+                    chat_id, "🏛 هنوز همهٔ اعضای انجمن نظر نداده‌اند — گاد پیویِ بات را چک کند.")
+            except Exception:
+                pass
         return
     g.sh_council_done = True
     # 🧹 دکمه‌های «پرسش از انجمن / پایانِ نظرِ انجمن» از گروه برداشته شوند
@@ -13073,11 +13136,18 @@ async def _sh_council_resolve(ctx, chat_id, g):
     votes = getattr(g, "sh_council_votes", {}) or {}
     total = len(members)
     approved = []
+    tally = []
     for i, _d in enumerate(duels):
         yes = sum(1 for s in members if i in (votes.get(g.seats[s][0], []) or []))
-        if total and yes * 2 > total:      # اکثریتِ اعضای زندهٔ انجمن
+        okay = bool(total and yes * 2 > total)      # اکثریتِ اعضای زندهٔ انجمن
+        if okay:
             approved.append(i)
+        tally.append(f"• {_sh_duel_label(g, duels[i])} → {yes} از {total} "
+                     + ("✅ تأیید" if okay else "❌ رد"))
     store.save()
+    # 📊 شمارشِ شفاف به گاد، تا هیچ‌وقت نتیجه مبهم نباشد
+    await _night_report(ctx, g, "🏛 <b>شمارشِ انجمن</b> (نظرنداده = مخالف):\n"
+                                + "\n".join(tally))
 
     if not approved:
         await ctx.bot.send_message(chat_id, "🏛 انجمن با هیچ مبارزه‌ای موافقت نکرد — شب می‌شود.")
@@ -13155,6 +13225,18 @@ async def handle_shahname_god_callback(update, ctx):
 
     if data == "shd_cdone":
         await _sh_council_resolve(ctx, chat_id, g)
+        return
+
+    if data == "shd_cforce":
+        await _sh_council_resolve(ctx, chat_id, g, force=True)
+        return
+
+    if data == "shd_cwait":
+        _m = _sh_council_missing(g)
+        await _adm_send(ctx, uid, "⏳ باشد — هر وقت جواب دادند دوباره «🏛 پایانِ نظرِ انجمن» را بزن."
+                        + ("\nمانده: " + "، ".join(
+                            f"{s}. {escape(g.seats[s][1], quote=False)}" for s in _m)
+                           if _m else ""))
         return
 
 
