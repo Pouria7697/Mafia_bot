@@ -415,6 +415,11 @@ class GameState:
         self.gm_tf_target = getattr(self, "gm_tf_target", None)
         self.gm_tf_map = getattr(self, "gm_tf_map", {}) or {}
         self.gm_robin_steal_from = getattr(self, "gm_robin_steal_from", None)
+        # 🔪 دکستر / 🌀 اسمیگل (گیمر ۱۲)
+        self.gm_dexter_used = getattr(self, "gm_dexter_used", False)     # فقط یک‌بار در کلِ بازی
+        self.gm_dexter_target = getattr(self, "gm_dexter_target", None)
+        self.gm_smeagol_turned = getattr(self, "gm_smeagol_turned", False)
+        self.gm_smeagol_choice = getattr(self, "gm_smeagol_choice", None)   # "die" | "mafia"
         # ── حالت شبِ خودکار (سناریو شاهنامه) ──
         self.sh_decider_seat = getattr(self, "sh_decider_seat", None)
         self.sh_shields = getattr(self, "sh_shields", set()) or set()        # 🛡 صاحبانِ سپر
@@ -473,6 +478,12 @@ class GameState:
         self.mafia_room_pending_link = getattr(self, "mafia_room_pending_link", []) or []
         self.mafia_room_kicked = getattr(self, "mafia_room_kicked", set()) or set()
         self.mafia_room_taken_at = getattr(self, "mafia_room_taken_at", None)
+        # ✋ سناریوی بدونِ موتور: گیرندگانِ لینکِ اتاق را خودِ گاد انتخاب می‌کند
+        self.mlink_sel = getattr(self, "mlink_sel", set()) or set()
+        self.mlink_mid = getattr(self, "mlink_mid", None)
+        self.mlink_done = getattr(self, "mlink_done", False)
+        # 🗳 رأیِ نهاییِ آخرین روز: هدف → صندلیِ رأی‌دهنده‌ها (اکتِ دکستر به آن نیاز دارد)
+        self.last_final_votes = getattr(self, "last_final_votes", {}) or {}
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
@@ -3693,6 +3704,19 @@ async def handle_d1_guess_callback(update, ctx):
 
 async def _finalize_final_vote(ctx, chat_id, g):
     """بعد از «پایان رأی‌گیری نهایی»: تعیینِ خروج (با سابقه در تساوی) + افتادنِ زره/شیلد + ثبتِ سابقه."""
+    # 🗳 «کی به کی رأی داد» را نگه دار — بلافاصله بعدِ این تابع آرا پاک می‌شوند و
+    #    اکت‌هایی مثلِ دکستر (گیمر) به همین سابقه نیاز دارند.
+    try:
+        _lfv = {}
+        for _t, _voters in (g.votes_cast or {}).items():
+            if _t not in g.seats:
+                continue
+            _lfv[_t] = sorted({s for s in (_seat_of_uid(g, u) for u in (_voters or set()))
+                               if s is not None})
+        g.last_final_votes = _lfv
+    except Exception as _e:
+        print("⚠️ last_final_votes:", _e)
+
     counts = {t: len(v) for t, v in (g.votes_cast or {}).items()
               if t in g.seats and t not in (g.striked or set())}
     targets, seen = [], set()
@@ -4294,6 +4318,10 @@ async def announce_winner(ctx, update, g: GameState):
         elif getattr(g, "purchased_seat", None) == seat or getattr(g, "purchased_player", None) == seat:
             role_display = f"{role} / مافیا"
             marker = "◾️"  # خریداری شده → مافیا
+        elif getattr(g, "gm_smeagol_turned", False) and _R_SMEAGOL in _nz(role):
+            # 🌀 اسمیگلِ خیانت‌کرده: تنها جایی که مافیا بودنش دیده می‌شود همین لیست است
+            role_display = f"{role} / مافیا"
+            marker = "◾️"
         elif _nz(role) in mafia_roles:
             marker = "◾️"  # مافیا
             role_display = role
@@ -4555,7 +4583,9 @@ def _mafia_role_set(g):
     if _is_kapu_scenario(g):
         return (_R_DON, _R_EXECUTIONER, _R_WITCH)
     if _is_gamer_scenario(g):
-        return (_R_DONC, _R_TWOFACE, _R_MORIARTY)
+        # 🔪 دکستر عضوِ واقعیِ تیمِ مافیاست (در ۱۲نفره). اسمیگل حتی بعدِ خیانت
+        #    اینجا نمی‌آید — «مافیای خاموش» است و در شمارش شهروند حساب می‌شود.
+        return (_R_DONC, _R_TWOFACE, _R_MORIARTY, _R_DEXTER)
     if _is_shahname_scenario(g):
         return _sh_dark_role_norms(g)
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
@@ -4631,7 +4661,7 @@ def _kb_add_back(kb, back_cb):
 # ═══════════ 🎛 اکتِ دستیِ گاد — جانشینیِ پیویِ بازیکن ═══════════
 _GOD_ONLY_CB = ("kpd_", "kpg_", "kpe_", "kpc_", "nemd_", "nemc_", "nrep_", "bzd_",
                 "nkick_", "nburn_", "gact_", "tmr_", "buylink_", "tk_shield_", "kpv_",
-                "endq_", "shd_")
+                "endq_", "shd_", "mlk_")
 
 
 def _kb_dump(kb):
@@ -4876,6 +4906,13 @@ async def _maybe_notify_god_done(ctx, g):
         pass
 
 
+def _is_manual_scenario(g) -> bool:
+    """✋ سناریویی که موتورِ اکتِ خودکار ندارد — همه‌چیزش دستِ گاد است."""
+    return not (_is_neg_scenario(g) or _is_baazpors_scenario(g) or _is_nemayande_scenario(g)
+                or _is_takavar_scenario(g) or _is_kapu_scenario(g) or _is_gamer_scenario(g)
+                or _is_shahname_scenario(g))
+
+
 async def start_night(ctx, chat_id, g):
     is_neg = _is_neg_scenario(g)
     is_bzp = _is_baazpors_scenario(g)
@@ -4886,7 +4923,7 @@ async def start_night(ctx, chat_id, g):
     is_sh = _is_shahname_scenario(g)
     # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
     #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
-    is_manual = not (is_neg or is_bzp or is_nem or is_tk or is_kp or is_gm or is_sh)
+    is_manual = _is_manual_scenario(g)
     # فازهای رأی‌گیریِ روز هم قابل قبول‌اند؛ فقط قبل از شروع/بعد از پایان بازی رد می‌شود
     if g.phase in ("idle", "ended", "awaiting_winner") or not getattr(g, "assigned_roles", None):
         await ctx.bot.send_message(chat_id, "⛔ ابتدا باید بازی شروع شده باشد.")
@@ -4997,6 +5034,8 @@ async def start_night(ctx, chat_id, g):
     g.gm_tf_target = None
     g.gm_tf_map = {}
     g.gm_robin_steal_from = None
+    g.gm_dexter_target = None      # ⚠️ gm_dexter_used ریست نمی‌شود — کلِ بازی یک‌بار
+    g.gm_smeagol_choice = None
     # per-night شاهنامه (چیزهای «کلِ بازی» مثل سپر/کمان/سایه دست‌نخورده می‌مانند)
     g.sh_decider_seat = None
     g.sh_boof_holder = None
@@ -5769,7 +5808,9 @@ async def _resolve_gamer(ctx, chat_id, g):
     logan = _find_seat_by_role(g, _R_LOGAN)
     holmes = _find_seat_by_role(g, _R_HOLMES)
     moriarty = _find_seat_by_role(g, _R_MORIARTY)
+    smeagol = _find_seat_by_role(g, _R_SMEAGOL)
     robbed_ok = g.gm_gift_accepted   # سرقتِ پذیرفته‌شده
+    turned = []                      # 🌀 اسمیگلی که امشب به مافیا پیوست
 
     # 🔫 شلیک مافیا — لوگان (یا گیرنده‌ی قدرتش) نامیرا؛ سیو کستیل
     st = g.night_shot_target
@@ -5782,7 +5823,10 @@ async def _resolve_gamer(ctx, chat_id, g):
         if don is not None and st == don and not (robbed_ok and g.gm_robbed_seat == don):
             immortal = True   # دن نامیرای شب است (مگر امشب دزدیده شده باشد)
         if not immortal and not _is_saved(g, st):
-            dead.add(st); reasons[st] = "شلیک مافیا"
+            if smeagol is not None and st == smeagol and not g.gm_smeagol_turned:
+                turned.append(st)     # 🌀 اسمیگل با شاتِ مافیا نمی‌میرد — مافیا می‌شود
+            else:
+                dead.add(st); reasons[st] = "شلیک مافیا"
 
     # 🔫 شلیک ریک‌گرایمز — همه می‌میرند جز دن (اگر دزدیده نشده) و سیوشده
     rt = g.gm_rick_target
@@ -5790,7 +5834,16 @@ async def _resolve_gamer(ctx, chat_id, g):
         don_immune = (don is not None and rt == don
                       and not (robbed_ok and g.gm_robbed_seat == don))
         if not don_immune and not _is_saved(g, rt):
-            dead.add(rt); reasons[rt] = "شلیک ریک‌گرایمز"
+            if (smeagol is not None and rt == smeagol
+                    and getattr(g, "gm_smeagol_choice", None) == "mafia"):
+                turned.append(rt)     # 🌀 خیانت را انتخاب کرد → زنده می‌ماند
+            else:
+                dead.add(rt); reasons[rt] = "شلیک ریک‌گرایمز"
+
+    # 🔪 قتلِ دکستر — تحتِ هیچ شرایطی نجات پیدا نمی‌کند (حتی با سیوِ کستیل)
+    dxt = getattr(g, "gm_dexter_target", None)
+    if dxt and dxt in g.seats and dxt not in dead:
+        dead.add(dxt); reasons[dxt] = "قتلِ دکستر"
 
     # ⚰️ یأس هلمز (سومین حدسِ غلط) — قطعی، حتی با سیو
     if g.gm_holmes_despair and g.gm_holmes_despair in g.seats:
@@ -5813,6 +5866,12 @@ async def _resolve_gamer(ctx, chat_id, g):
 
     _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+    # 🌀 پیوستنِ اسمیگل — بی‌صدا: نه در گروه، نه به تیمِ مافیا، نه لینکِ اتاق
+    for s in dict.fromkeys(turned):
+        if s in (g.striked or set()):
+            continue          # اگر با اکتِ دیگری (مثلاً دکستر) همان شب مُرد، پیوستنی در کار نیست
+        await _gm_smeagol_join(ctx, g, s)
 
 
 async def _resolve_kapu(ctx, chat_id, g):
@@ -10797,6 +10856,8 @@ _R_JAMES    = _nz("جیمزهالیدی")
 _R_LOGAN    = _nz("لوگان")
 _R_HOLMES   = _nz("مسترهلمز")
 _R_CASTIEL  = _nz("کستیل")
+_R_DEXTER   = _nz("دکستر")      # 🔪 قاتلِ تیمِ مافیا (گیمر ۱۲)
+_R_SMEAGOL  = _nz("اسمیگل")     # 🌀 شهروندِ دیوانه (گیمر ۱۲)
 
 _GM_FUSE_COLORS = ["زرد", "قرمز", "آبی"]
 _GM_FUSE_TYPES  = ["انفجار", "خنثی", "سرعت"]
@@ -10829,6 +10890,52 @@ def _gm_rick_unlocked(g) -> bool:
     """ریک بعد از خروجِ ۲ شهروند آزاد می‌شود (شهروند = غیرمافیا، بر اساس نقش)."""
     mafia = _mafia_seats(g)
     return sum(1 for s in (g.striked or set()) if s not in mafia) >= 2
+
+
+def _gm_dexter_unlocked(g) -> bool:
+    """🔪 اکتِ دکستر تا وقتی یکی از مافیاها از بازی خارج نشده، اصلاً باز نمی‌شود."""
+    return bool(_mafia_seats(g) & (g.striked or set()))
+
+
+def _gm_dexter_targets(g):
+    """🔪 هدف‌های مجازِ دکستر: زنده‌های غیرمافیایی که در آخرین رأی‌گیریِ نهایی
+    به یک «شهروند» رأی داده‌اند. (چه کسی به چه کسی رأی داد، عمومی است — چیزی لو نمی‌رود.)"""
+    alive = set(_alive_seats(g))
+    mafia = _mafia_seats(g, alive_only=True)
+    out = []
+    for t, voters in (getattr(g, "last_final_votes", {}) or {}).items():
+        if t not in g.seats or _sc_side(g, t) == "مافیا":
+            continue                      # فقط رأی‌هایی که به شهروند داده شده
+        for v in (voters or []):
+            if v in alive and v not in mafia and v != t and v not in out:
+                out.append(v)
+    return sorted(out)
+
+
+async def _gm_smeagol_join(ctx, g, seat):
+    """🌀 پیوستنِ اسمیگل به تیمِ مافیا — کاملاً خاموش:
+    نه لینکِ اتاق می‌گیرد، نه تیمِ مافیا خبردار می‌شود، نه در شمارشِ ساید مافیا حساب می‌شود.
+    فقط خودش تیم را می‌شناسد و در لیستِ پایانی «مافیا» نمایش داده می‌شود."""
+    g.gm_smeagol_turned = True
+    store.save()
+    mates = []
+    for m in sorted(_mafia_seats(g)):
+        if m == seat or m not in g.seats:
+            continue
+        tag = " (خارج‌شده)" if m in (g.striked or set()) else ""
+        mates.append(f"{m}. {g.seats[m][1]} — {(g.assigned_roles or {}).get(m, '—')}{tag}")
+    try:
+        await ctx.bot.send_message(
+            g.seats[seat][0],
+            "🖤 از این لحظه به تیمِ مافیا خیانت‌شده‌ای و عضوِ آن‌ها هستی.\n\n"
+            "😈 تیمِ مافیا:\n" + ("\n".join(mates) if mates else "—")
+            + "\n\n⚠️ آن‌ها از پیوستنِ تو خبر ندارند و لینکِ اتاقِ مافیا هم به تو داده نمی‌شود.")
+    except Exception:
+        pass
+    await _night_report(
+        ctx, g,
+        f"🌀 اسمیگل ({seat}. {escape(g.seats[seat][1], quote=False)}) به تیمِ مافیا پیوست — "
+        "«مافیای خاموش» (در شمارش، شهروند؛ فقط در لیستِ پایانی مافیا).")
 
 
 def _gm_citizen_role_names(g):
@@ -10929,11 +11036,12 @@ async def _gm_open_mafia(ctx, chat_id, g):
     don = _find_seat_by_role(g, _R_DONC)
     tf = _find_seat_by_role(g, _R_TWOFACE)
     mo = _find_seat_by_role(g, _R_MORIARTY)
+    dx = _find_seat_by_role(g, _R_DEXTER)
 
     # 🔫 شات — دزدیده‌شدنِ دن یا حدسِ درستِ هلمز = بدون شات برای مافیا
     don_robbed = (g.gm_gift_accepted and g.gm_robbed_seat == don and don is not None)
     if g.gm_holmes_correct:
-        decider = don or mo or tf
+        decider = don or mo or tf or dx
         if decider:
             await _safe_pm(ctx, g.seats[decider][0], "😶 امشب مافیا توانِ شات ندارد.")
         await _night_report(ctx, g, "😶 مافیا امشب شات ندارد (حدسِ درستِ هلمز).")
@@ -10947,7 +11055,7 @@ async def _gm_open_mafia(ctx, chat_id, g):
         await _gm_prompt(ctx, g, actor, "shot", "🔫 (اکتِ هدیه) هدف شلیک را انتخاب کن:",
                          _kb_night_seats(targets, g, "gm_st_", confirm_cb="gm_st_ok"))
     else:
-        decider = don or mo or tf   # 🔫 وراثتِ شات: دن → موریارتی → تووفیس
+        decider = don or mo or tf or dx   # 🔫 وراثتِ شات: دن → موریارتی → تووفیس → دکستر
         if not decider:
             # 🤝 اگر مافیای اصلی نمانده، جذب‌شده (مذاکره/یاکوزایی/خریداری) صاحبِ شات می‌شود
             converted = sorted(_mafia_seats(g, alive_only=True))
@@ -10992,6 +11100,20 @@ async def _gm_open_mafia(ctx, chat_id, g):
                          _gm_yesno_kb("gm_mo_yes", "gm_mo_no"))
     else:
         g.night_done.add("moriarty")
+
+    # 🔪 دکستر — هم‌زمان با بقیهٔ تیمِ مافیا؛ فقط اگر یکی از مافیاها خارج شده باشد
+    #    و فقط یک‌بار در کلِ بازی (بار بعد که یارش بمیرد دیگر باز نمی‌شود).
+    dx_actor = _gm_actor_for(g, dx) if dx else None
+    if (dx and not getattr(g, "gm_dexter_used", False) and _gm_dexter_unlocked(g)
+            and not _gm_own_act_skipped(g, dx)
+            and dx_actor is not None
+            and dx_actor not in (g.night_burned or set())
+            and _gm_dexter_targets(g)):
+        await _gm_prompt(ctx, g, dx_actor, "dexter",
+                         "🔪 می‌خواهی امشب اکتت را بزنی؟ (فقط یک‌بار در کلِ بازی)",
+                         _gm_yesno_kb("gm_dx_yes", "gm_dx_no"))
+    else:
+        g.night_done.add("dexter")
     store.save()
     await _gm_check_open_citizens(ctx, chat_id, g)
 
@@ -10999,7 +11121,7 @@ async def _gm_open_mafia(ctx, chat_id, g):
 async def _gm_check_open_citizens(ctx, chat_id, g):
     if "citizens_opened" in g.night_done:
         return
-    if not ({"shot", "bomb", "moriarty"} <= g.night_done):
+    if not ({"shot", "bomb", "moriarty", "dexter"} <= g.night_done):
         return
     g.night_done.add("citizens_opened")
     store.save()
@@ -11441,6 +11563,67 @@ async def handle_gamer_callback(update, ctx):
                        _kb_night_seats(targets, g, "gm_mog_", selected=s, confirm_cb="gm_mog_ok"))
         return
 
+    # ── دکستر (قاتلِ تیمِ مافیا) ──
+    if data == "gm_dx_no":
+        await _close_pm(ctx, uid, mid, "🔪 امشب اکت نزدی — اکتت هنوز دستِ خودت است.")
+        await _night_report(ctx, g, "🔪 دکستر → اکت نزد")
+        g.night_done.add("dexter")
+        store.save()
+        await _gm_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data == "gm_dx_yes":
+        targets = _gm_dexter_targets(g)
+        if not targets:
+            await _close_pm(ctx, uid, mid, "🔪 امشب کسی در دسترسِ تو نیست.")
+            await _night_report(ctx, g, "🔪 دکستر → هدفی برای انتخاب نبود")
+            g.night_done.add("dexter")
+            store.save()
+            await _gm_check_open_citizens(ctx, chat_id, g)
+            return
+        await _edit_pm(ctx, uid, mid, "🔪 چه کسی را به قتل می‌رسانی؟ (نجات پیدا نمی‌کند)",
+                       _kb_night_seats(targets, g, "gm_dxt_", confirm_cb="gm_dxt_ok"))
+        return
+
+    if data == "gm_dxt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.gm_dexter_target = s
+        g.gm_dexter_used = True     # 🔒 سوخت — دیگر تا آخرِ بازی باز نمی‌شود
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"🔪 ثبت شد: {s}. {_tn}")
+        await _night_report(ctx, g,
+                            f"🔪 دکستر → قتلِ <b>{s}. {escape(_tn, quote=False)}</b> (غیرقابلِ نجات)")
+        g.night_done.add("dexter")
+        store.save()
+        await _gm_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data.startswith("gm_dxt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔪 چه کسی را به قتل می‌رسانی؟ (نجات پیدا نمی‌کند)",
+                       _kb_night_seats(_gm_dexter_targets(g), g, "gm_dxt_",
+                                       selected=s, confirm_cb="gm_dxt_ok"))
+        return
+
+    # ── اسمیگل (شهروندِ دیوانه) — انتخاب بعد از شاتِ ریک‌گرایمز ──
+    if data in ("gm_sm_die", "gm_sm_maf"):
+        g.gm_smeagol_choice = "mafia" if data == "gm_sm_maf" else "die"
+        g.night_done.add("smeagol")
+        store.save()
+        if g.gm_smeagol_choice == "mafia":
+            await _close_pm(ctx, uid, mid, "🖤 انتخابت ثبت شد.")
+            await _night_report(ctx, g, "🌀 اسمیگل → خیانت را انتخاب کرد")
+        else:
+            await _close_pm(ctx, uid, mid, "🤍 انتخابت ثبت شد.")
+            await _night_report(ctx, g, "🌀 اسمیگل → مرگ برای شهروند را انتخاب کرد")
+        return
+
     # ── کستیل (دکتر) ──
     if data == "gm_doc_ok":
         s = g.night_sel.get(uid)
@@ -11650,6 +11833,17 @@ async def handle_gamer_callback(update, ctx):
         await _night_report(ctx, g, f"🔫 ریک‌گرایمز → شلیک به <b>{s}. {escape(_tn, quote=False)}</b>")
         g.night_done.add("rick")
         store.save()
+        # 🌀 اگر هدف اسمیگل باشد، خودش انتخاب می‌کند: برای شهروند بمیرد یا خیانت کند
+        _sm = _find_seat_by_role(g, _R_SMEAGOL)
+        if (_sm is not None and s == _sm and not getattr(g, "gm_smeagol_turned", False)
+                and _sm not in (g.night_burned or set())):
+            await _gm_prompt(
+                ctx, g, _sm, "smeagol",
+                "🌀 امشب به تو شلیک شد. انتخاب کن:",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🤍 برای شهروند می‌میرم", callback_data="gm_sm_die")],
+                    [InlineKeyboardButton("🖤 خیانت می‌کنم و مافیا می‌شوم", callback_data="gm_sm_maf")],
+                ]))
         return
 
     if data.startswith("gm_rk_"):
@@ -13421,6 +13615,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🛠 پنلِ مدیریت (پیویِ سازندهٔ بات)
     if _q and _q.data and _q.data.startswith("adm_"):
         await handle_admin_panel_callback(update, ctx)
+        return
+
+    # 🔗 انتخابِ گیرندگانِ لینکِ اتاقِ مافیا (پیویِ گاد — سناریوهای بدونِ موتور)
+    if _q and _q.data and _q.data.startswith("mlk_"):
+        await handle_mlink_callback(update, ctx)
         return
 
     # ⚔️ دکمه‌های گادِ شاهنامه (در گروه) — قبل از مسیرِ اکت‌های شب
@@ -15948,6 +16147,25 @@ async def play_alarm_sound(ctx, chat_id: int):
         print("⚠️ play_alarm_sound error:", e)
 
 
+# ⏱ تایمرِ فعالِ هر گروه — تا با زدنِ تایمِ جدید، قبلی لغو شود (نه اینکه موازی بشمارند)
+_TIMER_TASKS: dict[int, "asyncio.Task"] = {}
+_TIMER_TOKEN: dict[int, int] = {}
+
+
+def _start_timer(ctx, chat: int, seconds: int) -> bool:
+    """⏱ شروعِ تایمرِ تازه برای یک گروه. اگر تایمرِ قبلی در جریان بود لغو می‌شود.
+    برمی‌گرداند: آیا تایمرِ قبلی‌ای لغو شد یا نه."""
+    old = _TIMER_TASKS.pop(chat, None)
+    replaced = old is not None and not old.done()
+    if replaced:
+        old.cancel()
+    # 🎫 نسل جدید — حتی اگر لغو به تأخیر بیفتد، تایمرِ کهنه حقِ اعلام ندارد
+    tok = _TIMER_TOKEN.get(chat, 0) + 1
+    _TIMER_TOKEN[chat] = tok
+    _TIMER_TASKS[chat] = asyncio.create_task(run_timer(ctx, chat, seconds, tok))
+    return replaced
+
+
 async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     uid = update.effective_user.id
@@ -15967,10 +16185,10 @@ async def dynamic_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     seconds = int(cmd[:-1])
-    await update.message.reply_text(f"⏳ تایمر {seconds} ثانیه‌ای شروع شد...")
-
-    
-    asyncio.create_task(run_timer(ctx, chat, seconds))
+    replaced = _start_timer(ctx, chat, seconds)
+    await update.message.reply_text(
+        f"⏳ تایمر {seconds} ثانیه‌ای شروع شد..."
+        + (" (تایمر قبلی لغو شد)" if replaced else ""))
 
 
 def _timer_kb():
@@ -15984,15 +16202,26 @@ def _timer_kb():
     ])
 
 
-async def run_timer(ctx, chat: int, seconds: int):
+async def run_timer(ctx, chat: int, seconds: int, token: int | None = None):
     try:
         await asyncio.sleep(seconds)
+        # ⏹ اگر وسطِ شمارش تایمِ تازه‌ای زده شده، این یکی دیگر حق اعلام ندارد
+        if token is not None and _TIMER_TOKEN.get(chat) != token:
+            return
         # ⏰ پایانِ تایم + دکمه‌های تایمرِ بعدی (گاد دیگر تایپ نمی‌کند)
         await ctx.bot.send_message(chat, "⏰ تایم تمام شد", reply_markup=_timer_kb())
 #       await play_alarm_sound(ctx, chat)
 
+    except asyncio.CancelledError:
+        pass   # ⏹ با تایمرِ جدید لغو شد — بی‌صدا
     except Exception as e:
         print("⚠️ run_timer error:", e)
+    finally:
+        try:
+            if _TIMER_TASKS.get(chat) is asyncio.current_task():
+                _TIMER_TASKS.pop(chat, None)
+        except Exception:
+            pass
 
 
 async def handle_timer_callback(update, ctx):
@@ -16017,8 +16246,10 @@ async def handle_timer_callback(update, ctx):
                                                 reply_markup=None)
     except Exception:
         pass
-    await ctx.bot.send_message(chat, f"⏳ تایمر {seconds} ثانیه‌ای شروع شد...")
-    asyncio.create_task(run_timer(ctx, chat, seconds))
+    replaced = _start_timer(ctx, chat, seconds)
+    await ctx.bot.send_message(
+        chat, f"⏳ تایمر {seconds} ثانیه‌ای شروع شد..."
+        + (" (تایمر قبلی لغو شد)" if replaced else ""))
 
 
 async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -16873,32 +17104,153 @@ async def delroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ این گروه در فهرست اتاق‌ها نبود.")
 
 
+def _mlink_seats(g):
+    """👥 صندلی‌هایی که سایدشان مافیاست (برای انتخابِ گیرندگانِ لینکِ اتاق)."""
+    sides = getattr(g, "seat_sides", {}) or {}
+    return [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
+
+
+async def _mlink_panel(ctx, g, mid=None):
+    """🔗 پنلِ پیویِ گاد: لینکِ اتاقِ مافیا برای چه کسانی فرستاده شود؟
+    (فقط سناریوهای بدونِ موتور — بات خودش برای هیچ‌کس نمی‌فرستد.)"""
+    seats = _mlink_seats(g)
+    if not seats:
+        return
+    sel = set(getattr(g, "mlink_sel", set()) or set())
+    rows = []
+    for s in seats:
+        role = (g.assigned_roles or {}).get(s, "—")
+        mark = "✅ " if s in sel else "▫️ "
+        rows.append([InlineKeyboardButton(f"{mark}{s}. {g.seats[s][1]} — {role}",
+                                          callback_data=f"mlk_t_{s}")])
+    rows.append([InlineKeyboardButton("👥 همه", callback_data="mlk_all"),
+                 InlineKeyboardButton("🧹 هیچ‌کس", callback_data="mlk_none")])
+    rows.append([InlineKeyboardButton("✅ تأیید و ارسالِ لینک", callback_data="mlk_ok")])
+    kb = InlineKeyboardMarkup(rows)
+    text = ("🔗 <b>لینکِ اتاقِ مافیا برای چه کسانی فرستاده شود؟</b>\n"
+            "<i>هرکدام را می‌خواهی بزن (یا «همه») و بعد «تأیید» — لینک فقط برای همان‌ها می‌رود.</i>")
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(chat_id=g.god_id, message_id=mid, text=text,
+                                            parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    try:
+        m = await ctx.bot.send_message(g.god_id, text, parse_mode="HTML", reply_markup=kb)
+        g.mlink_mid = m.message_id
+        store.save()
+    except Exception as e:
+        print("⚠️ mlink panel:", e)
+
+
+async def handle_mlink_callback(update, ctx):
+    """🔗 انتخابِ گیرندگانِ لینکِ اتاقِ مافیا توسطِ گاد (سناریوهای بدونِ موتور)."""
+    q = update.callback_query
+    data = q.data or ""
+    uid = q.from_user.id
+    mid = q.message.message_id if q.message else None
+
+    g = None
+    for _cid, game in store.games.items():
+        if game.god_id == uid and getattr(game, "mlink_mid", None) == mid:
+            g = game
+            break
+    if g is None:
+        for _cid, game in store.games.items():
+            if game.god_id == uid and getattr(game, "assigned_roles", None) \
+                    and game.phase not in ("idle", "ended"):
+                g = game
+                break
+    if g is None:
+        await safe_q_answer(q, "بازی‌ای برای این پنل پیدا نشد.", show_alert=True)
+        return
+
+    seats = _mlink_seats(g)
+    sel = set(getattr(g, "mlink_sel", set()) or set())
+
+    if data == "mlk_ok":
+        sel = {s for s in sel if s in g.seats}
+        if not sel:
+            await safe_q_answer(q, "اول حداقل یک نفر را انتخاب کن.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        names = []
+        for s in sorted(sel):
+            await _room_send_link(ctx, g, g.seats[s][0])
+            names.append(f"• {s}. {g.seats[s][1]} — {(g.assigned_roles or {}).get(s, '—')}")
+        g.mlink_sel = sel
+        g.mlink_done = True
+        store.save()
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=g.god_id, message_id=mid,
+                text="🔗 <b>لینکِ اتاقِ مافیا فرستاده شد برای:</b>\n" + "\n".join(names),
+                parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    if data == "mlk_all":
+        sel = set(seats)
+    elif data == "mlk_none":
+        sel = set()
+    elif data.startswith("mlk_t_"):
+        try:
+            s = int(data.rsplit("_", 1)[1])
+        except Exception:
+            return
+        if s in sel:
+            sel.discard(s)
+        else:
+            sel.add(s)
+    else:
+        await safe_q_answer(q)
+        return
+
+    await safe_q_answer(q)
+    g.mlink_sel = sel
+    store.save()
+    await _mlink_panel(ctx, g, mid=mid)
+
+
 async def do_maarefe(ctx, chat_id, g):
     """شب معارفه: اعلام در گروه + ارسال اسم یاران به مافیاها (بدون اکت برای شهروندان)."""
     if not getattr(g, "assigned_roles", None):
         await ctx.bot.send_message(chat_id, "⛔ ابتدا باید نقش‌ها پخش شوند.")
         return
+    manual = _is_manual_scenario(g)
     g.maarefe_active = True   # شبِ معارفه (بدون اکت) — با /روز بسته می‌شود
     store.save()
     await ctx.bot.send_message(chat_id, "🎭 <b>شب معارفه</b>", parse_mode="HTML")
     sides = getattr(g, "seat_sides", {}) or {}
     mafia_seats = [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
-    for s in mafia_seats:
-        uid = g.seats[s][0]
-        mates = [f"{m}. {g.seats[m][1]} — {g.assigned_roles.get(m, '—')}"
-                 for m in mafia_seats if m != s]
-        text = "🎭 شب معارفه\n\n😈 یاران مافیای شما:\n" + ("\n".join(mates) if mates else "—")
-        try:
-            await ctx.bot.send_message(uid, text)
-        except Exception:
-            pass
+    # ✋ سناریوی بدونِ موتور: بات هیچ نقشی برای تیمِ مافیا نمی‌فرستد — همه‌چیز دستِ گاد است
+    if not manual:
+        for s in mafia_seats:
+            uid = g.seats[s][0]
+            mates = [f"{m}. {g.seats[m][1]} — {g.assigned_roles.get(m, '—')}"
+                     for m in mafia_seats if m != s]
+            text = "🎭 شب معارفه\n\n😈 یاران مافیای شما:\n" + ("\n".join(mates) if mates else "—")
+            try:
+                await ctx.bot.send_message(uid, text)
+            except Exception:
+                pass
 
     # 🔗 اتاق چت مافیا: تخصیص + ارسال لینک به گاد و مافیاها (در تکاور گروگانگیر مستثنی)
     if await _room_allocate(ctx, g):
         await _room_send_link(ctx, g, g.god_id)
-        for s in _mafia_room_seats(g):
-            await _room_send_link(ctx, g, g.seats[s][0])
-        await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
+        if manual:
+            # ✋ لینک فقط برای کسانی می‌رود که خودِ گاد در پیویش انتخاب و تأیید کند
+            g.mlink_sel = set()
+            g.mlink_done = False
+            store.save()
+            await _mlink_panel(ctx, g)
+            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد ارسال شد.")
+        else:
+            for s in _mafia_room_seats(g):
+                await _room_send_link(ctx, g, g.seats[s][0])
+            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
         g.maarefe_done = True   # ✅ موفق → دکمه‌ی معارفه از پنل حذف می‌شود
         store.save()
         # ⏰ بعد از ۵ دقیقه اگر کسی جوین نشده بود، لینکِ جدید بساز و بفرست
