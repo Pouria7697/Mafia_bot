@@ -420,6 +420,21 @@ class GameState:
         self.gm_dexter_target = getattr(self, "gm_dexter_target", None)
         self.gm_smeagol_turned = getattr(self, "gm_smeagol_turned", False)
         self.gm_smeagol_choice = getattr(self, "gm_smeagol_choice", None)   # "die" | "mafia"
+        # ── حالت شبِ خودکار (سناریو میتیک) ──
+        self.my_expected = getattr(self, "my_expected", set()) or set()
+        self.my_decider_seat = getattr(self, "my_decider_seat", None)
+        self.my_shot_will = getattr(self, "my_shot_will", None)        # "open" | "closed"
+        self.my_will_closed_used = getattr(self, "my_will_closed_used", False)
+        self.my_wills = getattr(self, "my_wills", {}) or {}
+        self.my_consort_target = getattr(self, "my_consort_target", None)
+        self.my_bg_save = getattr(self, "my_bg_save", None)
+        self.my_bg_self_used = getattr(self, "my_bg_self_used", False)
+        self.my_doc_self_used = getattr(self, "my_doc_self_used", False)
+        self.my_sniper_target = getattr(self, "my_sniper_target", None)
+        self.my_sniper_shots = getattr(self, "my_sniper_shots", 0)     # سقف ۲ تیر
+        self.my_sniper_suicide_night = getattr(self, "my_sniper_suicide_night", None)
+        self.my_terror_used = getattr(self, "my_terror_used", False)
+        self.my_terror_asking = getattr(self, "my_terror_asking", False)
         # ── حالت شبِ خودکار (سناریو شاهنامه) ──
         self.sh_decider_seat = getattr(self, "sh_decider_seat", None)
         self.sh_shields = getattr(self, "sh_shields", set()) or set()        # 🛡 صاحبانِ سپر
@@ -484,6 +499,7 @@ class GameState:
         self.mlink_done = getattr(self, "mlink_done", False)
         # 🗳 رأیِ نهاییِ آخرین روز: هدف → صندلیِ رأی‌دهنده‌ها (اکتِ دکستر به آن نیاز دارد)
         self.last_final_votes = getattr(self, "last_final_votes", {}) or {}
+        self.stats_save_error = getattr(self, "stats_save_error", None)   # ⚠️ شکستِ ثبتِ آمار
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
 
@@ -657,24 +673,30 @@ def save_player_stats(stats: dict):
     if not stats:
         print("⛔ save_player_stats skipped: دادهٔ خالی")
         return False
-    try:
-        url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {
-            "Authorization": f"token {GH_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
-        data = {
-            "files": {
-                STATS_FILENAME: {
-                    "content": json.dumps(stats, ensure_ascii=False, indent=2)
-                }
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"token {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    data = {
+        "files": {
+            STATS_FILENAME: {
+                "content": json.dumps(stats, ensure_ascii=False, indent=2)
             }
         }
-        httpx.patch(url, headers=headers, json=data)
-        return True
-    except Exception as e:
-        print("❌ save_player_stats error:", e)
-        return False
+    }
+    # ⚠️ وضعیتِ HTTP حتماً چک شود — وگرنه شکستِ نوشتن «موفق» گزارش می‌شد
+    #    و آمارِ یک بازی بی‌سروصدا گم می‌شد.
+    for attempt in (1, 2):
+        try:
+            r = httpx.patch(url, headers=headers, json=data)
+            if getattr(r, "status_code", 0) in (200, 201):
+                return True
+            print(f"❌ save_player_stats failed (تلاش {attempt}):",
+                  getattr(r, "status_code", "?"), str(getattr(r, "text", ""))[:200])
+        except Exception as e:
+            print(f"❌ save_player_stats error (تلاش {attempt}):", e)
+    return False
 
 
 # ─── 🏁 فصل امتیازی (سقف ۲۰۰۰ → مدال + ریست) ────────────────────
@@ -877,11 +899,16 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
     """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل + تاریخچه).
     اگر فصل تمام شود (صدرنشین ≥ ۲۰۰۰)، متنِ اعلانِ مدال‌ها را برمی‌گرداند."""
     season_msg = None
+    g.stats_save_error = None
     try:
-        stats = load_player_stats() or {}
+        # ⚠️ «or {}» اینجا نگذار! load_player_stats در خطا None می‌دهد و اگر به {}
+        #    تبدیلش کنیم، نگهبانِ خطِ بعد بی‌اثر می‌شود و کلِ فایلِ آمار با
+        #    بازیکنانِ همین یک بازی بازنویسی می‌شود (آمارِ همه صفر).
+        stats = load_player_stats()
         if stats is None:
-            # ⚠️ خواندنِ آمار خطا داد → ذخیره نکن، وگرنه آمارِ همه با دادهٔ ناقص بازنویسی می‌شود
             print("⛔ update_player_stats aborted: خواندنِ آمار ناموفق بود")
+            g.stats_save_error = ("آمارِ فعلی از گیست خوانده نشد؛ برای اینکه آمارِ بقیه "
+                                  "پاک نشود، هیچ‌چیز ذخیره نشد.")
             return None
         hist_rows = []
 
@@ -981,7 +1008,8 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
         except Exception as e:
             print("❌ season check error:", e)
 
-        save_player_stats(stats)
+        if not save_player_stats(stats):
+            g.stats_save_error = "نوشتنِ آمار روی گیست ناموفق بود (آمارِ این بازی ثبت نشد)."
 
         # 🎮 ثبتِ تاریخچه‌ی بازی برای «بازی من» (تاریخ + گروه + ساید + نتیجه)
         if hist_rows and (group_title or date_str):
@@ -995,11 +1023,15 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                     lst.append({"d": date_str or "—", "g": group_title or "—",
                                 "s": _s, "w": 1 if _w else 0})
                     hist[k] = lst[-50:]   # سقفِ ۵۰ بازیِ اخیر برای هر نفر
-                save_game_history(hist)
+                if not save_game_history(hist):
+                    raise RuntimeError("نوشتنِ تاریخچه ناموفق بود")
             except Exception as _e:
                 print("❌ game history save:", _e)
+                g.stats_save_error = ((g.stats_save_error or "")
+                                      + " | تاریخچهٔ «بازی من» هم ثبت نشد.").strip(" |")
     except Exception as e:
         print("❌ update_player_stats error:", e)
+        g.stats_save_error = f"خطای غیرمنتظره در ثبتِ آمار: {e}"
     return season_msg
 
 
@@ -1294,16 +1326,23 @@ def load_game_history() -> dict | None:
 
 
 def save_game_history(h: dict) -> bool:
-    try:
-        import json as _json
-        url = f"https://api.github.com/gists/{GIST_ID}"
-        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        data = {"files": {HISTORY_FILENAME: {"content": _json.dumps(h, ensure_ascii=False)}}}
-        httpx.patch(url, headers=headers, json=data)
-        return True
-    except Exception as e:
-        print("❌ save_game_history:", e)
+    if not h:
+        print("⛔ save_game_history skipped: دادهٔ خالی")
         return False
+    import json as _json
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+    data = {"files": {HISTORY_FILENAME: {"content": _json.dumps(h, ensure_ascii=False)}}}
+    for attempt in (1, 2):
+        try:
+            r = httpx.patch(url, headers=headers, json=data)
+            if getattr(r, "status_code", 0) in (200, 201):
+                return True
+            print(f"❌ save_game_history failed (تلاش {attempt}):",
+                  getattr(r, "status_code", "?"))
+        except Exception as e:
+            print(f"❌ save_game_history error (تلاش {attempt}):", e)
+    return False
 
 
 def format_game_history(rows: list) -> str:
@@ -2548,14 +2587,15 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("🃏 شافل کارت", callback_data="shuffle_card")])
 
     # بعد بقیه دکمه‌ها
+    rows.append([
+        InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode"),
+        InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out"),
+    ])
+    # 📊 میتیک اصلاً استعلامِ وضعیت ندارد → دکمه‌اش نمایش داده نمی‌شود
+    if not _is_mythic_scenario(g):
+        rows.append([InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_auto")])
+
     rows.extend([
-        [
-            InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode"),
-            InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out"),
-        ],
-        [
-            InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_auto"),
-        ],
         [
             InlineKeyboardButton("🗳 رأی اولیه", callback_data="init_vote"),
             InlineKeyboardButton("🗳 رأی نهایی", callback_data="final_vote"),
@@ -3166,7 +3206,10 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
             if b_end and msg.message_id >= b_end:
                 continue
         voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
-        if not voter_seat or voter_seat == win_target or voter_seat in (g.striked or set()):
+        if not voter_seat or voter_seat in (g.striked or set()):
+            return False
+        # 🗳 میتیک: رأی به خود مجاز است و شمرده می‌شود؛ بقیهٔ سناریوها نه
+        if voter_seat == win_target and not _is_mythic_scenario(g):
             return False
         # ⚔️ شاهنامه: دو طرفِ یک مبارزهٔ تن‌به‌تن هر دو در دفاع‌اند → به هم رأی نمی‌دهند
         if _is_shahname_scenario(g) and _sh_duel_locked(g, voter_seat, win_target):
@@ -3213,9 +3256,12 @@ async def _send_vote_timing_report(ctx, g, chat_id=None):
         pass
 
 
-def _final_vote_threshold(alive_count: int) -> int:
+def _final_vote_threshold(alive_count: int, g=None) -> int:
     """حدنصابِ ورود به دفاعیه بر اساس تعداد زنده‌ها:
-    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → نصفِ زنده‌ها (براکت پایین)"""
+    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → نصفِ زنده‌ها (براکت پایین)
+    ⚔️ میتیک قانونِ خودش را دارد: نصفِ زنده‌ها، و اگر فرد بود نصف+۱ (۹ → ۵، ۱۰ → ۵)."""
+    if g is not None and _is_mythic_scenario(g):
+        return (alive_count + 1) // 2
     if alive_count <= 5:
         return 2
     if alive_count <= 7:
@@ -3279,7 +3325,7 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
     """بعد از پایانِ رأی اولیه: محاسبه‌ی حدنصاب، اعلامِ واجدانِ دفاعیه و پیشنهاد ساختِ رأی نهایی.
     counts (اختیاری): شمارشِ آماده — برای رأی‌گیری از طریقِ «پل»."""
     alive = len(_alive_seats(g))
-    thr = _final_vote_threshold(alive)
+    thr = _final_vote_threshold(alive, g)
     counts = ({t: len(v) for t, v in (g.votes_cast or {}).items()}
               if counts is None else {int(k): int(v) for k, v in counts.items()})
     order, seen = [], set()
@@ -3757,7 +3803,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
 
     hist = getattr(g, "defense_history", {}) or {}
     alive = len(_alive_seats(g))
-    thr = _final_vote_threshold(alive)
+    thr = _final_vote_threshold(alive, g)
     reached = [t for t in targets if counts[t] >= thr]
 
     exiter = None
@@ -3843,8 +3889,11 @@ AUTOVOTE_SEATS = 10      # 🤖 رأی‌گیریِ اتومات فقط برای
 def _autovote_row(g, stage):
     """ردیفِ دکمهٔ اتومات — اگر از همه رأی گرفته شده، در حالِ اجراست،
     یا ظرفیتِ سناریو ۱۰ نیست، هیچ (ترتیبِ سرِ صحبت برای ۱۰ نفر تعریف شده).
-    ملاک «ظرفیتِ سناریو»ست نه تعدادِ زنده‌ها — با مردنِ چند نفر دکمه نمی‌رود."""
-    if int(getattr(g, "max_seats", 0) or len(g.seats or {})) != AUTOVOTE_SEATS:
+    ملاک «ظرفیتِ سناریو»ست نه تعدادِ زنده‌ها — با مردنِ چند نفر دکمه نمی‌رود.
+    ⚔️ میتیک ظرفیتِ رسمیِ خودش (۱۲) را دارد."""
+    _cap = int(getattr(g, "max_seats", 0) or len(g.seats or {}))
+    _want = MYTHIC_SEATS if _is_mythic_scenario(g) else AUTOVOTE_SEATS
+    if _cap != _want:
         return []
     if getattr(g, "auto_vote_running", False) or not _autovote_pending(g):
         return []
@@ -4371,6 +4420,20 @@ async def announce_winner(ctx, update, g: GameState):
     season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
                                      group_title=group_title, date_str=date_str)
 
+    # ⚠️ اگر ثبتِ آمار شکست خورد، بی‌صدا رد نشو — به گاد و سازندهٔ بات خبر بده
+    _serr = getattr(g, "stats_save_error", None)
+    if _serr:
+        _warn = ("⚠️ <b>آمارِ این بازی ثبت نشد!</b>\n"
+                 f"{escape(str(_serr), quote=False)}\n"
+                 f"گروه: {escape(group_title or '—', quote=False)} | تاریخ: {date_str or '—'}")
+        for _to in {g.god_id, ADMIN_ID}:
+            if not _to:
+                continue
+            try:
+                await ctx.bot.send_message(_to, _warn, parse_mode="HTML")
+            except Exception:
+                pass
+
     g.phase = "ended"
     store.save()
 
@@ -4588,6 +4651,8 @@ def _mafia_role_set(g):
         return (_R_DONC, _R_TWOFACE, _R_MORIARTY, _R_DEXTER)
     if _is_shahname_scenario(g):
         return _sh_dark_role_norms(g)
+    if _is_mythic_scenario(g):
+        return _MY_MAFIA
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
@@ -4886,6 +4951,11 @@ def _night_all_done(g) -> bool:
         return ({"kaveh", "shadow", "mafia", "afrasiab", "simorgh",
                  "feathers", "rostam", "jamasb", "arash"} <= d)
 
+    if _is_mythic_scenario(g):
+        if "citizens_opened" not in d:
+            return False
+        return (getattr(g, "my_expected", set()) or set()) <= d
+
     return False
 
 
@@ -4910,7 +4980,7 @@ def _is_manual_scenario(g) -> bool:
     """✋ سناریویی که موتورِ اکتِ خودکار ندارد — همه‌چیزش دستِ گاد است."""
     return not (_is_neg_scenario(g) or _is_baazpors_scenario(g) or _is_nemayande_scenario(g)
                 or _is_takavar_scenario(g) or _is_kapu_scenario(g) or _is_gamer_scenario(g)
-                or _is_shahname_scenario(g))
+                or _is_shahname_scenario(g) or _is_mythic_scenario(g))
 
 
 async def start_night(ctx, chat_id, g):
@@ -4921,6 +4991,7 @@ async def start_night(ctx, chat_id, g):
     is_kp = _is_kapu_scenario(g)
     is_gm = _is_gamer_scenario(g)
     is_sh = _is_shahname_scenario(g)
+    is_my = _is_mythic_scenario(g)
     # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
     #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
     is_manual = _is_manual_scenario(g)
@@ -5036,6 +5107,13 @@ async def start_night(ctx, chat_id, g):
     g.gm_robin_steal_from = None
     g.gm_dexter_target = None      # ⚠️ gm_dexter_used ریست نمی‌شود — کلِ بازی یک‌بار
     g.gm_smeagol_choice = None
+    # per-night میتیک (سقفِ تیرِ اسنایپر، سیوِ خودی‌ها و وصیتِ بستهٔ مصرف‌شده می‌مانند)
+    g.my_expected = set()
+    g.my_decider_seat = None
+    g.my_shot_will = None
+    g.my_consort_target = None
+    g.my_bg_save = None
+    g.my_sniper_target = None
     # per-night شاهنامه (چیزهای «کلِ بازی» مثل سپر/کمان/سایه دست‌نخورده می‌مانند)
     g.sh_decider_seat = None
     g.sh_boof_holder = None
@@ -5112,6 +5190,10 @@ async def start_night(ctx, chat_id, g):
             g.night_stage = "shahname"
             store.save()
             await _sh_start(ctx, chat_id, g)
+        elif is_my:
+            g.night_stage = "mythic"
+            store.save()
+            await _my_start(ctx, chat_id, g)
         else:
             g.night_stage = "robin"
             store.save()
@@ -5786,6 +5868,8 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_gamer(ctx, chat_id, g)
     elif _is_shahname_scenario(g):
         await _resolve_shahname(ctx, chat_id, g)
+    elif _is_mythic_scenario(g):
+        await _resolve_mythic(ctx, chat_id, g)
     else:
         await _resolve_manual(ctx, chat_id, g)
 
@@ -11985,6 +12069,631 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
 
 
 # ═════════════════════════════════════════════════════════════
+#  موتور شبِ خودکار — سناریو «میتیک» (۱۲ نفره)
+#  شب: اول شاتِ مافیا (+ کانسورت) → بعد اکت‌های شهروندی، بدون اولویت
+# ═════════════════════════════════════════════════════════════
+MYTHIC_KEY   = "میتیک"
+MYTHIC_SEATS = 12                 # 🤖 رأی‌گیریِ اتومات فقط روی همین ظرفیت
+_R_MY_GF      = _nz("گادفادر")
+_R_MY_NINJA   = _nz("نینجا")
+_R_MY_CONSORT = _nz("کانسورت")
+_R_MY_TERROR  = _nz("تروریست")
+_R_MY_BODY    = _nz("بادیگارد")
+_R_MY_SNIPER  = _nz("اسنایپر")
+_R_MY_DOC     = _nz("دکتر")
+_R_MY_DET     = _nz("کاراگاه")
+_R_MY_SIMPLE  = _nz("شهرساده")
+_MY_MAFIA = (_R_MY_GF, _R_MY_NINJA, _R_MY_CONSORT, _R_MY_TERROR)
+
+
+def _is_mythic_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(MYTHIC_KEY) in _nz(g.scenario.name))
+
+
+def _my_rn(x) -> str:
+    """نرمالِ نقش برای میتیک — بی‌اعتنا به فاصله و نیم‌فاصله («شهرساده» == «شهر ساده»)."""
+    return _nz(x or "").replace(" ", "").replace("‌", "")
+
+
+def _my_seat(g, role, alive_only=True):
+    """صندلیِ یک نقش: اول تطبیقِ دقیق، بعد جزئی (تحملِ اسم‌های تزئین‌شده)."""
+    want = _my_rn(role)
+    seats = _alive_seats(g) if alive_only else sorted(g.seats)
+    for s in seats:
+        if _my_rn((g.assigned_roles or {}).get(s, "")) == want:
+            return s
+    for s in seats:
+        if want and want in _my_rn((g.assigned_roles or {}).get(s, "")):
+            return s
+    return None
+
+
+def _my_role_is(g, seat, role) -> bool:
+    return _my_rn((g.assigned_roles or {}).get(seat, "")) == _my_rn(role)
+
+
+def _my_burned(g, seat) -> bool:
+    return seat is not None and seat in (getattr(g, "night_burned", set()) or set())
+
+
+def _my_has_act(g, seat) -> bool:
+    """آیا این صندلی اصلاً اکتِ شبانه دارد؟ (برای پیامِ «کانسورتی شدی»)"""
+    return any(_my_role_is(g, seat, r) for r in
+               (_R_MY_GF, _R_MY_NINJA, _R_MY_CONSORT,
+                _R_MY_BODY, _R_MY_SNIPER, _R_MY_DOC, _R_MY_DET))
+
+
+def _my_yesno(yes_cb, no_cb, no_text="🚫 امشب اکت نمی‌زنم"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ بله", callback_data=yes_cb)],
+        [InlineKeyboardButton(no_text, callback_data=no_cb)],
+    ])
+
+
+async def _my_prompt(ctx, g, seat, key, text, kb=None):
+    """پرامپتِ اکت + ثبت در فهرستِ انتظار. اکتِ سوخته همان‌جا «انجام‌شده» علامت می‌خورد."""
+    if seat is None or _my_burned(g, seat):
+        g.night_done.add(key)
+        store.save()
+        return None
+    uid = g.seats[seat][0]
+    m = await _safe_pm(ctx, uid, text, kb)
+    if m:
+        g.night_pm_msgs[uid] = m.message_id
+    g.my_expected.add(key)
+    store.save()
+    return m
+
+
+async def _my_consort_notice(ctx, g, seat):
+    """🎭 هدفِ کانسورت — اگر اکت‌دار باشد، در پیویش خبر می‌گیرد."""
+    if seat is None or seat not in g.seats or not _my_has_act(g, seat):
+        return
+    try:
+        await ctx.bot.send_message(g.seats[seat][0],
+                                   "🎭 شما کانسورتی شدید و امشب حق اکت ندارید.")
+    except Exception:
+        pass
+
+
+def _my_both_acts(g) -> bool:
+    """🔫+🎭 هر دو اکت فقط وقتی هر سهِ رئیس/کانسورت/نینجا در بازی‌اند."""
+    return all(_my_seat(g, r) is not None
+               for r in (_R_MY_GF, _R_MY_CONSORT, _R_MY_NINJA))
+
+
+def _my_doc_targets(g, doc_seat):
+    """💉 دکتر: خودش فقط یک‌بار در کلِ بازی، بقیه بی‌نهایت."""
+    return [s for s in _alive_seats(g)
+            if s != doc_seat or not getattr(g, "my_doc_self_used", False)]
+
+
+def _my_bg_targets(g, bg_seat):
+    """🛡 بادیگارد: خودش فقط یک‌بار در کلِ بازی، بقیه بی‌نهایت."""
+    return [s for s in _alive_seats(g)
+            if s != bg_seat or not getattr(g, "my_bg_self_used", False)]
+
+
+def _my_detective_positive(g, seat) -> bool:
+    """🔎 استعلام: گادفادر منفی؛ نینجا/کانسورت/تروریست مثبت؛ شهروندها منفی."""
+    return any(_my_role_is(g, seat, r)
+               for r in (_R_MY_NINJA, _R_MY_CONSORT, _R_MY_TERROR))
+
+
+# ── شبِ میتیک: مرحلهٔ ۱ — تیمِ مافیا ────────────────────────────
+async def _my_start(ctx, chat_id, g):
+    await _my_open_mafia(ctx, chat_id, g)
+
+
+async def _my_ask_shot(ctx, g, decider):
+    await _my_prompt(ctx, g, decider, "shot",
+                     "🔫 می‌خواهی امشب شات بزنی؟",
+                     _my_yesno("my_sh_yes", "my_sh_no", "🚫 امشب شات نمی‌زنم"))
+
+
+async def _my_ask_consort(ctx, g, co):
+    await _my_prompt(ctx, g, co, "consort",
+                     "🎭 می‌خواهی امشب کسی را کانسورتی کنی؟",
+                     _my_yesno("my_co_yes", "my_co_no"))
+
+
+async def _my_open_mafia(ctx, chat_id, g):
+    if "mafia_opened" in g.night_done:
+        return
+    g.night_done.add("mafia_opened")
+    gf = _my_seat(g, _R_MY_GF)
+    co = _my_seat(g, _R_MY_CONSORT)
+    nj = _my_seat(g, _R_MY_NINJA)
+    decider = gf or co or nj          # 🔫 وراثتِ شات: گادفادر → کانسورت → نینجا
+    g.my_decider_seat = decider
+    store.save()
+
+    if decider is None:
+        g.night_done.update({"shot", "consort"})
+    elif _my_both_acts(g):
+        # هر سه در بازی‌اند → هم شات، هم کانسورت
+        await _my_ask_shot(ctx, g, decider)
+        await _my_ask_consort(ctx, g, co)
+    elif co is not None:
+        # فقط یکی از دو اکت — تصمیم با تصمیم‌گیرندهٔ تیم
+        await _my_prompt(
+            ctx, g, decider, "mchoice",
+            "🎭 امشب فقط یکی از این دو را دارید — کدام؟",
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔫 شات", callback_data="my_ch_shot"),
+                InlineKeyboardButton("🎭 کانسورت", callback_data="my_ch_co")]]))
+        if "mchoice" in g.night_done:       # سوخته بود → هیچ اکتی نیست
+            g.night_done.update({"shot", "consort"})
+    else:
+        g.night_done.add("consort")         # کانسورتی در بازی نمانده
+        await _my_ask_shot(ctx, g, decider)
+    store.save()
+    await _my_check_open_citizens(ctx, chat_id, g)
+
+
+def _my_will_kb(g):
+    rows = [[InlineKeyboardButton("📖 وصیت باز", callback_data="my_w_open")]]
+    # 🔒 وصیتِ بسته: یک‌بار در کلِ بازی و فقط تا وقتی رئیس در بازی است
+    if not getattr(g, "my_will_closed_used", False) and _my_seat(g, _R_MY_GF) is not None:
+        rows.append([InlineKeyboardButton("🔒 وصیت بسته", callback_data="my_w_closed")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── شبِ میتیک: مرحلهٔ ۲ — شهروندان (بدون اولویت) ────────────────
+async def _my_check_open_citizens(ctx, chat_id, g):
+    if "citizens_opened" in g.night_done:
+        return
+    if not ({"shot", "consort"} <= (g.night_done or set())):
+        return
+    g.night_done.add("citizens_opened")
+    store.save()
+
+    ct = getattr(g, "my_consort_target", None)
+    for role, key, text in (
+        (_R_MY_DOC,  "doctor",    "💉 می‌خواهی امشب سیو بدهی؟"),
+        (_R_MY_BODY, "bodyguard", "🛡 می‌خواهی امشب از کسی محافظت کنی؟"),
+        (_R_MY_DET,  "detective", "🔎 می‌خواهی امشب استعلام بگیری؟"),
+    ):
+        s = _my_seat(g, role)
+        if s is None:
+            g.night_done.add(key)
+            continue
+        if s == ct:
+            await _my_consort_notice(ctx, g, s)
+            g.night_done.add(key)
+            continue
+        yes, no = {"doctor": ("my_dc_yes", "my_dc_no"),
+                   "bodyguard": ("my_bg_yes", "my_bg_no"),
+                   "detective": ("my_dt_yes", "my_dt_no")}[key]
+        await _my_prompt(ctx, g, s, key, text, _my_yesno(yes, no))
+
+    # 🎯 اسنایپر
+    sn = _my_seat(g, _R_MY_SNIPER)
+    if sn is None:
+        g.night_done.add("sniper")
+    elif getattr(g, "my_sniper_suicide_night", None) == g.night_number:
+        # ⚰️ شبِ خودکشی — نه اکتی دارد، نه انتخابی
+        g.night_done.add("sniper")
+        try:
+            await ctx.bot.send_message(
+                g.seats[sn][0],
+                "⚰️ تو شب گذشته یک شهروند را زدی — امشب خودکشی می‌کنی.\n"
+                "امشب حقِ اکت نداری.")
+        except Exception:
+            pass
+        await _night_report(ctx, g, f"⚰️ اسنایپر ({sn}) امشب خودکشی می‌کند.")
+    elif int(getattr(g, "my_sniper_shots", 0) or 0) >= 2:
+        g.night_done.add("sniper")
+    elif sn == ct:
+        await _my_consort_notice(ctx, g, sn)
+        g.night_done.add("sniper")
+    else:
+        await _my_prompt(ctx, g, sn, "sniper", "🎯 می‌خواهی امشب شلیک کنی؟",
+                         _my_yesno("my_sn_yes", "my_sn_no", "🚫 امشب شلیک نمی‌کنم"))
+    store.save()
+
+
+# ── حلِ شبِ میتیک ──────────────────────────────────────────────
+async def _resolve_mythic(ctx, chat_id, g):
+    dead, reasons = set(), {}
+    gf = _my_seat(g, _R_MY_GF)
+    co = _my_seat(g, _R_MY_CONSORT)
+    nj = _my_seat(g, _R_MY_NINJA)
+    bg = _my_seat(g, _R_MY_BODY)
+    sn = _my_seat(g, _R_MY_SNIPER)
+    doc_saved = set(g.night_doc_saved or [])
+    bgs = getattr(g, "my_bg_save", None)
+    bg_self = (bg is not None and bgs == bg)
+    notes = []           # 📣 اعلانِ عمومیِ روزِ بعد (میتیک علت را عمومی می‌گوید)
+
+    def _nm(s):
+        return f"{s}. {escape(g.seats[s][1], quote=False)}"
+
+    # 🔫 شاتِ مافیا
+    st = getattr(g, "night_shot_target", None)
+    will = getattr(g, "my_shot_will", None)
+    will_txt = " با وصیت بسته" if will == "closed" else " با وصیت باز"
+    if st and st in g.seats and st not in (g.striked or set()):
+        if st in doc_saved:
+            await _night_report(ctx, g, f"💉 سیوِ دکتر جلوی شاتِ مافیا روی {st} را گرفت.")
+        elif bgs == st:
+            if bg_self or nj is not None:
+                # 🛡 سیوِ خودیِ بادیگارد، یا نینجای زنده → دقیقاً مثل سیوِ دکتر
+                await _night_report(
+                    ctx, g,
+                    f"🛡 سیوِ بادیگارد جلوی شاتِ مافیا روی {st} را گرفت "
+                    + ("(سیوِ خودش — درگیری ندارد)." if bg_self else "(نینجا در بازی است)."))
+            else:
+                foe = co if co is not None else gf
+                dead.add(bg); reasons[bg] = "شات مافیا"
+                notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(bg)}</b> — به شات مافیا")
+                if foe is not None:
+                    dead.add(foe); reasons[foe] = "اکت بادیگارد"
+                    notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(foe)}</b> — به اکت بادیگارد")
+        else:
+            dead.add(st); reasons[st] = "شات مافیا" + will_txt
+            notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(st)}</b> — به شات مافیا{will_txt}")
+            if will == "closed":
+                g.my_will_closed_used = True
+            g.my_wills[st] = will or "open"
+
+    # 🎯 شاتِ اسنایپر
+    snt = getattr(g, "my_sniper_target", None)
+    if snt and snt in g.seats and snt not in (g.striked or set()):
+        if snt in doc_saved:
+            await _night_report(ctx, g, f"💉 سیوِ دکتر جلوی شاتِ اسنایپر روی {snt} را گرفت — خودکشی هم منتفی شد.")
+        elif bgs == snt and bg_self:
+            await _night_report(ctx, g, "🛡 بادیگارد خودش را سیو کرد — با اسنایپر درگیر نشد.")
+        elif bgs == snt:
+            # ⚔️ درگیریِ بادیگارد و اسنایپر — بدونِ شرطِ نینجا
+            if bg is not None and bg not in dead:
+                dead.add(bg); reasons[bg] = "شات اسنایپر"
+                notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(bg)}</b> — به شات اسنایپر")
+            if sn is not None and sn not in dead:
+                dead.add(sn); reasons[sn] = "اکت بادیگارد"
+                notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(sn)}</b> — به اکت بادیگارد")
+        else:
+            dead.add(snt); reasons[snt] = "شات اسنایپر"
+            notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(snt)}</b> — به شات اسنایپر (وصیت دارد)")
+            if snt not in _mafia_seats(g) and sn is not None and sn not in dead:
+                # 🎯 شهروند زد → شبِ بعد خودکشی
+                g.my_sniper_suicide_night = (g.night_number or 0) + 1
+                await _night_report(ctx, g, "🎯 اسنایپر شهروند زد — شبِ بعد خودکشی می‌کند.")
+
+    # ⚰️ خودکشیِ اسنایپر (شبی که برایش تعیین شده بود)
+    if (getattr(g, "my_sniper_suicide_night", None) == g.night_number
+            and sn is not None and sn not in dead):
+        dead.add(sn); reasons[sn] = "خودکشیِ اسنایپر"
+        notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(sn)}</b> — خودکشیِ اسنایپر")
+
+    _add_night_kick(g, dead, reasons)
+    store.save()
+    await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+    # 📣 میتیک علتِ خروج را عمومی اعلام می‌کند
+    if notes:
+        try:
+            await ctx.bot.send_message(chat_id, "\n".join(notes), parse_mode="HTML")
+        except Exception:
+            pass
+
+
+async def handle_mythic_callback(update, ctx):
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستیِ گاد
+
+    g, chat_id = _find_active_night_game(uid, q)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+    me = _seat_of_uid(g, uid)
+
+    # ── انتخابِ «شات یا کانسورت» وقتی فقط یکی مجاز است ──
+    if data in ("my_ch_shot", "my_ch_co"):
+        if "mchoice" in g.night_done:
+            return
+        g.night_done.add("mchoice")
+        co = _my_seat(g, _R_MY_CONSORT)
+        if data == "my_ch_shot":
+            g.night_done.add("consort")
+            store.save()
+            await _close_pm(ctx, uid, mid, "🔫 شات انتخاب شد.")
+            await _night_report(ctx, g, "🎭 تیمِ مافیا: شات را انتخاب کرد.")
+            await _my_ask_shot(ctx, g, g.my_decider_seat)
+        else:
+            g.night_done.add("shot")
+            store.save()
+            await _close_pm(ctx, uid, mid, "🎭 کانسورت انتخاب شد.")
+            await _night_report(ctx, g, "🎭 تیمِ مافیا: کانسورت را انتخاب کرد.")
+            await _my_ask_consort(ctx, g, co)
+        await _my_check_open_citizens(ctx, chat_id, g)
+        return
+
+    # ── شاتِ مافیا ──
+    if data == "my_sh_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب شات نزدی.")
+        await _night_report(ctx, g, "🔫 مافیا → شات نزد")
+        g.night_done.add("shot")
+        store.save()
+        await _my_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data == "my_sh_yes":
+        await _edit_pm(ctx, uid, mid, "📜 شات با وصیتِ باز باشد یا بسته؟", _my_will_kb(g))
+        return
+
+    if data in ("my_w_open", "my_w_closed"):
+        g.my_shot_will = "closed" if data == "my_w_closed" else "open"
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
+                       _kb_night_seats(list(_alive_seats(g)), g, "my_st_",
+                                       confirm_cb="my_st_ok"))
+        return
+
+    if data == "my_st_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_shot_target = s
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        _w = "بسته" if g.my_shot_will == "closed" else "باز"
+        await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {_tn} (وصیت {_w})")
+        await _night_report(ctx, g,
+                            f"🔫 شلیک مافیا → <b>{s}. {escape(_tn, quote=False)}</b> (وصیت {_w})")
+        g.night_done.add("shot")
+        store.save()
+        await _my_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data.startswith("my_st_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
+                       _kb_night_seats(list(_alive_seats(g)), g, "my_st_",
+                                       selected=s, confirm_cb="my_st_ok"))
+        return
+
+    # ── کانسورت ──
+    if data == "my_co_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب کسی را کانسورتی نکردی.")
+        await _night_report(ctx, g, "🎭 کانسورت → اکت نزد")
+        g.night_done.add("consort")
+        store.save()
+        await _my_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data == "my_co_yes":
+        # 🎭 هم‌تیمی مجاز است، خودش نه
+        targets = [s for s in _alive_seats(g) if s != me]
+        await _edit_pm(ctx, uid, mid, "🎭 چه کسی را کانسورتی می‌کنی؟",
+                       _kb_night_seats(targets, g, "my_ct_", confirm_cb="my_ct_ok"))
+        return
+
+    if data == "my_ct_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.my_consort_target = s
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"🎭 کانسورت ثبت شد: {s}. {_tn}")
+        await _night_report(ctx, g, f"🎭 کانسورت → <b>{s}. {escape(_tn, quote=False)}</b>")
+        g.night_done.add("consort")
+        store.save()
+        await _my_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data.startswith("my_ct_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        targets = [x for x in _alive_seats(g) if x != me]
+        await _edit_pm(ctx, uid, mid, "🎭 چه کسی را کانسورتی می‌کنی؟",
+                       _kb_night_seats(targets, g, "my_ct_", selected=s, confirm_cb="my_ct_ok"))
+        return
+
+    # ── دکتر ──
+    if data == "my_dc_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب سیو ندادی.")
+        await _night_report(ctx, g, "💉 دکتر → سیو نداد")
+        g.night_done.add("doctor")
+        store.save()
+        return
+
+    if data == "my_dc_yes":
+        await _edit_pm(ctx, uid, mid, "💉 چه کسی را سیو می‌دهی؟",
+                       _kb_night_seats(_my_doc_targets(g, me), g, "my_dt2_",
+                                       confirm_cb="my_dt2_ok"))
+        return
+
+    if data == "my_dt2_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        if s == me:
+            g.my_doc_self_used = True
+        g.night_doc_saved = [s]
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"💉 سیو ثبت شد: {s}. {_tn}")
+        await _night_report(ctx, g, f"💉 دکتر → سیو: <b>{s}. {escape(_tn, quote=False)}</b>")
+        g.night_done.add("doctor")
+        store.save()
+        return
+
+    if data.startswith("my_dt2_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "💉 چه کسی را سیو می‌دهی؟",
+                       _kb_night_seats(_my_doc_targets(g, me), g, "my_dt2_",
+                                       selected=s, confirm_cb="my_dt2_ok"))
+        return
+
+    # ── بادیگارد ──
+    if data == "my_bg_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب محافظت نکردی.")
+        await _night_report(ctx, g, "🛡 بادیگارد → اکت نزد")
+        g.night_done.add("bodyguard")
+        store.save()
+        return
+
+    if data == "my_bg_yes":
+        await _edit_pm(ctx, uid, mid, "🛡 از چه کسی محافظت می‌کنی؟",
+                       _kb_night_seats(_my_bg_targets(g, me), g, "my_bgt_",
+                                       confirm_cb="my_bgt_ok"))
+        return
+
+    if data == "my_bgt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        if s == me:
+            g.my_bg_self_used = True
+        g.my_bg_save = s
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"🛡 محافظت ثبت شد: {s}. {_tn}")
+        await _night_report(ctx, g, f"🛡 بادیگارد → محافظت از <b>{s}. {escape(_tn, quote=False)}</b>")
+        g.night_done.add("bodyguard")
+        store.save()
+        return
+
+    if data.startswith("my_bgt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🛡 از چه کسی محافظت می‌کنی؟",
+                       _kb_night_seats(_my_bg_targets(g, me), g, "my_bgt_",
+                                       selected=s, confirm_cb="my_bgt_ok"))
+        return
+
+    # ── کاراگاه ──
+    if data == "my_dt_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب استعلام نگرفتی.")
+        await _night_report(ctx, g, "🔎 کاراگاه → استعلام نگرفت")
+        g.night_done.add("detective")
+        store.save()
+        return
+
+    if data == "my_dt_yes":
+        targets = [s for s in _alive_seats(g) if s != me]
+        await _edit_pm(ctx, uid, mid, "🔎 از چه کسی استعلام می‌گیری؟",
+                       _kb_night_seats(targets, g, "my_dtt_", confirm_cb="my_dtt_ok"))
+        return
+
+    if data == "my_dtt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_sel.pop(uid, None)
+        pos = _my_detective_positive(g, s)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid,
+                        f"🔎 {s}. {_tn} → " + ("مثبت ✅" if pos else "منفی ❌"))
+        await _night_report(ctx, g, f"🔎 کاراگاه → {s}. {escape(_tn, quote=False)}: "
+                            + ("مثبت" if pos else "منفی"))
+        g.night_done.add("detective")
+        store.save()
+        return
+
+    if data.startswith("my_dtt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        targets = [x for x in _alive_seats(g) if x != me]
+        await _edit_pm(ctx, uid, mid, "🔎 از چه کسی استعلام می‌گیری؟",
+                       _kb_night_seats(targets, g, "my_dtt_", selected=s, confirm_cb="my_dtt_ok"))
+        return
+
+    # ── اسنایپر ──
+    if data == "my_sn_no":
+        await _close_pm(ctx, uid, mid, "🚫 امشب شلیک نکردی.")
+        await _night_report(ctx, g, "🎯 اسنایپر → شلیک نکرد")
+        g.night_done.add("sniper")
+        store.save()
+        return
+
+    if data == "my_sn_yes":
+        targets = [s for s in _alive_seats(g) if s != me]
+        await _edit_pm(ctx, uid, mid, "🎯 به چه کسی شلیک می‌کنی؟",
+                       _kb_night_seats(targets, g, "my_snt_", confirm_cb="my_snt_ok"))
+        return
+
+    if data == "my_snt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.my_sniper_target = s
+        g.my_sniper_shots = int(getattr(g, "my_sniper_shots", 0) or 0) + 1
+        g.night_sel.pop(uid, None)
+        _tn = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"🎯 شلیک ثبت شد: {s}. {_tn}")
+        await _night_report(ctx, g, f"🎯 اسنایپر → شلیک به <b>{s}. {escape(_tn, quote=False)}</b> "
+                            f"(تیرِ {g.my_sniper_shots} از ۲)")
+        g.night_done.add("sniper")
+        store.save()
+        return
+
+    if data.startswith("my_snt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        targets = [x for x in _alive_seats(g) if x != me]
+        await _edit_pm(ctx, uid, mid, "🎯 به چه کسی شلیک می‌کنی؟",
+                       _kb_night_seats(targets, g, "my_snt_", selected=s, confirm_cb="my_snt_ok"))
+        return
+
+
+# ── 💣 ترورِ روز ────────────────────────────────────────────────
+async def _my_terror_start(ctx, chat_id, g, seat):
+    """💣 تروریست در روز «ترور» یا 💣 نوشت → سؤال کفِ گروه."""
+    g.my_terror_asking = True
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"💣 <b>ترور!</b>\n{seat}. {escape(g.seats[seat][1], quote=False)} "
+        "چه کسی را با خودش می‌برد؟ فقط عدد بنویس.",
+        parse_mode="HTML")
+
+
+async def _my_terror_apply(ctx, chat_id, g, seat, target):
+    """💣 اجرای ترور — همان لحظه در روز، با اعلامِ عمومی."""
+    g.my_terror_asking = False
+    g.my_terror_used = True
+    dead = {seat}
+    lines = [f"💣 <b>{seat}. {escape(g.seats[seat][1], quote=False)}</b> خودش را منفجر کرد."]
+    if _my_role_is(g, target, _R_MY_SIMPLE):
+        lines.append(f"🤷 شهرِ ساده بود — دست خالی می‌روی. "
+                     f"{target}. {escape(g.seats[target][1], quote=False)} در بازی می‌ماند.")
+    else:
+        dead.add(target)
+        lines.append(f"🕊 خداحافظی می‌کنیم با <b>{target}. "
+                     f"{escape(g.seats[target][1], quote=False)}</b> — وصیت دارد.")
+    for s in dead:
+        g.striked.add(s)
+    store.save()
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await _night_report(ctx, g, f"💣 ترور: {seat} → {target} | خارج‌شده‌ها: {sorted(dead)}")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _check_auto_end(ctx, chat_id, g)
+
+
+# ═════════════════════════════════════════════════════════════
 #  موتور شبِ خودکار — سناریو «شاهنامه»
 #  شب ۱ : کاوه → تیمِ اهریمن → افراسیاب → سیمرغ → صاحبانِ پر →
 #          رستم → جاماسب → آرش
@@ -13633,9 +14342,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
-    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_", "gm_", "sh_")):
+    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_",
+                                              "gm_", "sh_", "my_")):
         _dt = _q.data
-        if _dt.startswith("night_"):
+        if _dt.startswith("my_"):
+            await handle_mythic_callback(update, ctx)
+        elif _dt.startswith("night_"):
             await handle_night_callback(update, ctx)
         elif _dt.startswith("bzp_"):
             await handle_baazpors_callback(update, ctx)
@@ -15693,6 +16405,24 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
 
+    # 💣 ترورِ روز (میتیک): «ترور» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد
+    #    یک‌بار در کلِ بازی؛ کانسورتیِ شب هیچ اثری روی اکتِ روز ندارد
+    if (_is_mythic_scenario(g) and not getattr(g, "night_active", False)
+            and not getattr(g, "maarefe_active", False)
+            and not getattr(g, "my_terror_used", False)):
+        _tseat = _seat_of_uid(g, uid)
+        if (_tseat is not None and _tseat not in (g.striked or set())
+                and _my_role_is(g, _tseat, _R_MY_TERROR)):
+            if not getattr(g, "my_terror_asking", False):
+                if _nz(text) == _nz("ترور") or "💣" in text:
+                    await _my_terror_start(ctx, msg.chat.id, g, _tseat)
+                    return
+            else:
+                _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
+                if _tv is not None:
+                    await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
+                    return
+
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
         return
@@ -16742,6 +17472,9 @@ def _mafia_room_seats(g):
     seats = [s for s in g.seats if s in (g.negotiated_seats or set()) or sides.get(s) == "مافیا"]
     if _is_takavar_scenario(g):
         seats = [s for s in seats if _seat_role_norm(g, s) != _R_HOSTAGE]
+    if _is_mythic_scenario(g):
+        # 💣 تروریست نه لینک می‌گیرد نه یارانش را می‌شناسد
+        seats = [s for s in seats if not _my_role_is(g, s, _R_MY_TERROR)]
     return seats
 
 
@@ -17225,6 +17958,9 @@ async def do_maarefe(ctx, chat_id, g):
     await ctx.bot.send_message(chat_id, "🎭 <b>شب معارفه</b>", parse_mode="HTML")
     sides = getattr(g, "seat_sides", {}) or {}
     mafia_seats = [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
+    if _is_mythic_scenario(g):
+        # 💣 تروریست نه یارانش را می‌شناسد نه یارانش او را
+        mafia_seats = [s for s in mafia_seats if not _my_role_is(g, s, _R_MY_TERROR)]
     # ✋ سناریوی بدونِ موتور: بات هیچ نقشی برای تیمِ مافیا نمی‌فرستد — همه‌چیز دستِ گاد است
     if not manual:
         for s in mafia_seats:
@@ -17319,6 +18055,8 @@ def _diag_scenario_report(g) -> str:
     if _is_takavar_scenario(g): detected.append("تکاور")
     if _is_kapu_scenario(g): detected.append("کاپو")
     if _is_gamer_scenario(g): detected.append("گیمر")
+    if _is_shahname_scenario(g): detected.append("شاهنامه")
+    if _is_mythic_scenario(g): detected.append("میتیک")
     lines = [
         "🔍 <b>تشخیص سناریو و نقش‌ها</b>",
         f"نام سناریو: «{escape(sc_name, quote=False)}»",
@@ -17448,6 +18186,24 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                         else:
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
+
+    # 💣 ترورِ روز (میتیک): «ترور» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد
+    #    یک‌بار در کلِ بازی؛ کانسورتیِ شب هیچ اثری روی اکتِ روز ندارد
+    if (_is_mythic_scenario(g) and not getattr(g, "night_active", False)
+            and not getattr(g, "maarefe_active", False)
+            and not getattr(g, "my_terror_used", False)):
+        _tseat = _seat_of_uid(g, uid)
+        if (_tseat is not None and _tseat not in (g.striked or set())
+                and _my_role_is(g, _tseat, _R_MY_TERROR)):
+            if not getattr(g, "my_terror_asking", False):
+                if _nz(text) == _nz("ترور") or "💣" in text:
+                    await _my_terror_start(ctx, msg.chat.id, g, _tseat)
+                    return
+            else:
+                _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
+                if _tv is not None:
+                    await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
+                    return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
