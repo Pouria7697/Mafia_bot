@@ -1356,6 +1356,266 @@ def format_game_history(rows: list) -> str:
     return "\n".join(lines)
 
 
+# ═══════════ 🔀 انتقالِ آمارِ یک بازیکن به آیدیِ جدید ═══════════
+#  وقتی کسی اکانتش را پاک می‌کند و با آیدیِ تازه برمی‌گردد.
+#  همه‌چیزش جمع می‌شود و آیدیِ قدیم از تمامِ فایل‌های گیست پاک.
+def _merge_stat_rows(old: dict, new: dict) -> dict:
+    """➕ جمعِ دو ردیفِ آمار: عددها جمع، مدال‌ها جمع، اسم از ردیفِ جدید."""
+    out = dict(new or {})
+    for k, v in (old or {}).items():
+        if k == "name":
+            out["name"] = (new or {}).get("name") or v
+        elif k == "medals":
+            m = dict(out.get("medals") or {})
+            for mk, mv in (v or {}).items():
+                try:
+                    m[mk] = int(m.get(mk, 0) or 0) + int(mv or 0)
+                except Exception:
+                    pass
+            out["medals"] = m
+        elif k == "kick_streak":
+            try:
+                out["kick_streak"] = max(int(out.get("kick_streak", 0) or 0), int(v or 0))
+            except Exception:
+                pass
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            cur = out.get(k, 0)
+            if not isinstance(cur, (int, float)) or isinstance(cur, bool):
+                cur = 0
+            s = cur + v
+            out[k] = round(s, 1) if isinstance(s, float) else s
+        elif k not in out:
+            out[k] = v
+    return out
+
+
+def _merge_history_rows(old_rows, new_rows):
+    """🎮 ادغامِ تاریخچهٔ «بازی من» — مرتب بر اساس تاریخ، با همان سقفِ ۵۰ بازی."""
+    rows = list(old_rows or []) + list(new_rows or [])
+    rows.sort(key=lambda r: str((r or {}).get("d") or ""))
+    return rows[-50:]
+
+
+def _moveuser_apply(old_uid: str, new_uid: str) -> list[str]:
+    """🔀 اجرای انتقال روی همهٔ فایل‌های گیست. (همگی sync — با to_thread صدا زده شود)"""
+    log = []
+
+    # 1️⃣ آمارِ اصلی
+    stats = load_player_stats()
+    if stats is None:
+        return ["⛔ آمار از گیست خوانده نشد — هیچ فایلی دست نخورد."]
+    if old_uid in stats:
+        stats[new_uid] = _merge_stat_rows(stats.get(old_uid), stats.get(new_uid))
+        stats.pop(old_uid, None)
+        log.append("✅ آمار (بازی/برد/امتیاز/گادی/مدال) ادغام شد."
+                   if save_player_stats(stats) else "❌ آمار: نوشتن روی گیست ناموفق بود!")
+    else:
+        log.append("ℹ️ آمار: آیدیِ قدیم نبود.")
+
+    # 2️⃣ تاریخچهٔ «بازی من»
+    hist = load_game_history()
+    if hist is None:
+        log.append("❌ تاریخچه: خوانده نشد — دست‌نخورده ماند.")
+    elif old_uid in hist:
+        hist[new_uid] = _merge_history_rows(hist.get(old_uid), hist.get(new_uid))
+        hist.pop(old_uid, None)
+        log.append("✅ تاریخچهٔ بازی‌ها ادغام و مرتب شد."
+                   if save_game_history(hist) else "❌ تاریخچه: نوشتن ناموفق بود!")
+    else:
+        log.append("ℹ️ تاریخچه: آیدیِ قدیم نبود.")
+
+    # 3️⃣ دفترِ مدال‌ها (تاریخچهٔ فصل‌ها)
+    mlog = load_medals_log()
+    if mlog is None:
+        log.append("❌ دفترِ مدال‌ها: خوانده نشد.")
+    else:
+        cnt = 0
+        for s in (mlog.get("seasons") or []):
+            for w in (s.get("winners") or []):
+                if str(w.get("uid")) == old_uid:
+                    w["uid"] = new_uid
+                    cnt += 1
+        if cnt:
+            log.append(f"✅ دفترِ مدال‌ها: {cnt} رکورد به آیدیِ جدید خورد."
+                       if save_medals_log(mlog) else "❌ دفترِ مدال‌ها: نوشتن ناموفق بود!")
+        else:
+            log.append("ℹ️ دفترِ مدال‌ها: رکوردی نداشت.")
+
+    # 4️⃣ اسنپ‌شاتِ هفتگی — وگرنه تفاضلِ هفتهٔ بعد به‌هم می‌ریزد
+    meta = load_weekly_meta()
+    if isinstance(meta, dict):
+        snap = meta.get("snapshot") or {}
+        if old_uid in snap:
+            snap[new_uid] = _merge_stat_rows(snap.get(old_uid), snap.get(new_uid))
+            snap.pop(old_uid, None)
+            meta["snapshot"] = snap
+            save_weekly_meta(meta)
+            log.append("✅ اسنپ‌شاتِ هفتگی هم منتقل شد.")
+        else:
+            log.append("ℹ️ اسنپ‌شاتِ هفتگی: آیدیِ قدیم نبود.")
+    else:
+        log.append("❌ اسنپ‌شاتِ هفتگی: خوانده نشد.")
+
+    # 5️⃣ یوزرنیم
+    try:
+        un = load_usernames_from_gist()
+        if isinstance(un, dict) and int(old_uid) in un:
+            un.setdefault(int(new_uid), un[int(old_uid)])
+            un.pop(int(old_uid), None)
+            save_usernames_to_gist(un)
+            log.append("✅ یوزرنیم منتقل شد.")
+    except Exception as e:
+        log.append(f"⚠️ یوزرنیم: {e}")
+
+    # 6️⃣ محرومیت‌ها (گاد شدن / نشستن در لیست)
+    try:
+        bans = load_god_bans()
+        if isinstance(bans, dict):
+            moved = []
+            for sec in ("banned", "seats"):
+                d = bans.get(sec) or {}
+                if old_uid in d:
+                    d.setdefault(new_uid, d[old_uid])
+                    d.pop(old_uid, None)
+                    bans[sec] = d
+                    moved.append(sec)
+            if moved:
+                save_god_bans(bans)
+                log.append("✅ محرومیت‌ها منتقل شد.")
+    except Exception as e:
+        log.append(f"⚠️ محرومیت‌ها: {e}")
+
+    # 7️⃣ لیستِ منتخب
+    try:
+        sl = load_selected_list()
+        if isinstance(sl, dict):
+            changed = False
+            for sec in ("candidates", "responses"):
+                d = sl.get(sec) or {}
+                if old_uid in d:
+                    d.setdefault(new_uid, d[old_uid])
+                    d.pop(old_uid, None)
+                    sl[sec] = d
+                    changed = True
+            if changed:
+                save_selected_list(sl)
+                log.append("✅ لیستِ منتخب هم به‌روز شد.")
+    except Exception as e:
+        log.append(f"⚠️ لیستِ منتخب: {e}")
+
+    # 🎖 کشِ نشان‌ها تازه شود تا مدال فوری کنارِ اسم بیاید
+    try:
+        refresh_medal_cache()
+    except Exception:
+        pass
+    return log
+
+
+async def cmd_moveuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🔀 /moveuser <آیدی قدیم> <آیدی جدید> — فقط سازندهٔ بات، فقط در پیوی."""
+    msg = update.message
+    if not msg or msg.chat.type != "private" or msg.from_user.id != ADMIN_ID:
+        return
+    args = [a.strip() for a in (ctx.args or [])]
+    if len(args) != 2 or not all(a.isdigit() for a in args):
+        await msg.reply_text(
+            "🔀 <b>انتقالِ آمارِ بازیکن به آیدیِ جدید</b>\n\n"
+            "<code>/moveuser آیدی‌قدیم آیدی‌جدید</code>\n"
+            "مثال: <code>/moveuser 8739731843 243563480</code>\n\n"
+            "<i>آمار، برد‌ها، امتیاز، مدال‌ها، امتیازِ گادی و تاریخچهٔ «بازی من» "
+            "با هم جمع می‌شوند و آیدیِ قدیم از همهٔ فایل‌های گیست پاک می‌شود.</i>",
+            parse_mode="HTML")
+        return
+
+    old_uid, new_uid = args
+    if old_uid == new_uid:
+        await msg.reply_text("⛔ هر دو آیدی یکی است.")
+        return
+
+    stats = load_player_stats()
+    if stats is None:
+        await msg.reply_text("⛔ آمار از گیست خوانده نشد — کمی بعد دوباره امتحان کن.")
+        return
+    o = stats.get(old_uid)
+    if not o:
+        await msg.reply_text(f"⛔ آیدیِ <code>{old_uid}</code> در آمار نیست.", parse_mode="HTML")
+        return
+    n = stats.get(new_uid) or {}
+    merged = _merge_stat_rows(o, n)
+
+    hist = load_game_history() or {}
+    ho, hn = len(hist.get(old_uid) or []), len(hist.get(new_uid) or [])
+
+    def _line(tag, uid, d):
+        if not d:
+            return f"{tag} <code>{uid}</code> — <i>ردیفی ندارد</i>"
+        mb = _medal_badges(d)
+        return (f"{tag} <code>{uid}</code> — {escape(str(d.get('name') or '؟'), quote=False)}\n"
+                f"    {d.get('games', 0)} بازی | {d.get('wins', 0)} برد | "
+                f"گادی {d.get('god_games', 0)}" + (f" | {mb}" if mb else ""))
+
+    txt = (
+        "🔀 <b>انتقالِ آمار</b>\n\n"
+        + _line("از:", old_uid, o) + "\n"
+        + _line("به:", new_uid, n) + "\n\n"
+        "━━━━━━━━━━━━\n"
+        f"<b>بعد از ادغام:</b> {merged.get('games', 0)} بازی | "
+        f"{merged.get('wins', 0)} برد | گادی {merged.get('god_games', 0)}"
+        + (f" | {_medal_badges(merged)}" if _medal_badges(merged) else "") + "\n"
+        f"<b>تاریخچه:</b> {ho} + {hn} = {min(ho + hn, 50)} بازی (سقف ۵۰)\n\n"
+        f"⚠️ آیدیِ <code>{old_uid}</code> از آمار، تاریخچه، دفترِ مدال‌ها، "
+        "اسنپ‌شاتِ هفتگی، یوزرنیم‌ها، محرومیت‌ها و لیستِ منتخب <b>پاک می‌شود</b>."
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ انتقال بده", callback_data=f"mvu_go_{old_uid}_{new_uid}"),
+        InlineKeyboardButton("🚫 لغو", callback_data="mvu_no"),
+    ]])
+    await msg.reply_text(txt, parse_mode="HTML", reply_markup=kb)
+
+
+async def handle_moveuser_callback(update, ctx):
+    q = update.callback_query
+    uid = q.from_user.id
+    if uid != ADMIN_ID:
+        await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
+        return
+    data = q.data or ""
+    mid = q.message.message_id if q.message else None
+
+    if data == "mvu_no":
+        await safe_q_answer(q)
+        try:
+            await ctx.bot.edit_message_text(chat_id=uid, message_id=mid,
+                                            text="🚫 لغو شد — هیچ‌چیز عوض نشد.")
+        except Exception:
+            pass
+        return
+
+    parts = data.split("_")
+    if len(parts) != 4 or parts[1] != "go":
+        await safe_q_answer(q)
+        return
+    old_uid, new_uid = parts[2], parts[3]
+    await safe_q_answer(q)
+    try:
+        await ctx.bot.edit_message_text(chat_id=uid, message_id=mid,
+                                        text="⏳ در حالِ انتقال…")
+    except Exception:
+        pass
+
+    log = await asyncio.to_thread(_moveuser_apply, old_uid, new_uid)
+    txt = (f"🔀 <b>{old_uid} → {new_uid}</b>\n\n" + "\n".join(log)
+           + "\n\n<i>کشِ نشان‌ها تازه شد؛ مدال از همین حالا کنارِ اسم می‌آید.</i>")
+    try:
+        await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text=txt,
+                                        parse_mode="HTML")
+    except Exception:
+        try:
+            await ctx.bot.send_message(uid, txt, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 def format_player_stats(p: dict) -> str:
     """متن فارسی آمار یک بازیکن — بدون نمایش آیدی."""
     def pct(w, n):
@@ -14354,6 +14614,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_admin_panel_callback(update, ctx)
         return
 
+    # 🔀 تأییدِ انتقالِ آمار به آیدیِ جدید (پیویِ سازندهٔ بات)
+    if _q and _q.data and _q.data.startswith("mvu_"):
+        await handle_moveuser_callback(update, ctx)
+        return
+
     # 🔗 انتخابِ گیرندگانِ لینکِ اتاقِ مافیا (پیویِ گاد — سناریوهای بدونِ موتور)
     if _q and _q.data and _q.data.startswith("mlk_"):
         await handle_mlink_callback(update, ctx)
@@ -17227,6 +17492,8 @@ _ADM_HELP = (
     "• <code>/addroom</code> / <code>/delroom</code> — ثبت/حذفِ گروه به‌عنوان اتاقِ چتِ مافیا\n"
     "• <code>/addscenario</code> ، <code>/removescenario</code> — سناریو\n"
     "• <code>/addmafia &lt;نقش&gt;</code> — افزودن به فهرستِ نقش‌های مافیا\n"
+    "• <code>/moveuser &lt;آیدی قدیم&gt; &lt;آیدی جدید&gt;</code> — انتقالِ کاملِ آمارِ "
+    "یک بازیکن به آیدیِ تازه (اکانتِ پاک‌شده)\n"
     "• <code>/addindep &lt;سناریو&gt; &lt;نقش&gt;</code> — نقشِ مستقل\n"
     "• <code>/addcard &lt;سناریو&gt; &lt;متن&gt;</code> — کارت (متنی است، نه عکس)\n"
     "• <code>/newgame</code> ، <code>/resetgame</code> ، <code>/god</code> ، "
@@ -19248,6 +19515,7 @@ async def main():
     app.add_handler(CommandHandler("addscenario", addscenario, filters=_owner))
     app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=_owner))
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=_owner))
+    app.add_handler(CommandHandler("moveuser", cmd_moveuser, filters=_owner))
     app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=_owner))
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=_owner))
     app.add_handler(CommandHandler("list", cmd_lists, filters=group_filter))
