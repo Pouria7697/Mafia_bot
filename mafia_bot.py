@@ -12807,21 +12807,10 @@ def _sh_boof_victim(g):
     return None
 
 
-def _sh_sync_kaveh(g):
-    """🔨 لحظهٔ خروجِ کاوه را ثبت می‌کند تا شبِ بعدش شاتِ اهریمن کشته نگیرد."""
-    kv = _sh_seat(g, _R_KAVEH, alive_only=False)
-    if kv is None:
-        return
-    if kv in (g.striked or set()) and not getattr(g, "sh_kaveh_out", False):
-        g.sh_kaveh_out = True
-        g.sh_kaveh_block_night = g.night_number
-        store.save()
-
-
 def _sh_kaveh_blocks(g) -> bool:
-    if getattr(g, "sh_kaveh_block_night", None) != g.night_number:
-        return False
-    return _sh_seat(g, _R_ZAHHAK) is not None    # فقط اگر ضحاک زنده باشد
+    """🔨 خشمِ کاوه — فقط شبِ بعد از اینکه کاوه با «شاتِ شب» کشته شود:
+    شاتِ تیمِ اهریمن کشته نمی‌گیرد، فرقی نمی‌کند شات دستِ چه کسی باشد."""
+    return getattr(g, "sh_kaveh_block_night", None) == g.night_number
 
 
 def _sh_final_pair(g):
@@ -12844,7 +12833,6 @@ def _sh_duel_locked(g, voter_seat, target_seat) -> bool:
 
 # ─────────────────── 🌙 مراحلِ شب ───────────────────
 async def _sh_start(ctx, chat_id, g):
-    _sh_sync_kaveh(g)
     if g.night_number == 1:
         g.night_done.add("shadow")      # شبِ اول سایه‌ای برای تعیین‌تکلیف نیست
         store.save()
@@ -13592,6 +13580,14 @@ async def _resolve_shahname(ctx, chat_id, g):
         else:
             dead.add(st)
             reasons[st] = "شلیک تیم اهریمن"
+            # 🔨 خشمِ کاوه فقط با «شات‌شدنِ شب» فعال می‌شود —
+            #    رأیِ روز و کیک این اثر را ندارند.
+            if _sh_seat(g, _R_KAVEH, alive_only=False) == st:
+                g.sh_kaveh_out = True
+                g.sh_kaveh_block_night = (g.night_number or 0) + 1
+                store.save()
+                await _night_report(
+                    ctx, g, "🔨 کاوه با شاتِ شب رفت — شبِ بعد شاتِ اهریمن کشته نمی‌گیرد.")
     bv = _sh_boof_victim(g)
     if bv:
         dead.add(bv)
