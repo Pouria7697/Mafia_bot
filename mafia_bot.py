@@ -274,7 +274,11 @@ class GameState:
         self.nem_deng_unread = getattr(self, "nem_deng_unread", set()) or set()
         self.nem_deng_first = getattr(self, "nem_deng_first", None)
         self.nem_deng_cands = getattr(self, "nem_deng_cands", []) or []
-        self.nem_deng_result = getattr(self, "nem_deng_result", None)     # [اول، دوم] منتظرِ تأیید در «باز»
+        self.nem_deng_result = getattr(self, "nem_deng_result", None)
+        # 🛡 هدفِ محافظ (تا روزِ بعد می‌ماند) و 💣 یاغیِ روز
+        self.nem_guard_target = getattr(self, "nem_guard_target", None)
+        self.nem_yaghi_used = getattr(self, "nem_yaghi_used", False)
+        self.nem_yaghi_asking = getattr(self, "nem_yaghi_asking", False)     # [اول، دوم] منتظرِ تأیید در «باز»
         # ── 🏅 امتیازدهی (نسخه‌ی تستی) ──
         self.score_events = getattr(self, "score_events", {}) or {}          # seat → [(cat, pts, reason)]
         self.score_kicked = getattr(self, "score_kicked", set()) or set()
@@ -5327,7 +5331,8 @@ async def start_night(ctx, chat_id, g):
     g.kp_yak_tmp = False
     g.bzp_yak_tmp = False
     g.night_hunter_target = None
-    # per-night نماینده
+    # per-night نماینده (هدفِ محافظ تازه اینجا پاک می‌شود — در روز هنوز لازمش داریم)
+    g.nem_guard_target = None
     g.night_hacker_actor = None
     g.night_hacker_target = None
     g.night_don_defuse = False
@@ -5721,7 +5726,7 @@ def _burn_seat_acts(g, seat, force=False):
     per_role = {
         # 🛡 سیو/محافظت
         _R_DOCTOR:      ("night_doc_saved",),
-        _R_GUARD:       ("night_doc_saved",),            # محافظِ نماینده
+        _R_GUARD:       ("nem_guard_target",),           # محافظِ نماینده
         _R_ARMORER:     ("night_doc_saved",),            # زره‌سازِ کاپو
         _R_WATCHMAN:    ("night_guard_seats",),          # نگهبانِ تکاور
         # 🔫 کشتن/شلیک
@@ -8539,6 +8544,62 @@ def _is_nemayande_scenario(g) -> bool:
     return bool(getattr(g, "scenario", None)) and (_nz(NEMAYANDE_KEY) in _nz(g.scenario.name))
 
 
+# ── 💣 یاغیِ روز (نماینده) ──────────────────────────────────────
+def _nem_yaghi_unlocked(g) -> bool:
+    """💣 یاغی فقط وقتی می‌تواند که تیمِ سه‌نفره‌شان کامل نمانده باشد —
+    یعنی دن‌مافیا یا هکر به هر نحوی از بازی خارج شده باشد."""
+    for r in (_R_DON, _R_HACKER):
+        s = _find_seat_by_role(g, r, alive_only=False)
+        if s is not None and s in (g.striked or set()):
+            return True
+    return False
+
+
+async def _nem_yaghi_start(ctx, chat_id, g, seat):
+    """💣 «یاغی» یا 💣 کفِ گروه → تأیید و سؤالِ عدد."""
+    g.nem_yaghi_asking = True
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"💣 <b>یاغی!</b>\n{seat}. {escape(g.seats[seat][1], quote=False)} — "
+        "چه کسی را با خودت می‌بری؟ فقط عدد بنویس.",
+        parse_mode="HTML")
+
+
+async def _nem_yaghi_apply(ctx, chat_id, g, seat, target):
+    """💣 اجرا: محافظ یا محافظت‌شده‌ی شبِ قبل → دست خالی؛ وگرنه هر دو خارج.
+    بدونِ وصیت، و بلافاصله شب باز می‌شود (گاد دکمهٔ شب را نمی‌زند)."""
+    g.nem_yaghi_asking = False
+    g.nem_yaghi_used = True
+    grd = _find_seat_by_role(g, _R_GUARD, alive_only=False)
+    prot = getattr(g, "nem_guard_target", None)
+    empty = ((grd is not None and target == grd)
+             or (prot is not None and target == prot))
+
+    me = f"{seat}. {escape(g.seats[seat][1], quote=False)}"
+    dead = {seat}
+    if empty:
+        lines = ["💣 <b>یاغی دست خالی می‌رود.</b>",
+                 f"🕊 {me} از بازی خارج شد."]
+    else:
+        dead.add(target)
+        nm_t = escape(g.seats[target][1], quote=False) if target in g.seats else "؟"
+        lines = [f"💣 <b>{target}. {nm_t}</b> با یاغی از بازی خارج شد — وصیت ندارد.",
+                 f"🕊 {me} هم از بازی خارج شد."]
+    for s in dead:
+        g.striked.add(s)
+    store.save()
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await _night_report(ctx, g, f"💣 یاغی: {seat} → {target} | "
+                        + ("دست خالی (محافظ/محافظت‌شده)" if empty else "هر دو خارج"))
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _check_auto_end(ctx, chat_id, g)
+    await start_night(ctx, chat_id, g)   # 🌙 شبِ خودکار
+
+
 def _find_seat_role_sub(g, sub_norm, alive_only=True):
     """یافتن صندلی که نقش نرمالایزش شامل sub_norm باشد (برای نقش‌هایی مثل «وکیل(شهر)»)."""
     seats = _alive_seats(g) if alive_only else sorted(g.seats)
@@ -9043,6 +9104,7 @@ async def handle_nemayande_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         _tu, tname = g.seats[s]
+        g.nem_guard_target = s     # 🛡 تا روزِ بعد می‌ماند (یاغی به آن نیاز دارد)
         await _close_pm(ctx, uid, mid, f"🛡 محافظت از {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"🛡 محافظ → محافظت از <b>{s}. {escape(tname, quote=False)}</b>")
         # 🏅 محافظت از مافیا = اکتِ اشتباه + فریبِ آن مافیا؛ از شهروند = اکتِ درست
@@ -16716,6 +16778,26 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
                     return
 
+    # 💣 یاغیِ روز (نماینده): «یاغی» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد.
+    #    فقط وقتی تیمِ سه‌نفره کامل نمانده باشد؛ یک‌بار در کلِ بازی، بدونِ وصیت.
+    #    اگر شرطش برقرار نباشد بی‌صدا رد می‌شود تا نقشِ یاغی لو نرود.
+    if (_is_nemayande_scenario(g) and not getattr(g, "night_active", False)
+            and not getattr(g, "maarefe_active", False)
+            and not getattr(g, "nem_yaghi_used", False)):
+        _yseat = _seat_of_uid(g, uid)
+        if (_yseat is not None and _yseat not in (g.striked or set())
+                and _seat_role_norm(g, _yseat) == _R_YAGHI):
+            if not getattr(g, "nem_yaghi_asking", False):
+                if ((_nz(text) == _nz("یاغی") or "💣" in text)
+                        and _nem_yaghi_unlocked(g)):
+                    await _nem_yaghi_start(ctx, msg.chat.id, g, _yseat)
+                    return
+            else:
+                _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
+                if _yv is not None:
+                    await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
+                    return
+
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
         return
@@ -18498,6 +18580,26 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
                 if _tv is not None:
                     await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
+                    return
+
+    # 💣 یاغیِ روز (نماینده): «یاغی» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد.
+    #    فقط وقتی تیمِ سه‌نفره کامل نمانده باشد؛ یک‌بار در کلِ بازی، بدونِ وصیت.
+    #    اگر شرطش برقرار نباشد بی‌صدا رد می‌شود تا نقشِ یاغی لو نرود.
+    if (_is_nemayande_scenario(g) and not getattr(g, "night_active", False)
+            and not getattr(g, "maarefe_active", False)
+            and not getattr(g, "nem_yaghi_used", False)):
+        _yseat = _seat_of_uid(g, uid)
+        if (_yseat is not None and _yseat not in (g.striked or set())
+                and _seat_role_norm(g, _yseat) == _R_YAGHI):
+            if not getattr(g, "nem_yaghi_asking", False):
+                if ((_nz(text) == _nz("یاغی") or "💣" in text)
+                        and _nem_yaghi_unlocked(g)):
+                    await _nem_yaghi_start(ctx, msg.chat.id, g, _yseat)
+                    return
+            else:
+                _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
+                if _yv is not None:
+                    await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
                     return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
