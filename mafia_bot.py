@@ -3271,6 +3271,17 @@ def _final_vote_threshold(alive_count: int, g=None) -> int:
     return alive_count // 2
 
 
+def _bump_defense_history(g, seats):
+    """📜 ثبتِ «سابقهٔ دفاع» — هرجا کسی واقعاً به دفاع می‌آید:
+    رأی‌گیریِ نهایی، بازپرسی، و جفتِ دفاعِ کاپویی. (ملاکِ تساوی در رأی نهایی)"""
+    hist = getattr(g, "defense_history", {}) or {}
+    for s in (seats or []):
+        if s in (getattr(g, "seats", {}) or {}):
+            hist[s] = hist.get(s, 0) + 1
+    g.defense_history = hist
+    store.save()
+
+
 SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳ از صندلی ۵ به سمتِ ۱۰
 SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴ از صندلی ۶ به سمتِ ۱
 
@@ -3341,18 +3352,18 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
     # مرتب‌سازی بر اساس تعداد رأی (نزولی)؛ در تساوی، ترتیبِ رأی‌گیری
     qualified.sort(key=lambda t: (-counts.get(t, 0), order.index(t)))
 
-    # ⚖️ قانونِ اختلاف آرا
+    # ⚖️ قانونِ اختلاف آرا — ساده: هرکس ۳ رأی یا بیشتر از نفرِ اول عقب باشد،
+    #    اصلاً واردِ دفاعیه نمی‌شود. (۴ و ۵ و ۷ → فقط ۵ و ۷)
     gap_note = None
     if qualified:
-        c1 = counts.get(qualified[0], 0)
-        c2 = counts.get(qualified[1], 0) if len(qualified) > 1 else None
-        if (c1 - thr) >= 3 and (c2 is None or (c1 - c2) >= 3):
-            if len(qualified) > 1:
-                gap_note = "⚖️ اختلاف آرا: تک‌دفاع"
-            qualified = qualified[:1]
-        elif len(qualified) >= 3 and (c1 - c2) < 3 and (c2 - counts.get(qualified[2], 0)) >= 2:
-            qualified = qualified[:2]
-            gap_note = "⚖️ اختلاف آرا: فقط دو نفرِ اول وارد دفاعیه می‌شوند"
+        top = counts.get(qualified[0], 0)
+        dropped = [t for t in qualified if (top - counts.get(t, 0)) >= 3]
+        if dropped:
+            qualified = [t for t in qualified if t not in dropped]
+            _nms = "، ".join(f"{t}. {escape(g.seats[t][1], quote=False)}"
+                             for t in sorted(dropped))
+            gap_note = (f"⚖️ اختلافِ ۳ رأی یا بیشتر با نفرِ اول ({top} رأی) → "
+                        f"{_nms} واردِ دفاعیه نمی‌شود.")
 
     # 🔢 ترتیبِ نهایی (لیست و دکمه‌های رأی نهایی) = ترتیبِ رأی‌گیریِ اولیه، نه تعدادِ رأی
     qualified.sort(key=lambda t: order.index(t))
@@ -3821,16 +3832,13 @@ async def _finalize_final_vote(ctx, chat_id, g):
                 await ctx.bot.send_message(
                     chat_id,
                     f"📜 تساوی آرا — {exiter}. {escape(g.seats[exiter][1], quote=False)} "
-                    f"به‌دلیلِ سابقه‌ی بیشتر ({hmx} بار حضور در رأی نهایی) انتخاب شد.",
+                    f"به‌دلیلِ سابقه‌ی بیشتر ({hmx} بار حضور در دفاع) انتخاب شد.",
                     parse_mode="HTML")
             else:
                 await ctx.bot.send_message(chat_id, "📜 تساوی آرا و تساوی سابقه — تصمیم با گاد.")
 
     # 📜 ثبتِ سابقه برای همه‌ی حاضرانِ دفاعِ امروز
-    for t in targets:
-        hist[t] = hist.get(t, 0) + 1
-    g.defense_history = hist
-    store.save()
+    _bump_defense_history(g, targets)
 
     if exiter is None:
         _score_votes_final(g, targets, None, False)   # 🏅 کسی خارج نشد
@@ -6316,6 +6324,7 @@ async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
         g.baz_duel_votes = {}
         g.baz_duel_unread = set()
         g.baz_duel_pair = list(bt)
+        _bump_defense_history(g, bt)   # 📜 حاضرانِ بازپرسی هم سابقه‌دار می‌شوند
         store.save()
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
         await ctx.bot.send_message(
@@ -6483,6 +6492,7 @@ async def handle_baz_duel_callback(update, ctx):
             g.baz_duel_votes = {}
             g.baz_duel_unread = set()
             g.baz_duel_pair = list(bt)
+            _bump_defense_history(g, bt)   # 📜 حاضرانِ بازپرسی هم سابقه‌دار می‌شوند
             store.save()
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
             await ctx.bot.send_message(
@@ -9537,6 +9547,7 @@ async def handle_kapu_trust_callback(update, ctx):
             g.kp_gun_targets = list(g.kp_pair_tmp)
             g.kp_pair_tmp = []
             g.kp_gun_stage = 1
+            _bump_defense_history(g, g.kp_gun_targets)   # 📜 جفتِ دفاعِ کاپویی سابقه‌دار می‌شوند
             store.save()
             await _kp_gun_prompt(ctx, chat_id, g)
             return
