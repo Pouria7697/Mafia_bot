@@ -3272,8 +3272,8 @@ def _final_vote_threshold(alive_count: int, g=None) -> int:
 
 
 def _bump_defense_history(g, seats):
-    """📜 ثبتِ «سابقهٔ دفاع» — هرجا کسی واقعاً به دفاع می‌آید:
-    رأی‌گیریِ نهایی، بازپرسی، و جفتِ دفاعِ کاپویی. (ملاکِ تساوی در رأی نهایی)"""
+    """📜 ثبتِ «سابقهٔ دفاع» — فقط رأی‌گیریِ نهایی و جفتِ دفاعِ کاپویی.
+    ⚠️ بازپرسی سابقه حساب نمی‌شود. (این سابقه ملاکِ تساوی در رأی نهایی است)"""
     hist = getattr(g, "defense_history", {}) or {}
     for s in (seats or []):
         if s in (getattr(g, "seats", {}) or {}):
@@ -4871,6 +4871,21 @@ async def _close_pm(ctx, uid, msg_id, text):
     except Exception:
         pass
 
+async def _room_announce_shot(ctx, g, seat, extra=""):
+    """🔫 اعلامِ هدفِ شات در اتاقِ چتِ مافیا — تا بقیهٔ تیم هم بدانند رئیس چه کسی را زد.
+    (در همهٔ سناریوها؛ اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.)"""
+    rid = getattr(g, "mafia_room_id", None)
+    if not rid or seat not in (getattr(g, "seats", {}) or {}):
+        return
+    try:
+        await ctx.bot.send_message(
+            rid,
+            f"🔫 شات: <b>{seat}. {escape(g.seats[seat][1], quote=False)}</b>{extra}",
+            parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ room shot announce:", e)
+
+
 async def _night_report(ctx, g, text):
     """ثبت در لاگ پایان‌بازی + ارسال زندهٔ گزارش به پیوی گاد."""
     g.night_log.append(text)
@@ -6324,7 +6339,6 @@ async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
         g.baz_duel_votes = {}
         g.baz_duel_unread = set()
         g.baz_duel_pair = list(bt)
-        _bump_defense_history(g, bt)   # 📜 حاضرانِ بازپرسی هم سابقه‌دار می‌شوند
         store.save()
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
         await ctx.bot.send_message(
@@ -6492,7 +6506,6 @@ async def handle_baz_duel_callback(update, ctx):
             g.baz_duel_votes = {}
             g.baz_duel_unread = set()
             g.baz_duel_pair = list(bt)
-            _bump_defense_history(g, bt)   # 📜 حاضرانِ بازپرسی هم سابقه‌دار می‌شوند
             store.save()
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="bzd_end")]])
             await ctx.bot.send_message(
@@ -7444,6 +7457,7 @@ async def handle_night_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
+        await _room_announce_shot(ctx, g, s)
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -7939,6 +7953,7 @@ async def handle_baazpors_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
+        await _room_announce_shot(ctx, g, s)
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -8597,6 +8612,7 @@ async def handle_nemayande_callback(update, ctx):
             return
         g.night_shot_target = s
         g.night_don_act = "shot"
+        await _room_announce_shot(ctx, g, s)
         store.save()
         if g.defuse_used:
             await _nem_finalize_mafia(ctx, chat_id, g, uid, mid, defuse=False)
@@ -9822,6 +9838,7 @@ async def handle_takavar_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
+        await _room_announce_shot(ctx, g, s)
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -10311,6 +10328,7 @@ async def handle_kapu_callback(update, ctx):
             return
         g.night_shot_target = s
         g.night_don_act = "shot"
+        await _room_announce_shot(ctx, g, s)
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -11532,6 +11550,7 @@ async def handle_gamer_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
+        await _room_announce_shot(ctx, g, s)
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {_tn}")
@@ -12453,6 +12472,7 @@ async def handle_mythic_callback(update, ctx):
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         _w = "بسته" if g.my_shot_will == "closed" else "باز"
+        await _room_announce_shot(ctx, g, s, f" — وصیت {_w}")
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {_tn} (وصیت {_w})")
         await _night_report(ctx, g,
                             f"🔫 شلیک مافیا → <b>{s}. {escape(_tn, quote=False)}</b> (وصیت {_w})")
@@ -13304,6 +13324,7 @@ async def handle_shahname_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = t
+        await _room_announce_shot(ctx, g, t)
         g.night_done.add("mafia")
         g.night_sel.pop(uid, None)
         store.save()
