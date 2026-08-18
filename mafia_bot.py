@@ -2900,6 +2900,15 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and not getattr(g, "kp_trust_button_used", False)):
         rows.append([InlineKeyboardButton("🤝 کاپو", callback_data="ctl_kapu")])
 
+    # 💣 دکمه‌ی یک‌بارمصرفِ تروریست/یاغی — گاد به‌جای «نوشتنِ کفِ گروه» این را می‌زند.
+    #    ⚠️ دیدنی بودنِ دکمه به زنده‌بودنِ نقش وابسته نیست، وگرنه از بود‌ونبودش لو می‌رود.
+    if (_is_mythic_scenario(g) and getattr(g, "maarefe_done", False)
+            and not getattr(g, "my_terror_used", False)):
+        rows.append([InlineKeyboardButton("💣 تروریست", callback_data="ctl_terror")])
+    if (_is_nemayande_scenario(g) and getattr(g, "maarefe_done", False)
+            and not getattr(g, "nem_yaghi_used", False)):
+        rows.append([InlineKeyboardButton("💣 یاغی", callback_data="ctl_yaghi")])
+
     # ⚔️ دکمه‌ی یک‌بارمصرفِ شاهنامه — بعد از معارفه، فقط روز ۱
     if (_is_shahname_scenario(g) and getattr(g, "maarefe_done", False)
             and getattr(g, "night_number", 0) == 0
@@ -5905,7 +5914,8 @@ def _win_condition(g):
 _LAST_CB = {"q": None, "uid": None, "ts": 0.0}
 
 # دکمه‌هایی که ممکن است بازی را تمام کنند (پاسخشان تا بعدِ اجرا نگه داشته می‌شود)
-_MAY_END_CB = ("vote_done_final", "ctl_day", "strike_toggle_done", "kick_toggle_done")
+_MAY_END_CB = ("vote_done_final", "ctl_day", "strike_toggle_done", "kick_toggle_done",
+               "ctl_terror", "ctl_yaghi")   # 💣 هر دو می‌توانند دو نفر را با هم ببرند
 
 
 async def _late_ack(q, delay=3.0):
@@ -15121,9 +15131,58 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
-                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname"):
+                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
+                "ctl_terror", "ctl_yaghi"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+
+        # 💣 تروریستِ میتیک — پاسخِ ردها فقط پاپ‌آپِ خودِ گاد است، نه پیام در گروه
+        if data == "ctl_terror":
+            if not _is_mythic_scenario(g):
+                await safe_q_answer(q, "فقط سناریوی میتیک.", show_alert=True)
+                return
+            if getattr(g, "my_terror_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if getattr(g, "night_active", False) or getattr(g, "maarefe_active", False):
+                await safe_q_answer(q, "ترور فقط در روز.", show_alert=True)
+                return
+            if getattr(g, "my_terror_asking", False):
+                await safe_q_answer(q, "سؤالش همین الان کفِ گروه هست.", show_alert=True)
+                return
+            _t = _my_seat(g, _R_MY_TERROR)
+            if _t is None:
+                await safe_q_answer(q, "تروریست در بازی نیست.", show_alert=True)
+                return
+            await safe_q_answer(q)
+            await _my_terror_start(ctx, chat, g, _t)
+            return
+
+        # 💣 یاغیِ نماینده
+        if data == "ctl_yaghi":
+            if not _is_nemayande_scenario(g):
+                await safe_q_answer(q, "فقط سناریوی نماینده.", show_alert=True)
+                return
+            if getattr(g, "nem_yaghi_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if getattr(g, "night_active", False) or getattr(g, "maarefe_active", False):
+                await safe_q_answer(q, "یاغی فقط در روز.", show_alert=True)
+                return
+            if getattr(g, "nem_yaghi_asking", False):
+                await safe_q_answer(q, "سؤالش همین الان کفِ گروه هست.", show_alert=True)
+                return
+            _y = _find_seat_by_role(g, _R_YAGHI)
+            if _y is None:
+                await safe_q_answer(q, "یاغی در بازی نیست.", show_alert=True)
+                return
+            if not _nem_yaghi_unlocked(g):
+                await safe_q_answer(q, "تیمِ مافیا هنوز کامل است — یاغی هنوز نمی‌تواند.",
+                                    show_alert=True)
+                return
+            await safe_q_answer(q)
+            await _nem_yaghi_start(ctx, chat, g, _y)
             return
         if data == "ctl_shahname":
             if getattr(g, "sh_button_used", False):
@@ -16760,43 +16819,29 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
 
-    # 💣 ترورِ روز (میتیک): «ترور» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد
-    #    یک‌بار در کلِ بازی؛ کانسورتیِ شب هیچ اثری روی اکتِ روز ندارد
-    if (_is_mythic_scenario(g) and not getattr(g, "night_active", False)
-            and not getattr(g, "maarefe_active", False)
-            and not getattr(g, "my_terror_used", False)):
+    # 💣 عددِ ترور (میتیک) — شروعش با دکمهٔ گاد است، نه نوشتنِ کفِ گروه.
+    #    ⚠️ کلمهٔ راه‌انداز عمداً برداشته شده: هرکس می‌توانست «ترور» بنویسد و با
+    #    بی‌اثر ماندنش ثابت کند تروریست نیست.
+    if (_is_mythic_scenario(g) and getattr(g, "my_terror_asking", False)
+            and not getattr(g, "night_active", False)):
         _tseat = _seat_of_uid(g, uid)
         if (_tseat is not None and _tseat not in (g.striked or set())
                 and _my_role_is(g, _tseat, _R_MY_TERROR)):
-            if not getattr(g, "my_terror_asking", False):
-                if _nz(text) == _nz("ترور") or "💣" in text:
-                    await _my_terror_start(ctx, msg.chat.id, g, _tseat)
-                    return
-            else:
-                _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
-                if _tv is not None:
-                    await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
-                    return
+            _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
+            if _tv is not None:
+                await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
+                return
 
-    # 💣 یاغیِ روز (نماینده): «یاغی» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد.
-    #    فقط وقتی تیمِ سه‌نفره کامل نمانده باشد؛ یک‌بار در کلِ بازی، بدونِ وصیت.
-    #    اگر شرطش برقرار نباشد بی‌صدا رد می‌شود تا نقشِ یاغی لو نرود.
-    if (_is_nemayande_scenario(g) and not getattr(g, "night_active", False)
-            and not getattr(g, "maarefe_active", False)
-            and not getattr(g, "nem_yaghi_used", False)):
+    # 💣 عددِ یاغی (نماینده) — همان‌طور، شروعش فقط با دکمهٔ گاد است
+    if (_is_nemayande_scenario(g) and getattr(g, "nem_yaghi_asking", False)
+            and not getattr(g, "night_active", False)):
         _yseat = _seat_of_uid(g, uid)
         if (_yseat is not None and _yseat not in (g.striked or set())
                 and _seat_role_norm(g, _yseat) == _R_YAGHI):
-            if not getattr(g, "nem_yaghi_asking", False):
-                if ((_nz(text) == _nz("یاغی") or "💣" in text)
-                        and _nem_yaghi_unlocked(g)):
-                    await _nem_yaghi_start(ctx, msg.chat.id, g, _yseat)
-                    return
-            else:
-                _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
-                if _yv is not None:
-                    await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
-                    return
+            _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
+            if _yv is not None:
+                await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
+                return
 
     # تغییر موضوع رویداد (گاد/ادمین) — با یا بدون ریپلای
     if await _try_set_event_title(ctx, chat_id, uid, g, text):
@@ -18564,43 +18609,29 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
 
-    # 💣 ترورِ روز (میتیک): «ترور» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد
-    #    یک‌بار در کلِ بازی؛ کانسورتیِ شب هیچ اثری روی اکتِ روز ندارد
-    if (_is_mythic_scenario(g) and not getattr(g, "night_active", False)
-            and not getattr(g, "maarefe_active", False)
-            and not getattr(g, "my_terror_used", False)):
+    # 💣 عددِ ترور (میتیک) — شروعش با دکمهٔ گاد است، نه نوشتنِ کفِ گروه.
+    #    ⚠️ کلمهٔ راه‌انداز عمداً برداشته شده: هرکس می‌توانست «ترور» بنویسد و با
+    #    بی‌اثر ماندنش ثابت کند تروریست نیست.
+    if (_is_mythic_scenario(g) and getattr(g, "my_terror_asking", False)
+            and not getattr(g, "night_active", False)):
         _tseat = _seat_of_uid(g, uid)
         if (_tseat is not None and _tseat not in (g.striked or set())
                 and _my_role_is(g, _tseat, _R_MY_TERROR)):
-            if not getattr(g, "my_terror_asking", False):
-                if _nz(text) == _nz("ترور") or "💣" in text:
-                    await _my_terror_start(ctx, msg.chat.id, g, _tseat)
-                    return
-            else:
-                _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
-                if _tv is not None:
-                    await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
-                    return
+            _tv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _tseat])
+            if _tv is not None:
+                await _my_terror_apply(ctx, msg.chat.id, g, _tseat, _tv)
+                return
 
-    # 💣 یاغیِ روز (نماینده): «یاغی» یا 💣 → سؤالِ کفِ گروه؛ بعد فقط یک عدد.
-    #    فقط وقتی تیمِ سه‌نفره کامل نمانده باشد؛ یک‌بار در کلِ بازی، بدونِ وصیت.
-    #    اگر شرطش برقرار نباشد بی‌صدا رد می‌شود تا نقشِ یاغی لو نرود.
-    if (_is_nemayande_scenario(g) and not getattr(g, "night_active", False)
-            and not getattr(g, "maarefe_active", False)
-            and not getattr(g, "nem_yaghi_used", False)):
+    # 💣 عددِ یاغی (نماینده) — همان‌طور، شروعش فقط با دکمهٔ گاد است
+    if (_is_nemayande_scenario(g) and getattr(g, "nem_yaghi_asking", False)
+            and not getattr(g, "night_active", False)):
         _yseat = _seat_of_uid(g, uid)
         if (_yseat is not None and _yseat not in (g.striked or set())
                 and _seat_role_norm(g, _yseat) == _R_YAGHI):
-            if not getattr(g, "nem_yaghi_asking", False):
-                if ((_nz(text) == _nz("یاغی") or "💣" in text)
-                        and _nem_yaghi_unlocked(g)):
-                    await _nem_yaghi_start(ctx, msg.chat.id, g, _yseat)
-                    return
-            else:
-                _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
-                if _yv is not None:
-                    await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
-                    return
+            _yv = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _yseat])
+            if _yv is not None:
+                await _nem_yaghi_apply(ctx, msg.chat.id, g, _yseat, _yv)
+                return
 
     # 🔍 تشخیص سناریو/نقش‌ها (به پیوی گاد) — برای عیب‌یابی
     if text in ("/چک", "/تشخیص"):
