@@ -12702,7 +12702,12 @@ async def _resolve_mythic(ctx, chat_id, g):
     # 🎯 شاتِ اسنایپر
     snt = getattr(g, "my_sniper_target", None)
     if snt and snt in g.seats and snt not in (g.striked or set()):
-        if snt in doc_saved:
+        if gf is not None and snt == gf:
+            # 🎯 گادفادر با شاتِ اسنایپر نمی‌میرد. تیر مصرف می‌شود ولی چون
+            #    مافیا زده، خودکشی‌ای در کار نیست و شبِ بعد باز می‌تواند بزند.
+            await _night_report(
+                ctx, g, "🎯 اسنایپر گادفادر را زد — گادفادر نمی‌میرد و اسنایپر هم خودکشی ندارد.")
+        elif snt in doc_saved:
             await _night_report(ctx, g, f"💉 سیوِ دکتر جلوی شاتِ اسنایپر روی {snt} را گرفت — خودکشی هم منتفی شد.")
         elif bgs == snt and bg_self:
             await _night_report(ctx, g, "🛡 بادیگارد خودش را سیو کرد — با اسنایپر درگیر نشد.")
