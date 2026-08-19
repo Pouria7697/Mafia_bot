@@ -19,7 +19,7 @@ from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceR
                       Message, ChatPermissions, ReplyKeyboardMarkup)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    MessageHandler, ContextTypes, filters, TypeHandler, ApplicationHandlerStop
 )
 from collections import defaultdict
 # --- CALLBACK DATA CONSTANTS ---
@@ -1075,7 +1075,7 @@ def save_god_bans(data: dict):
         return False
 
 
-_GOD_BAN_CACHE = {"data": None, "ts": 0.0}
+_GOD_BAN_CACHE = {"data": None, "ts": 0.0, "busy": False}
 
 
 def god_ban_info(uid):
@@ -1115,6 +1115,63 @@ def seat_ban_info(uid):
 def seat_ban_days_left(rec) -> int:
     left = float(rec.get("until", 0) or 0) - datetime.now(timezone.utc).timestamp()
     return max(1, int(left // 86400) + (1 if left % 86400 else 0))
+
+
+# ─── ⛔ محرومیتِ کاملِ بات (فقط مدیرِ اصلی، بدون تاریخِ انقضا) ──────────────
+_BLOCK_PHRASES = ("محروم", "محروم کن", "محرومش کن")
+
+
+def _is_block_text(text: str) -> bool:
+    """آیا این متن دستورِ «محروم» است؟ (_nz پایین‌تر تعریف شده، پس تنبل صدا می‌زنیم)"""
+    t = _nz(text or "").strip()
+    return t in {_nz(p) for p in _BLOCK_PHRASES}
+
+
+def blocked_info(uid):
+    """⛔ رکوردِ محرومیتِ کاملِ این نفر (یا None).
+    ⚠️ فقط از کش می‌خواند و هیچ‌وقت شبکه صدا نمی‌زند — این تابع روی مسیرِ داغِ
+       «هر آپدیت» است؛ تازه‌سازیِ کش کارِ _god_bans_refresh() است."""
+    data = _GOD_BAN_CACHE["data"] or {}
+    return (data.get("blocked") or {}).get(str(uid))
+
+
+async def _god_bans_refresh(force: bool = False):
+    """تازه‌سازیِ کشِ محرومیت‌ها بدون بلاک‌کردنِ حلقهٔ رویداد.
+    در خطا هم ts را جلو می‌بریم تا هر آپدیت دوباره به گیست نزند."""
+    now = datetime.now(timezone.utc).timestamp()
+    if not force and (now - float(_GOD_BAN_CACHE["ts"] or 0)) <= 900:
+        return
+    if _GOD_BAN_CACHE.get("busy"):
+        return
+    _GOD_BAN_CACHE["busy"] = True
+    try:
+        d = await asyncio.to_thread(load_god_bans)
+        if d is not None:
+            _GOD_BAN_CACHE["data"] = d
+    except Exception as e:
+        print("⚠️ god bans refresh:", e)
+    finally:
+        _GOD_BAN_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
+        _GOD_BAN_CACHE["busy"] = False
+
+
+def set_blocked(uid, name=None) -> tuple[bool, str]:
+    """⛔ محرومیتِ کامل از بات. خروجی: (موفق؟، نام یا پیامِ خطا)"""
+    data = load_god_bans()
+    if data is None:
+        return False, "فهرستِ محرومان خوانده نشد — کمی بعد دوباره امتحان کن."
+    blocked = data.get("blocked") or {}
+    key = str(uid)
+    if key in blocked:
+        return False, f"{(blocked[key] or {}).get('name') or 'این نفر'} از قبل محروم است."
+    blocked[key] = {"name": name or "بازیکن",
+                    "at": datetime.now(timezone.utc).timestamp()}
+    data["blocked"] = blocked
+    if not save_god_bans(data):
+        return False, "ذخیرهٔ محرومیت ناموفق بود."
+    _GOD_BAN_CACHE["data"] = data
+    _GOD_BAN_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
+    return True, (name or "بازیکن")
 
 
 def record_kick(uid, name=None):
@@ -1218,16 +1275,19 @@ def _is_unban_text(text: str) -> bool:
     return t in {_nz(p) for p in _UNBAN_PHRASES}
 
 
-def god_unban(uid) -> tuple[bool, str]:
-    """🔓 برداشتنِ هر دو محرومیت: گاد شدن و نشستن در لیست."""
+def god_unban(uid, unblock: bool = False) -> tuple[bool, str]:
+    """🔓 برداشتنِ محرومیت‌ها: گاد شدن و نشستن در لیست.
+    unblock=True فقط از سمتِ مدیرِ اصلی می‌آید و «محرومیتِ کاملِ بات» را هم برمی‌دارد."""
     data = load_god_bans()
     if data is None:
         return False, "خواندنِ لیستِ محرومان ناموفق بود — کمی بعد دوباره امتحان کن."
     banned = data.get("banned") or {}
     seats = data.get("seats") or {}
+    blocked = data.get("blocked") or {}
     key = str(uid)
     nm = ((banned.get(key) or {}).get("name")
-          or (seats.get(key) or {}).get("name") or "بازیکن")
+          or (seats.get(key) or {}).get("name")
+          or (blocked.get(key) or {}).get("name") or "بازیکن")
     kinds = []
     if key in banned:
         banned.pop(key, None)
@@ -1235,10 +1295,16 @@ def god_unban(uid) -> tuple[bool, str]:
     if key in seats:
         seats.pop(key, None)
         kinds.append("نشستن در لیست")
+    if unblock and key in blocked:
+        blocked.pop(key, None)
+        kinds.append("محرومیتِ کاملِ بات")
     if not kinds:
+        if key in blocked:
+            return False, "محرومیتِ کاملِ این نفر را فقط مدیرِ اصلیِ بات برمی‌دارد."
         return False, "این نفر محروم نیست."
     data["banned"] = banned
     data["seats"] = seats
+    data["blocked"] = blocked
     if not save_god_bans(data):
         return False, "ذخیرهٔ تغییرات ناموفق بود."
     _GOD_BAN_CACHE["data"] = data
@@ -1276,18 +1342,68 @@ async def _god_unban_from_reply(ctx, msg, by_uid=None):
     if by_uid is not None and by_uid != ADMIN_ID and target.id == by_uid:
         await msg.reply_text("⛔ محرومیتِ خودت را نمی‌توانی برداری.")
         return
-    ok, res = god_unban(target.id)
+    ok, res = god_unban(target.id, unblock=(by_uid == ADMIN_ID))
     if not ok:
         await msg.reply_text(f"ℹ️ {res}")
         return
     await msg.reply_text(
-        f"🔓 محرومیتِ <b>{escape(res or target.full_name, quote=False)}</b> برداشته شد — "
-        f"تا پایانِ همین هفته می‌تواند گاد شود.", parse_mode="HTML")
+        f"🔓 محرومیتِ <b>{escape(res or target.full_name, quote=False)}</b> برداشته شد.",
+        parse_mode="HTML")
     try:
         await ctx.bot.send_message(
-            target.id, "🔓 محرومیتِ گادی‌ات برداشته شد — می‌توانی دوباره گاد شوی.")
+            target.id, "🔓 محرومیتت برداشته شد — دوباره می‌توانی بازی کنی.")
     except Exception:
         pass
+
+
+async def _block_from_reply(ctx, msg):
+    """⛔ «محروم» با ریپلای — فقط مدیرِ اصلیِ بات."""
+    rep = msg.reply_to_message
+    if not rep or not rep.from_user:
+        await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «محروم».")
+        return
+    target = rep.from_user
+    if target.id == ADMIN_ID:
+        await msg.reply_text("ℹ️ خودت را نمی‌شود محروم کرد.")
+        return
+    if getattr(target, "is_bot", False):
+        await msg.reply_text("ℹ️ بات را نمی‌شود محروم کرد.")
+        return
+    ok, res = await asyncio.to_thread(set_blocked, target.id, target.full_name)
+    if not ok:
+        await msg.reply_text(f"ℹ️ {res}")
+        return
+    await msg.reply_text(
+        f"⛔ <b>{escape(res, quote=False)}</b> از بات محروم شد — از این به بعد هیچ "
+        f"پیام، دستور و دکمه‌ای از او خوانده نمی‌شود و در هیچ بازی‌ای نمی‌نشیند.\n"
+        f"🔓 فقط خودت با ریپلای و نوشتنِ «رفع محرومیت» می‌توانی برش داری.",
+        parse_mode="HTML")
+    try:
+        await ctx.bot.send_message(
+            target.id, "⛔ از بات محروم شدی و دیگر نمی‌توانی در بازی‌ها شرکت کنی.")
+    except Exception:
+        pass
+
+
+async def blocked_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """⛔ دروازهٔ محرومیتِ کامل — پیش از هر هندلرِ دیگری اجرا می‌شود.
+    هر آپدیتِ فردِ محروم همین‌جا متوقف می‌شود: نه پیام، نه دستور، نه دکمه."""
+    u = update.effective_user
+    if u is None:
+        return
+    if float(_GOD_BAN_CACHE["ts"] or 0) <= 0:
+        await _god_bans_refresh(force=True)          # اولین آپدیت بعد از بالا آمدنِ بات
+    elif (datetime.now(timezone.utc).timestamp() - float(_GOD_BAN_CACHE["ts"])) > 900:
+        asyncio.create_task(_god_bans_refresh())     # کهنه شده → در پس‌زمینه تازه شود
+    if u.id == ADMIN_ID or blocked_info(u.id) is None:
+        return
+    q = update.callback_query
+    if q is not None:
+        try:
+            await q.answer("⛔ شما از بات محروم شده‌اید.", show_alert=True)
+        except Exception:
+            pass
+    raise ApplicationHandlerStop
 
 
 def compute_god_bans(delta: dict) -> dict:
@@ -16732,6 +16848,12 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat.id
     g = gs(chat_id)
 
+    # ⛔ «محروم» با ریپلای — فقط مدیرِ اصلیِ بات (برای بقیه اصلاً شرط برقرار نیست
+    #    تا متنِ عادیِ «محروم» مسیرِ همیشگی‌اش را برود)
+    if uid == ADMIN_ID and _is_block_text(text):
+        await _block_from_reply(ctx, msg)
+        return
+
     # 🔓 «رفع محرومیت» با ریپلای — مدیرِ اصلی یا ادمین‌های گروه (نه روی خودش)
     if _is_unban_text(text):
         if await _can_unban(ctx, chat_id, uid):
@@ -17202,6 +17324,10 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     target_uid = update.message.reply_to_message.from_user.id
 
+    if blocked_info(target_uid):
+        await update.message.reply_text("⛔ این بازیکن از بات محروم است و نمی‌تواند در لیست بنشیند.")
+        return
+
     _sb = seat_ban_info(target_uid)
     if _sb:
         await update.message.reply_text(
@@ -17453,6 +17579,11 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if g.god_id == target.id:
         await update.message.reply_text("ℹ️ همین حالا هم گاد هست.")
+        return
+
+    # ⛔ محرومیتِ کاملِ بات
+    if blocked_info(target.id):
+        await update.message.reply_text("⛔ این نفر از بات محروم است و نمی‌تواند گاد شود.")
         return
 
     # 🚫 محرومیتِ گاد شدن (بر اساس آمارِ هفتهٔ گذشته)
@@ -17827,6 +17958,13 @@ async def handle_admin_panel_callback(update, ctx):
             left = max(0, (float(v.get("until", 0) or 0) - now) / 86400)
             lines.append(f"• {_nm(k)} — {left:.1f} روزِ دیگر")
         if not seats:
+            lines.append("— کسی نیست")
+        lines.append("")
+        blk = bans.get("blocked") or {}
+        lines.append(f"⛔ <b>محرومِ کاملِ بات ({len(blk)})</b>:")
+        for k in list(blk)[:30]:
+            lines.append(f"• {_nm(k)}")
+        if not blk:
             lines.append("— کسی نیست")
         lines.append("")
         lines.append("<i>برای رفعش، روی پیامِ طرف ریپلای کن و بنویس «رفع محرومیت».</i>")
@@ -19507,6 +19645,9 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     new_uid = update.message.reply_to_message.from_user.id
+    if blocked_info(new_uid):
+        await update.message.reply_text("⛔ این بازیکن از بات محروم است و نمی‌تواند جایگزین شود.")
+        return
     _sb = seat_ban_info(new_uid)
     if _sb:
         await update.message.reply_text(
@@ -19624,6 +19765,8 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
+    # ⛔ دروازهٔ محرومیتِ کامل — گروهِ منفی یعنی قبل از همهٔ هندلرهای دیگر
+    app.add_handler(TypeHandler(Update, blocked_gate), group=-1)
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
     app.add_handler(
         MessageHandler(
