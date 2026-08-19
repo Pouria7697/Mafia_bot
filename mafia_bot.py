@@ -3484,8 +3484,9 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
         # 🗳 میتیک: رأی به خود مجاز است و شمرده می‌شود؛ بقیهٔ سناریوها نه
         if voter_seat == win_target and not _is_mythic_scenario(g):
             return False
-        # ⚔️ شاهنامه: دو طرفِ یک مبارزهٔ تن‌به‌تن هر دو در دفاع‌اند → به هم رأی نمی‌دهند
-        if _is_shahname_scenario(g) and _sh_duel_locked(g, voter_seat, win_target):
+        # ⚔️ اگر دقیقاً دو نفر در رأی‌گیریِ نهایی باشند، آن دو به هم رأی نمی‌دهند
+        #    و رأیشان اصلاً خوانده نمی‌شود — در همهٔ سناریوها به‌جز میتیک.
+        if not _is_mythic_scenario(g) and _sh_duel_locked(g, voter_seat, win_target):
             return False
         g.votes_cast.setdefault(win_target, set())
         if uid not in g.votes_cast[win_target]:  # هر نفر برای «هر هدف» فقط یک رأی
@@ -3500,33 +3501,6 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
         g.vote_cleanup_ids.append(msg.message_id)
         return True
     return False
-
-
-async def _send_vote_timing_report(ctx, g, chat_id=None):
-    """گزارش تست: زمانِ ثبت هر رأی — فقط به پیوی سازنده‌ی بات (ADMIN_ID)، تا گروه شلوغ نشود."""
-    logs = getattr(g, "vote_logs", {}) or {}
-    if not logs:
-        return
-    order, seen = [], set()
-    for t in (getattr(g, "vote_order", []) or []):
-        if t not in seen:
-            seen.add(t); order.append(t)
-    for t in logs:
-        if t not in seen:
-            seen.add(t); order.append(t)
-    lines = ["🕒 <b>گزارش زمان ثبت رأی‌ها (تست)</b>"]
-    for target in order:
-        entries = logs.get(target, [])
-        tname = g.seats.get(target, (0, "؟"))[1]
-        lines.append(f"\n🎯 {target}. {escape(tname, quote=False)} — <b>{len(entries)}</b> رأی:")
-        for u, rel in entries:
-            vs = next((s for s, (uu, _) in g.seats.items() if uu == u), None)
-            vname = g.seats.get(vs, (0, "؟"))[1] if vs else "؟"
-            lines.append(f"  • {vs}. {escape(vname, quote=False)} — {rel:.1f} ثانیه")
-    try:
-        await ctx.bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
-    except Exception:
-        pass
 
 
 def _final_vote_threshold(alive_count: int, g=None) -> int:
@@ -4340,12 +4314,6 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
         pass
     await asyncio.sleep(AUTO_VOTE_SETTLE)
 
-    # 🕒 گزارشِ زمان‌بندیِ رأی‌ها به پیویِ سازندهٔ بات (برای عیب‌یابیِ شمارش)
-    try:
-        await _send_vote_timing_report(ctx, g, chat_id)
-    except Exception as e:
-        print("⚠️ vote timing report:", e)
-
     # ✅ نفرِ آخر هم تیک خورد → خودکار جمع‌بندی
     if stage == "initial_vote":
         await _finish_initial_vote(ctx, chat_id, g)
@@ -5143,6 +5111,25 @@ async def _close_pm(ctx, uid, msg_id, text):
                                         text=text, reply_markup=None)
     except Exception:
         pass
+
+def _room_who(g, seat) -> str:
+    """«۵. اسم» برای پیام‌های اتاقِ مافیا."""
+    if seat is None or seat not in (getattr(g, "seats", {}) or {}):
+        return "؟"
+    return f"{seat}. {escape(g.seats[seat][1], quote=False)}"
+
+
+async def _room_note(ctx, g, text):
+    """📣 اعلامِ یک اکتِ مافیا در اتاقِ چتِ تیم — تا فقط خودِ اکت‌زن نداند.
+    اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود."""
+    rid = getattr(g, "mafia_room_id", None)
+    if not rid:
+        return
+    try:
+        await ctx.bot.send_message(rid, text, parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ room note:", e)
+
 
 async def _room_announce_shot(ctx, g, seat, extra=""):
     """🔫 اعلامِ هدفِ شات در اتاقِ چتِ مافیا — تا بقیهٔ تیم هم بدانند رئیس چه کسی را زد.
@@ -7760,6 +7747,7 @@ async def handle_night_callback(update, ctx):
             return
         g.night_negotiation_target = s
         g.negotiation_used = True
+        await _room_note(ctx, g, f"🤝 مذاکره روی <b>{_room_who(g, s)}</b>")
         tu, tname = g.seats[s]
         rn = _seat_role_norm(g, s)
         converted = (rn in _R_CITIZEN) or (rn == _R_ARMORED)
@@ -8298,8 +8286,12 @@ async def handle_baazpors_callback(update, ctx):
                 pass
             await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → مافیا ساده ✅")
+            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                             f"جذب: <b>{_room_who(g, s)}</b> ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
+            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                             f"جذب: <b>{_room_who(g, s)}</b> ❌ ناموفق")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         g.night_doctor_blocked = True
         g.night_done.add("mafia")
@@ -8349,6 +8341,7 @@ async def handle_baazpors_callback(update, ctx):
         g.night_nato_seat = s
         g.night_sel.pop(uid, None)
         store.save()
+        await _room_note(ctx, g, f"🕵️ ناتویی روی <b>{_room_who(g, s)}</b>")
         rows = [[InlineKeyboardButton(rn, callback_data=f"bzp_natorole_{i}")]
                 for i, rn in enumerate(_BZP_CITIZEN_ROLE_NAMES)]
         await _edit_pm(ctx, uid, mid, f"🕵️ نقش صندلی {s} را حدس بزن:", InlineKeyboardMarkup(rows))
@@ -8375,6 +8368,7 @@ async def handle_baazpors_callback(update, ctx):
         det = _find_seat_by_role(g, _R_DETECTIVE)
         correct = (det is not None and s == det)
         tick = "✅" if correct else "❌"
+        await _room_note(ctx, g, f"🎭 حدسِ شیاد: <b>{_room_who(g, s)}</b> کاراگاه است {tick}")
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, "🎭 حدس ثبت شد.")
         await _night_report(ctx, g, f"🎭 شیاد → حدس کاراگاه: {s}. {escape(tname, quote=False)} {tick}")
@@ -8821,6 +8815,8 @@ async def _nem_trigger_mine(ctx, chat_id, g):
 
 async def _nem_finalize_mafia(ctx, chat_id, g, uid, mid, defuse):
     g.night_don_defuse = defuse
+    if defuse:
+        await _room_note(ctx, g, "💣 دن امشب «خنثی» را هم زد.")
     dtxt = "با خنثی‌سازی" if defuse else "بدون خنثی‌سازی"
     if g.night_don_act == "shot":
         s = g.night_shot_target
@@ -8992,6 +8988,7 @@ async def handle_nemayande_callback(update, ctx):
         g.night_nato_seat = s
         g.night_sel.pop(uid, None)
         store.save()
+        await _room_note(ctx, g, f"🕵️ ناتویی روی <b>{_room_who(g, s)}</b>")
         names = _nem_citizen_role_names(g)
         rows = [[InlineKeyboardButton(rn, callback_data=f"nem_natrole_{i}")] for i, rn in enumerate(names)]
         await _edit_pm(ctx, uid, mid, f"🕵️ نقش صندلی {s} را حدس بزن:", InlineKeyboardMarkup(rows))
@@ -9048,6 +9045,8 @@ async def handle_nemayande_callback(update, ctx):
             await safe_q_answer(q, "اول مفعول را انتخاب کن.", show_alert=True)
             return
         g.night_hacker_target = s
+        await _room_note(ctx, g, f"💻 هک: اکتِ <b>{_room_who(g, g.night_hacker_actor)}</b> "
+                         f"روی <b>{_room_who(g, s)}</b>")
         a = g.night_hacker_actor
         aname = g.seats[a][1] if a in g.seats else "—"
         tname = g.seats[s][1]
@@ -10092,6 +10091,7 @@ async def handle_takavar_callback(update, ctx):
             return
         g.night_hostage_seat = s
         g.hostage_last_target = s
+        await _room_note(ctx, g, f"🔒 گروگان: <b>{_room_who(g, s)}</b>")
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"🔒 گرو گرفتی: {s}. {tname}")
         await _night_report(ctx, g, f"🔒 گروگانگیر → گرو گرفت: <b>{s}. {escape(tname, quote=False)}</b>")
@@ -10220,6 +10220,7 @@ async def handle_takavar_callback(update, ctx):
         g.night_nato_seat = s
         g.night_sel.pop(uid, None)
         store.save()
+        await _room_note(ctx, g, f"🕵️ ناتویی روی <b>{_room_who(g, s)}</b>")
         names = _nem_citizen_role_names(g)
         rows = [[InlineKeyboardButton(rn, callback_data=f"tk_nrole_{i}")] for i, rn in enumerate(names)]
         await _edit_pm(ctx, uid, mid, f"🕵️ نقش صندلی {s} را حدس بزن:", InlineKeyboardMarkup(rows))
@@ -10727,8 +10728,12 @@ async def handle_kapu_callback(update, ctx):
                 pass
             await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> ✅")
+            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                             f"جذب: <b>{_room_who(g, s)}</b> ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
+            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                             f"جذب: <b>{_room_who(g, s)}</b> ❌ ناموفق")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         g.night_doctor_blocked = True   # 🥷 شبِ یاکوزایی → زره‌ساز حقِ سیو ندارد
         g.night_done.add("mafia")
@@ -10763,6 +10768,8 @@ async def handle_kapu_callback(update, ctx):
         g.night_jalad_correct = correct
         g.night_jalad_target = s
         tick = "✅" if correct else "❌"
+        await _room_note(ctx, g, f"⚔️ جلادی روی <b>{_room_who(g, s)}</b> — "
+                         f"حدس: «{escape(str(guess_name), quote=False)}» {tick}")
         g.jalad_used = True
         await _close_pm(ctx, uid, mid, f"⚔️ جلادی روی {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"⚔️ جلاد → صندلی {s}. {escape(tname, quote=False)} | حدس نقش: {guess_name} {tick}")
@@ -10804,6 +10811,7 @@ async def handle_kapu_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_witch_target = s
+        await _room_note(ctx, g, f"🔮 جادو روی <b>{_room_who(g, s)}</b>")
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"🔮 جادو ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔮 جادوگر → جادو روی <b>{s}. {escape(tname, quote=False)}</b>")
@@ -11948,6 +11956,8 @@ async def handle_gamer_callback(update, ctx):
         g.gm_tf_map["آبی"] = last
         g.gm_bomb_seat = g.gm_tf_target
         g.gm_bomb_fuses = dict(g.gm_tf_map)
+        await _room_note(ctx, g, f"💣 بمب جلوی <b>{_room_who(g, g.gm_bomb_seat)}</b> | "
+                         f"زرد:{g.gm_tf_map['زرد']} · قرمز:{g.gm_tf_map['قرمز']} · آبی:{last}")
         seat = g.gm_bomb_seat
         _tn = g.seats[seat][1] if seat in g.seats else "؟"
         await _close_pm(ctx, uid, mid,
@@ -12038,6 +12048,7 @@ async def handle_gamer_callback(update, ctx):
             return
         g.gm_dexter_target = s
         g.gm_dexter_used = True     # 🔒 سوخت — دیگر تا آخرِ بازی باز نمی‌شود
+        await _room_note(ctx, g, f"🔪 قتلِ دکستر روی <b>{_room_who(g, s)}</b> (غیرقابلِ نجات)")
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"🔪 ثبت شد: {s}. {_tn}")
@@ -12850,6 +12861,7 @@ async def handle_mythic_callback(update, ctx):
             return
         g.my_consort_target = s
         g.night_sel.pop(uid, None)
+        await _room_note(ctx, g, f"🎭 کانسورتی روی <b>{_room_who(g, s)}</b>")
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"🎭 کانسورت ثبت شد: {s}. {_tn}")
         await _night_report(ctx, g, f"🎭 کانسورت → <b>{s}. {escape(_tn, quote=False)}</b>")
@@ -13048,7 +13060,7 @@ async def _my_terror_apply(ctx, chat_id, g, seat, target):
     else:
         dead.add(target)
         lines.append(f"🕊 خداحافظی می‌کنیم با <b>{target}. "
-                     f"{escape(g.seats[target][1], quote=False)}</b> — وصیت دارد.")
+                     f"{escape(g.seats[target][1], quote=False)}</b> — وصیت ندارد.")
     for s in dead:
         g.striked.add(s)
     store.save()
@@ -13161,7 +13173,8 @@ def _sh_final_pair(g):
 
 def _sh_duel_locked(g, voter_seat, target_seat) -> bool:
     """⚔️ فقط وقتی دقیقاً «دو نفر» در رأی‌گیریِ نهایی‌اند، آن دو به هم رأی نمی‌دهند.
-    با سه نفر یا بیشتر (چند مبارزه)، همه به همه می‌توانند رأی بدهند."""
+    با سه نفر یا بیشتر همه به همه می‌توانند رأی بدهند.
+    ⚠️ اسمش شاهنامه‌ای مانده ولی قانونِ همهٔ سناریوهاست (به‌جز میتیک)."""
     pair = _sh_final_pair(g)
     if not pair:
         return False
@@ -13665,6 +13678,7 @@ async def handle_shahname_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.sh_boof_holder = t
+        await _room_note(ctx, g, f"🪶 پر بوف به <b>{_room_who(g, t)}</b>")
         g.night_done.add("mafia")
         g.night_sel.pop(uid, None)
         store.save()
@@ -13712,6 +13726,8 @@ async def handle_shahname_callback(update, ctx):
         g.sh_afr_guess = t
         g.sh_afr_guessed = True
         g.sh_afr_correct = (ros is not None and ros == t)
+        await _room_note(ctx, g, f"🔗 حدسِ افراسیاب: <b>{_room_who(g, t)}</b> رستم است "
+                         + ("✅" if g.sh_afr_correct else "❌"))
         g.night_sel.pop(uid, None)
         store.save()
         await _close_pm(ctx, uid, mid, "✅ انتخابت ثبت شد.")
