@@ -241,6 +241,12 @@ class GameState:
         self.night_baz_sel = getattr(self, "night_baz_sel", {}) or {}
         self.night_baz_targets = getattr(self, "night_baz_targets", []) or []
         self.bzp_decider_seat = getattr(self, "bzp_decider_seat", None)
+        # ── کاوربازپرس: دعوتِ ناتو در معارفه + جابه‌جاییِ نقشِ مجهول ──
+        self.cvb_asking = getattr(self, "cvb_asking", False)
+        self.cvb_invite_seat = getattr(self, "cvb_invite_seat", None)
+        self.cvb_gf_seat = getattr(self, "cvb_gf_seat", None)
+        self.cvb_done = getattr(self, "cvb_done", False)
+        self.cvb_orig_roles = getattr(self, "cvb_orig_roles", {}) or {}
         # ── حالت شبِ خودکار (سناریو نماینده) ──
         self.mine_seat = getattr(self, "mine_seat", None)            # محل مین (تا آخر بازی)
         self.defuse_used = getattr(self, "defuse_used", False)        # خنثی‌سازی یکبار در بازی
@@ -4751,6 +4757,12 @@ async def announce_winner(ctx, update, g: GameState):
         if _is_kapu_scenario(g) and getattr(g, "heir_seat", None) == seat:
             role_display = "وارث"
 
+        # 🕵️ کاوربازپرس: «نقشِ قبلی / نقشِ فعلی» — هم برای مجهول، هم برای کسی که
+        #    دعوت را پذیرفت و گادفادر شد (مارکر از روی نقشِ فعلی حساب شده است)
+        _cvb_old = (getattr(g, "cvb_orig_roles", None) or {}).get(seat)
+        if _cvb_old:
+            role_display = f"{_cvb_old} / {role}"
+
         chaos_mark = " 🔸" if getattr(g, "chaos_selected", set()) and seat in g.chaos_selected else ""
 
         lines.append(
@@ -8022,6 +8034,200 @@ def _find_sniper(g, alive_only=True):
 
 def _is_baazpors_scenario(g) -> bool:
     return bool(getattr(g, "scenario", None)) and (_nz(BAAZPORS_KEY) in _nz(g.scenario.name))
+
+
+# ═════════════════════════════════════════════════════════════
+#  🕵️ کاوربازپرس — دقیقاً همان بازپرس (اسمش «بازپرس» را دارد، پس
+#  همان موتورِ شب را می‌گیرد)، فقط با یک نقشِ «مجهول» و یک دعوت‌نامه:
+#  در معارفه ناتو یک نفر را به تیم می‌آورد؛ او گادفادر می‌شود و
+#  نقشِ شهروندی‌اش به مجهول می‌رسد. اگر نپذیرد، خودِ مجهول گادفادر است.
+# ═════════════════════════════════════════════════════════════
+COVER_KEY  = "کاوربازپرس"
+_R_MAJHOOL = _nz("مجهول")
+
+
+def _is_cover_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(COVER_KEY) in _nz(g.scenario.name))
+
+
+def _cvb_find_game(uid):
+    """بازیِ کاوربازپرسِ این کاربر.
+    ⚠️ عمداً به night_active/maarefe_active وابسته نیست — ممکن است گاد «روز» را
+       زده باشد و دعوت‌شده تازه بعدش دکمه را بزند؛ نباید گم شود."""
+    for cid, game in store.games.items():
+        if game.phase in ("idle", "ended"):
+            continue
+        if _is_cover_scenario(game) and _seat_of_uid(game, uid) is not None:
+            return game, cid
+    return None, None
+
+
+def _cvb_pick_targets(g, nato):
+    """همهٔ بازیکن‌ها به‌جز خودِ ناتو و شیاد."""
+    shiad = _find_seat_by_role(g, _R_SHIAD, alive_only=False)
+    return [s for s in sorted(g.seats) if s != nato and s != shiad]
+
+
+async def _cvb_start(ctx, chat_id, g):
+    """🕵️ معارفهٔ کاوربازپرس: ناتو انتخاب می‌کند چه کسی به تیم اضافه شود."""
+    nato = _find_seat_by_role(g, _R_NATO, alive_only=False)
+    if nato is None:
+        await _night_report(ctx, g, "🕵️ ناتو در بازی نیست — دعوت‌نامهٔ کاوربازپرس انجام نشد.")
+        return
+    g.cvb_asking = True
+    g.cvb_invite_seat = None
+    store.save()
+    nuid = g.seats[nato][0]
+    m = await _safe_pm(ctx, nuid, "🕵️ کدام شماره را دوست داری به تیمت اضافه کنی؟",
+                       _kb_night_seats(_cvb_pick_targets(g, nato), g, "cvb_pick_",
+                                       selected=g.night_sel.get(nuid),
+                                       confirm_cb="cvb_pick_confirm"))
+    if m:
+        g.night_pm_msgs[nuid] = m.message_id
+    else:
+        await _night_report(ctx, g, "⚠️ پیویِ ناتو بسته است — دعوت‌نامه فرستاده نشد؛ "
+                                    "با «اکتِ دستی» می‌توانی جای او انتخاب کنی.")
+    store.save()
+
+
+async def _cvb_make_godfather(ctx, g, seat):
+    """😈 این صندلی گادفادرِ تیم می‌شود: نقش و ساید عوض، لینکِ اتاق، اعلام در اتاق."""
+    old = (g.assigned_roles or {}).get(seat, "—")
+    if not getattr(g, "cvb_orig_roles", None):
+        g.cvb_orig_roles = {}
+    g.cvb_orig_roles.setdefault(seat, old)
+    g.assigned_roles[seat] = "گادفادر"
+    if getattr(g, "seat_sides", None) is not None:
+        g.seat_sides[seat] = "مافیا"
+    g.cvb_gf_seat = seat
+    g.cvb_done = True
+    g.cvb_asking = False
+    g.cvb_invite_seat = None
+    store.save()
+    uid = g.seats[seat][0]
+    mates = [f"{m}. {g.seats[m][1]} — {g.assigned_roles.get(m, '—')}"
+             for m in sorted(_mafia_seats(g)) if m != seat]
+    try:
+        await ctx.bot.send_message(
+            uid, "😈 نقش شما: <b>گادفادر</b>\n\n😈 یاران مافیای شما:\n"
+                 + ("\n".join(mates) if mates else "—"), parse_mode="HTML")
+    except Exception:
+        pass
+    await _room_send_link(ctx, g, uid)
+    await _room_note(ctx, g, f"😈 <b>{_room_who(g, seat)}</b> به تیم اضافه شد — گادفادر.")
+    await _night_report(ctx, g, f"😈 گادفادرِ تیم: <b>{_room_who(g, seat)}</b> "
+                                f"(نقشِ قبلی: {escape(str(old), quote=False)})")
+
+
+async def _cvb_accept(ctx, g, seat):
+    """✅ دعوت پذیرفته شد: نقشِ شهروندیِ این نفر به مجهول می‌رسد و خودش گادفادر می‌شود."""
+    old = (g.assigned_roles or {}).get(seat, "—")
+    mj = _find_seat_by_role(g, _R_MAJHOOL, alive_only=False)
+    if mj is not None:
+        if not getattr(g, "cvb_orig_roles", None):
+            g.cvb_orig_roles = {}
+        g.cvb_orig_roles.setdefault(mj, (g.assigned_roles or {}).get(mj, "مجهول"))
+        g.assigned_roles[mj] = old
+        if getattr(g, "seat_sides", None) is not None:
+            g.seat_sides[mj] = "شهر"
+        store.save()
+        try:
+            await ctx.bot.send_message(g.seats[mj][0],
+                                       f"🎭 نقش شما: <b>{escape(str(old), quote=False)}</b>",
+                                       parse_mode="HTML")
+        except Exception:
+            pass
+        await _night_report(ctx, g, f"🎭 مجهول ({_room_who(g, mj)}) نقشِ "
+                                    f"<b>{escape(str(old), quote=False)}</b> را گرفت.")
+    else:
+        await _night_report(ctx, g, "⚠️ مجهولی در بازی نیست — نقشِ آزادشده به کسی نرسید.")
+    await _cvb_make_godfather(ctx, g, seat)
+
+
+async def handle_cover_callback(update, ctx):
+    """🕵️ دعوت‌نامهٔ کاوربازپرس — انتخابِ ناتو و جوابِ دعوت‌شده."""
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستیِ گاد هم پشتیبانی می‌شود
+    g, chat_id = _cvb_find_game(uid)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    # ── انتخابِ ناتو ──
+    if data == "cvb_pick_confirm":
+        if getattr(g, "cvb_done", False) or not getattr(g, "cvb_asking", False):
+            return
+        if _seat_of_uid(g, uid) != _find_seat_by_role(g, _R_NATO, alive_only=False):
+            return
+        s = g.night_sel.get(uid)
+        if not s or s not in g.seats:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.cvb_asking = False
+        g.cvb_invite_seat = s
+        g.night_sel.pop(uid, None)
+        store.save()
+        tname = g.seats[s][1]
+        await _close_pm(ctx, uid, mid, f"🕵️ {s}. {tname} را انتخاب کردی.")
+        await _night_report(ctx, g, f"🕵️ ناتو → دعوت به تیم: <b>{s}. {escape(tname, quote=False)}</b>")
+        # 🎭 اگر خودِ مجهول انتخاب شود، دعوت‌نامه‌ای در کار نیست — مستقیم گادفادر می‌شود
+        if _seat_role_norm(g, s) == _R_MAJHOOL:
+            await _cvb_make_godfather(ctx, g, s)
+            return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله", callback_data="cvb_ans_yes")],
+            [InlineKeyboardButton("🚫 خیر", callback_data="cvb_ans_no")],
+        ])
+        m = await _safe_pm(ctx, g.seats[s][0],
+                           "😈 شما دعوت به تیمِ مافیا شدید — آیا قبول می‌کنید؟", kb)
+        if m:
+            g.night_pm_msgs[g.seats[s][0]] = m.message_id
+        else:
+            await _night_report(ctx, g, "⚠️ پیویِ دعوت‌شده بسته است — دعوت‌نامه نرسید؛ "
+                                        "با «اکتِ دستی» می‌توانی جای او جواب بدهی.")
+        store.save()
+        return
+
+    if data.startswith("cvb_pick_"):
+        if getattr(g, "cvb_done", False) or not getattr(g, "cvb_asking", False):
+            return
+        nato = _seat_of_uid(g, uid)
+        if nato != _find_seat_by_role(g, _R_NATO, alive_only=False):
+            return
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🕵️ کدام شماره را دوست داری به تیمت اضافه کنی؟",
+                       _kb_night_seats(_cvb_pick_targets(g, nato), g, "cvb_pick_",
+                                       selected=s, confirm_cb="cvb_pick_confirm"))
+        return
+
+    # ── جوابِ دعوت‌شده ──
+    if data in ("cvb_ans_yes", "cvb_ans_no"):
+        if getattr(g, "cvb_done", False):
+            return
+        s = _seat_of_uid(g, uid)
+        if s is None or s != getattr(g, "cvb_invite_seat", None):
+            return
+        if data == "cvb_ans_yes":
+            await _close_pm(ctx, uid, mid, "✅ دعوت را پذیرفتی — به تیمِ مافیا خوش آمدی.")
+            await _night_report(ctx, g, f"✅ {_room_who(g, s)} دعوت را پذیرفت.")
+            await _cvb_accept(ctx, g, s)
+            return
+        await _close_pm(ctx, uid, mid, "🚫 دعوت را نپذیرفتی — نقشت همان است که بود.")
+        await _night_report(ctx, g, f"🚫 {_room_who(g, s)} دعوت را نپذیرفت.")
+        mj = _find_seat_by_role(g, _R_MAJHOOL, alive_only=False)
+        if mj is None:
+            await _night_report(ctx, g, "⚠️ مجهولی در بازی نیست — گادفادری به کسی نرسید.")
+            g.cvb_done = True
+            g.cvb_invite_seat = None
+            store.save()
+            return
+        await _cvb_make_godfather(ctx, g, mj)
+        return
 
 
 def _find_active_night_game(uid, q):
@@ -14844,13 +15050,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
-    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "nem_", "tk_", "kp_",
+    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "nem_", "tk_", "kp_",
                                               "gm_", "sh_", "my_")):
         _dt = _q.data
         if _dt.startswith("my_"):
             await handle_mythic_callback(update, ctx)
         elif _dt.startswith("night_"):
             await handle_night_callback(update, ctx)
+        elif _dt.startswith("cvb_"):
+            await handle_cover_callback(update, ctx)
         elif _dt.startswith("bzp_"):
             await handle_baazpors_callback(update, ctx)
         elif _dt.startswith("nem_"):
@@ -16614,6 +16822,12 @@ async def shuffle_and_assign(
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    # 🕵️ کاوربازپرس — با نقش‌های تازه، دعوت‌نامه از نو گرفته می‌شود
+    g.cvb_asking = False
+    g.cvb_invite_seat = None
+    g.cvb_gf_seat = None
+    g.cvb_done = False
+    g.cvb_orig_roles = {}
     g.nem_deng_button_used = False
     g.nem_deng_active = False
     g.nem_deng_stage = 0
@@ -18584,6 +18798,11 @@ async def do_maarefe(ctx, chat_id, g):
             g.maarefe_done = True   # اتاقی تعریف نشده → معارفه بدون اتاق انجام شد
             store.save()
 
+    # 🕵️ کاوربازپرس: ناتو یک نفر را به تیم دعوت می‌کند (بعد از ساختِ لینکِ اتاق،
+    #    چون گادفادرِ تازه باید همان لینک را بگیرد)
+    if _is_cover_scenario(g) and not getattr(g, "cvb_done", False):
+        await _cvb_start(ctx, chat_id, g)
+
     # سناریو گیمر: دن‌کارلئونه باید یک جمله بنویسد (به مسترهلمز می‌رسد)
     if _is_gamer_scenario(g):
         don = _find_seat_by_role(g, _R_DONC)
@@ -18632,6 +18851,7 @@ def _diag_scenario_report(g) -> str:
     detected = []
     if _is_neg_scenario(g): detected.append("مذاکره")
     if _is_baazpors_scenario(g): detected.append("بازپرس")
+    if _is_cover_scenario(g): detected.append("کاوربازپرس")
     if _is_nemayande_scenario(g): detected.append("نماینده")
     if _is_takavar_scenario(g): detected.append("تکاور")
     if _is_kapu_scenario(g): detected.append("کاپو")
