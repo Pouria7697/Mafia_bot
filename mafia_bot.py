@@ -8695,12 +8695,12 @@ async def handle_baazpors_callback(update, ctx):
                 pass
             await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → مافیا ساده ✅")
-            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
-                             f"جذب: <b>{_room_who(g, s)}</b> ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
-            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
-                             f"جذب: <b>{_room_who(g, s)}</b> ❌ ناموفق")
+        # 📣 اتاقِ مافیا: بدونِ تیک/ضربدر و بدونِ «ناموفق» — هر دو حالت یک متنِ یکسان،
+        #    وگرنه تیم از روی همین پیام می‌فهمد اکت گرفته یا نه
+        await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                         f"جذب: <b>{_room_who(g, s)}</b>")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         g.night_doctor_blocked = True
         g.night_done.add("mafia")
@@ -8777,7 +8777,7 @@ async def handle_baazpors_callback(update, ctx):
         det = _find_seat_by_role(g, _R_DETECTIVE)
         correct = (det is not None and s == det)
         tick = "✅" if correct else "❌"
-        await _room_note(ctx, g, f"🎭 حدسِ شیاد: <b>{_room_who(g, s)}</b> کاراگاه است {tick}")
+        # 🎭 اکتِ شیاد عمداً در اتاقِ مافیا اعلام نمی‌شود — فقط در پیویِ گاد
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, "🎭 حدس ثبت شد.")
         await _night_report(ctx, g, f"🎭 شیاد → حدس کاراگاه: {s}. {escape(tname, quote=False)} {tick}")
@@ -11137,12 +11137,11 @@ async def handle_kapu_callback(update, ctx):
                 pass
             await _room_send_link(ctx, g, tu)   # لینک اتاق مافیا فوری
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> ✅")
-            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
-                             f"جذب: <b>{_room_who(g, s)}</b> ✅")
         else:
             await _night_report(ctx, g, f"🥷 یاکوزایی → فدا: {sac_txt} | جذب: <b>{s}. {escape(tname, quote=False)}</b> → ناموفق ❌")
-            await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
-                             f"جذب: <b>{_room_who(g, s)}</b> ❌ ناموفق")
+        # 📣 اتاقِ مافیا: بدونِ تیک/ضربدر — هر دو حالت یک متنِ یکسان
+        await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
+                         f"جذب: <b>{_room_who(g, s)}</b>")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         g.night_doctor_blocked = True   # 🥷 شبِ یاکوزایی → زره‌ساز حقِ سیو ندارد
         g.night_done.add("mafia")
@@ -11178,7 +11177,7 @@ async def handle_kapu_callback(update, ctx):
         g.night_jalad_target = s
         tick = "✅" if correct else "❌"
         await _room_note(ctx, g, f"⚔️ جلادی روی <b>{_room_who(g, s)}</b> — "
-                         f"حدس: «{escape(str(guess_name), quote=False)}» {tick}")
+                         f"حدس: «{escape(str(guess_name), quote=False)}»")
         g.jalad_used = True
         await _close_pm(ctx, uid, mid, f"⚔️ جلادی روی {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"⚔️ جلاد → صندلی {s}. {escape(tname, quote=False)} | حدس نقش: {guess_name} {tick}")
@@ -14135,8 +14134,7 @@ async def handle_shahname_callback(update, ctx):
         g.sh_afr_guess = t
         g.sh_afr_guessed = True
         g.sh_afr_correct = (ros is not None and ros == t)
-        await _room_note(ctx, g, f"🔗 حدسِ افراسیاب: <b>{_room_who(g, t)}</b> رستم است "
-                         + ("✅" if g.sh_afr_correct else "❌"))
+        await _room_note(ctx, g, f"🔗 حدسِ افراسیاب: <b>{_room_who(g, t)}</b> رستم است")
         g.night_sel.pop(uid, None)
         store.save()
         await _close_pm(ctx, uid, mid, "✅ انتخابت ثبت شد.")
