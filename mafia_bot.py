@@ -1394,7 +1394,7 @@ def god_unban(uid, unblock: bool = False) -> tuple[bool, str]:
         kinds.append("محرومیتِ کاملِ بات")
     if not kinds:
         if key in blocked:
-            return False, "محرومیتِ کاملِ این نفر را فقط مدیرِ اصلیِ بات برمی‌دارد."
+            return False, "محرومیتِ کاملِ این نفر را فقط مدیرانِ اصلیِ بات برمی‌دارند."
         return False, "این نفر محروم نیست."
     data["banned"] = banned
     data["seats"] = seats
@@ -1415,8 +1415,9 @@ def god_unban(uid, unblock: bool = False) -> tuple[bool, str]:
 
 
 async def _can_unban(ctx, chat_id, uid) -> bool:
-    """مدیرِ اصلی یا ادمین‌های همان گروه می‌توانند رفعِ محرومیت کنند."""
-    if uid == ADMIN_ID:
+    """مدیرانِ اصلی یا ادمین‌های همان گروه می‌توانند رفعِ محرومیت کنند.
+    (محرومیتِ کاملِ بات را اما فقط مدیرانِ اصلی برمی‌دارند — پایین‌تر)"""
+    if _is_super_admin(uid):
         return True
     try:
         admins = await ctx.bot.get_chat_administrators(chat_id)
@@ -1432,11 +1433,11 @@ async def _god_unban_from_reply(ctx, msg, by_uid=None):
         await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «رفع محرومیت».")
         return
     target = rep.from_user
-    # ⛔ ادمین نمی‌تواند محرومیتِ خودش را بردارد
-    if by_uid is not None and by_uid != ADMIN_ID and target.id == by_uid:
+    # ⛔ ادمینِ گروه نمی‌تواند محرومیتِ خودش را بردارد (مدیرِ اصلی می‌تواند)
+    if by_uid is not None and not _is_super_admin(by_uid) and target.id == by_uid:
         await msg.reply_text("⛔ محرومیتِ خودت را نمی‌توانی برداری.")
         return
-    ok, res = god_unban(target.id, unblock=(by_uid == ADMIN_ID))
+    ok, res = god_unban(target.id, unblock=_is_super_admin(by_uid))
     if not ok:
         await msg.reply_text(f"ℹ️ {res}")
         return
@@ -1457,8 +1458,8 @@ async def _block_from_reply(ctx, msg):
         await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «محروم».")
         return
     target = rep.from_user
-    if target.id == ADMIN_ID:
-        await msg.reply_text("ℹ️ خودت را نمی‌شود محروم کرد.")
+    if _is_super_admin(target.id):
+        await msg.reply_text("ℹ️ مدیرانِ اصلیِ بات را نمی‌شود محروم کرد.")
         return
     if getattr(target, "is_bot", False):
         await msg.reply_text("ℹ️ بات را نمی‌شود محروم کرد.")
@@ -1470,7 +1471,7 @@ async def _block_from_reply(ctx, msg):
     await msg.reply_text(
         f"⛔ <b>{escape(res, quote=False)}</b> از بات محروم شد — از این به بعد هیچ "
         f"پیام، دستور و دکمه‌ای از او خوانده نمی‌شود و در هیچ بازی‌ای نمی‌نشیند.\n"
-        f"🔓 فقط خودت با ریپلای و نوشتنِ «رفع محرومیت» می‌توانی برش داری.",
+        f"🔓 فقط مدیرانِ اصلیِ بات با ریپلای و نوشتنِ «رفع محرومیت» می‌توانند برش دارند.",
         parse_mode="HTML")
     try:
         await ctx.bot.send_message(
@@ -1489,7 +1490,7 @@ async def blocked_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #    webhook_handler تا تمام‌شدنِ پردازش به تلگرام جواب نمی‌دهد — یک انتظارِ
     #    کوچک اینجا یعنی لگ روی تک‌تکِ دکمه‌ها.
     _god_bans_schedule_refresh()
-    if u.id == ADMIN_ID or blocked_info(u.id) is None:
+    if _is_super_admin(u.id) or blocked_info(u.id) is None:
         return
     q = update.callback_query
     if q is not None:
@@ -2297,6 +2298,24 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
 SELECTED_FILENAME = "selected_list.json"
 SELECTED_DAYS = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
 ADMIN_ID = 99347107
+
+# 👑 مدیرانِ اصلیِ بات — فقط دو اختیارِ خاص دارند:
+#    ۱) فعال/غیرفعال کردنِ گروه   ۲) «محروم» و «رفع محرومیت»
+#    ⚠️ بقیهٔ دستورهای سازندهٔ بات (/moveuser، /sendtoall، پنل مدیریت، افزودنِ
+#       سناریو و …) همچنان فقط دستِ ADMIN_ID است و اینجا باز نمی‌شود.
+#    OWNER_IDS پایین‌ترِ فایل هم همین لیست است — یک تیر و دو نشان نداریم.
+SUPER_ADMINS = {
+    ADMIN_ID,       # 99347107 — سازندهٔ بات
+    449916967,
+    7501892705,
+    5904091398,
+    603814669,
+    8739731843,
+}
+
+
+def _is_super_admin(uid) -> bool:
+    return uid in SUPER_ADMINS
 
 # ─── 📢 چنلِ آرشیو (لیست/گزارش/کارنامه‌ی هر بازی) ────────────────
 SETTINGS_FILENAME = "bot_settings.json"
@@ -17171,9 +17190,9 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat.id
     g = gs(chat_id)
 
-    # ⛔ «محروم» با ریپلای — فقط مدیرِ اصلیِ بات (برای بقیه اصلاً شرط برقرار نیست
+    # ⛔ «محروم» با ریپلای — فقط مدیرانِ اصلیِ بات (برای بقیه اصلاً شرط برقرار نیست
     #    تا متنِ عادیِ «محروم» مسیرِ همیشگی‌اش را برود)
-    if uid == ADMIN_ID and _is_block_text(text):
+    if _is_super_admin(uid) and _is_block_text(text):
         await _block_from_reply(ctx, msg)
         return
 
@@ -19684,7 +19703,8 @@ async def leave_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در خروج از گروه: {e}")
 
-OWNER_IDS = {99347107, 449916967, 7501892705,5904091398}
+# همان مدیرانِ اصلی — برای فعال/غیرفعال کردنِ گروه (لیست بالا تعریف شده)
+OWNER_IDS = SUPER_ADMINS
 
 
 async def activate_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
