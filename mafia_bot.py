@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from dataclasses import dataclass
 import pickle, os, random, asyncio, time
 import telegram.error
@@ -295,6 +295,7 @@ class GameState:
         self.doctor_self_saves = getattr(self, "doctor_self_saves", 0)
         # ── حالت شبِ خودکار (سناریو بازپرس) ──
         self.yakuza_used = getattr(self, "yakuza_used", False)
+        self.nato_used = getattr(self, "nato_used", False)   # 🕵️ ناتویی: یک‌بار در کلِ بازی (همهٔ سناریوها)
         self.baazpors_used = getattr(self, "baazpors_used", False)
         self.night_doctor_blocked = getattr(self, "night_doctor_blocked", False)
         self.night_rest_opened = getattr(self, "night_rest_opened", False)
@@ -8407,8 +8408,8 @@ async def _bzp_open_gf_shiad(ctx, chat_id, g):
         # یاکوزایی فقط وقتی گادفادر زنده است و مصرف نشده
         if gf_alive is not None and not g.yakuza_used:
             rows.append([InlineKeyboardButton("🥷 یاکوزایی", callback_data="bzp_gf_yakuza")])
-        # ناتویی فقط وقتی ناتو زنده است
-        if nato_alive is not None:
+        # ناتویی فقط وقتی ناتو زنده است و یک‌بارِ مصرفش نرفته
+        if nato_alive is not None and not g.nato_used:
             rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="bzp_gf_nato")])
         m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
                            InlineKeyboardMarkup(rows))
@@ -8549,7 +8550,7 @@ async def handle_baazpors_callback(update, ctx):
         rows = [[InlineKeyboardButton("🔫 شات", callback_data="bzp_gf_shoot")]]
         if _gf is not None and not g.yakuza_used:
             rows.append([InlineKeyboardButton("🥷 یاکوزایی", callback_data="bzp_gf_yakuza")])
-        if _nato is not None:
+        if _nato is not None and not g.nato_used:
             rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="bzp_gf_nato")])
         kb = InlineKeyboardMarkup(rows)
         dec = getattr(g, "bzp_decider_seat", None)
@@ -8597,6 +8598,10 @@ async def handle_baazpors_callback(update, ctx):
         return
 
     if data == "bzp_gf_nato":
+        # 🕵️ یک‌بار در کلِ بازی — نگهبانِ اینجا برای کیبوردِ کهنه‌ی شب‌های قبل است
+        if g.nato_used:
+            await safe_q_answer(q, "ناتویی قبلاً استفاده شده.", show_alert=True)
+            return
         nato = _find_seat_by_role(g, _R_NATO)
         if nato is None:
             await safe_q_answer(q, "ناتو زنده نیست.", show_alert=True)
@@ -8733,6 +8738,7 @@ async def handle_baazpors_callback(update, ctx):
         g.night_nato_correct = correct
         tick = "✅" if correct else "❌"
         g.night_nato_target = s
+        g.nato_used = True   # 🕵️ مصرف شد — از شبِ بعد دکمه‌اش نمی‌آید
         await _close_pm(ctx, uid, mid, f"🕵️ ناتویی روی {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"🕵️ ناتو → صندلی {s}. {escape(tname, quote=False)} | حدس نقش: {guess_name} {tick}")
         g.night_doctor_blocked = True
@@ -9085,8 +9091,8 @@ async def _nem_open_mafia(ctx, chat_id, g):
         g.nem_decider_seat = decider
         duid = g.seats[decider][0]
         rows = [[InlineKeyboardButton("🔫 شات", callback_data="nem_don_shot")]]
-        # ناتویی فقط وقتی دن‌مافیا زنده است (اکت خودِ دن‌مافیاست)
-        if don_alive is not None:
+        # ناتویی فقط وقتی دن‌مافیا زنده است (اکت خودِ دن‌مافیاست) و مصرف نشده
+        if don_alive is not None and not g.nato_used:
             rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="nem_don_nato")])
         m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
                            InlineKeyboardMarkup(rows))
@@ -9331,6 +9337,10 @@ async def handle_nemayande_callback(update, ctx):
         return
 
     if data == "nem_don_nato":
+        # 🕵️ یک‌بار در کلِ بازی — نگهبان برای کیبوردِ کهنه‌ی شب‌های قبل
+        if g.nato_used:
+            await safe_q_answer(q, "ناتویی قبلاً استفاده شده.", show_alert=True)
+            return
         g.night_don_act = "nato"
         store.save()
         targets = [s for s in _alive_seats(g)
@@ -9380,6 +9390,7 @@ async def handle_nemayande_callback(update, ctx):
         correct = (_nz(guess_name) == _seat_role_norm(g, s))
         g.night_nato_correct = correct
         g.night_nato_target = s
+        g.nato_used = True   # 🕵️ مصرف شد — از شبِ بعد دکمه‌اش نمی‌آید
         tick = "✅" if correct else "❌"
         await _night_report(ctx, g, f"🕵️ ناتویی دن‌مافیا → صندلی {s}. {escape(tname, quote=False)} | حدس: {guess_name} {tick}")
         store.save()
@@ -9771,7 +9782,7 @@ async def _tk_open_mafia(ctx, chat_id, g):
     g.tk_decider_seat = decider
     duid = g.seats[decider][0]
     rows = [[InlineKeyboardButton("🔫 شات", callback_data="tk_shot")]]
-    if nato is not None:
+    if nato is not None and not g.nato_used:
         rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="tk_nato")])
     m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
                        InlineKeyboardMarkup(rows))
@@ -10526,7 +10537,7 @@ async def handle_takavar_callback(update, ctx):
         store.save()
         _nato = _find_seat_by_role(g, _R_NATO)
         rows = [[InlineKeyboardButton("🔫 شات", callback_data="tk_shot")]]
-        if _nato is not None:
+        if _nato is not None and not g.nato_used:
             rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="tk_nato")])
         kb = InlineKeyboardMarkup(rows)
         dec = getattr(g, "tk_decider_seat", None)
@@ -10551,6 +10562,10 @@ async def handle_takavar_callback(update, ctx):
         return
 
     if data == "tk_nato":
+        # 🕵️ یک‌بار در کلِ بازی — نگهبان برای کیبوردِ کهنه‌ی شب‌های قبل
+        if g.nato_used:
+            await safe_q_answer(q, "ناتویی قبلاً استفاده شده.", show_alert=True)
+            return
         nato = _find_seat_by_role(g, _R_NATO)
         if nato is None:
             await safe_q_answer(q, "ناتو زنده نیست.", show_alert=True)
@@ -10613,6 +10628,7 @@ async def handle_takavar_callback(update, ctx):
         _tu, tname = g.seats[s]
         correct = (_nz(guess_name) == _seat_role_norm(g, s))
         g.night_nato_correct = correct
+        g.nato_used = True   # 🕵️ مصرف شد — از شبِ بعد دکمه‌اش نمی‌آید
         tick = "✅" if correct else "❌"
         await _close_pm(ctx, uid, mid, f"🕵️ ناتویی روی {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"🕵️ ناتو → صندلی {s}. {escape(tname, quote=False)} | حدس نقش: {guess_name} {tick}")
@@ -11041,6 +11057,10 @@ async def handle_kapu_callback(update, ctx):
         return
 
     if data == "kp_don_jalad":
+        # ⚔️ یک‌بار در کلِ بازی — نگهبان برای کیبوردِ کهنه‌ی شب‌های قبل
+        if g.jalad_used:
+            await safe_q_answer(q, "جلادی قبلاً استفاده شده.", show_alert=True)
+            return
         ex = _find_seat_by_role(g, _R_EXECUTIONER)
         if ex is None:
             await safe_q_answer(q, "جلاد زنده نیست.", show_alert=True)
@@ -12820,7 +12840,8 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
             rows = [[InlineKeyboardButton("🔫 شات", callback_data="nem_don_shot")]]
             # ناتویی اکتِ خودِ دن است — دنِ کیک‌شده هنوز خط نخورده، پس دستی کنارش می‌گذاریم
             _don = _find_seat_by_role(g, _R_DON)
-            if _don is not None and _don != ks and _don not in (g.night_burned or set()):
+            if (_don is not None and _don != ks and not g.nato_used
+                    and _don not in (g.night_burned or set())):
                 rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="nem_don_nato")])
             kb = InlineKeyboardMarkup(rows)
             text = f"{head}\nاکت مافیا را انتخاب کن:"
@@ -16902,6 +16923,9 @@ async def shuffle_and_assign(
     g.tk_gun_aiming = None
     g.zereh_fallen = False
     g.baz_button_used = False
+    # 🕵️⚔️ ناتویی و جلادی: یک‌بار در کلِ بازی — با پخشِ نقشِ تازه از نو
+    g.nato_used = False
+    g.jalad_used = False
     g.baz_day_choice = None
     g.baz_awaiting_decision = False
     g.baz_duel_active = False
