@@ -17929,6 +17929,8 @@ def _timer_kb():
         [InlineKeyboardButton("۶۰", callback_data="tmr_60"),
          InlineKeyboardButton("۷۵", callback_data="tmr_75"),
          InlineKeyboardButton("۹۰", callback_data="tmr_90")],
+        # 🔁 پخشِ دوبارهٔ «تایم تمام شد» در وویس‌چت (وقتی کسی سرِ تایم قطع نمی‌کند)
+        [InlineKeyboardButton("🔁 تکرار", callback_data="tmr_repeat")],
     ])
 
 
@@ -17964,6 +17966,14 @@ async def handle_timer_callback(update, ctx):
     g = gs(chat)
     if uid != g.god_id:
         await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+        return
+    # 🔁 تکرار: فقط «تایم تمام شد» را دوباره در وویس‌چت می‌گوید؛ دکمه‌ها می‌مانند
+    if q.data == "tmr_repeat":
+        if voice_god.ready():
+            voice_god.say(chat, "time_up")
+            await safe_q_answer(q, "🔁 دوباره گفته شد.")
+        else:
+            await safe_q_answer(q, "🎙 گادِ صوتی الان وصل نیست.", show_alert=True)
         return
     try:
         seconds = int(q.data.rsplit("_", 1)[1])

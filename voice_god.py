@@ -1,16 +1,20 @@
 """
-🎙 گادِ صوتی — یک اکانتِ کاربریِ تلگرام که جمله‌های ثابت را در وویس‌چتِ گروه پخش می‌کند.
+🎙 گادِ صوتی — پلِ باتِ اصلی به کارگرِ صوتی (voice_worker.py) که در «پروسهٔ جدا» اجرا می‌شود.
 
 - بدونِ سه متغیرِ TG_API_ID / TG_API_HASH / TG_SESSION کاملاً خاموش است و بات
   دقیقاً مثلِ قبل کار می‌کند. هیچ خطایی از این ماژول به بیرون نشت نمی‌کند.
-- جمله‌ها از قبل ساخته شده‌اند (voice/<صدا>/<کلید>.raw — PCM خام ۴۸kHz مونو)
-  تا روی سرور نه ffmpeg لازم باشد نه سرویسِ TTS.
+- کارگر در پروسهٔ جدا اجرا می‌شود: کرش، هنگ یا قطعیِ اکانت فقط «صدا» را می‌برد،
+  نه بات را؛ و همین‌جا خودکار دوباره بالا می‌آید (با سقفِ تلاش).
+- جمله‌ها از قبل ساخته شده‌اند (voice/<صدا>/<کلید>.raw — PCM خام ۴۸kHz مونو).
 - صدای سفارشی (وویسِ آپلودشده در پیویِ سازنده) در voice/custom/<کلید>.raw می‌نشیند
-  و بر صدای پیش‌فرض اولویت دارد. تبدیلش با ffmpegِ همراهِ imageio-ffmpeg انجام می‌شود.
+  و بر صدای پیش‌فرض اولویت دارد. تبدیلش با ffmpegِ همراهِ imageio-ffmpeg است.
 - TG_VOICE = dilara (پیش‌فرض) | farid
-- TG_VOLUME = بلندیِ اکانت در وویس‌چت، ۱ تا ۲۰۰ (پیش‌فرض ۱۵۰) — یک‌بار بعد از اولین پخش در هر گروه
+- TG_VOLUME = بلندیِ اکانت در وویس‌چت، ۱ تا ۲۰۰ (پیش‌فرض ۱۵۰)
 """
 import os
+import sys
+import json
+import time
 import asyncio
 
 TG_API_ID = os.environ.get("TG_API_ID", "").strip()
@@ -22,17 +26,26 @@ try:
 except ValueError:
     TG_VOLUME = 150
 
-VOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+VOICE_DIR = os.path.join(_HERE, "voice")
 CUSTOM_DIR = os.path.join(VOICE_DIR, "custom")
+WORKER_PATH = os.path.join(_HERE, "voice_worker.py")
 PCM_BYTES_PER_SEC = 48000 * 2          # s16le, mono
 
 # جمله‌های موجود (کلید → فایل)
 PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end")
 
-_state = {"client": None, "calls": None, "ready": False}
-_locks: dict[int, asyncio.Lock] = {}
-_warned_no_call: set[int] = set()
-_volume_set: set[int] = set()
+# ── نگهداریِ پروسهٔ کارگر ──
+RESTART_DELAY = 10          # ثانیه صبر قبل از بالا آوردنِ دوباره
+RESTART_MAX = 6             # حداکثر تلاش در هر پنجره
+RESTART_WINDOW = 3600       # طولِ پنجره (ثانیه)
+PING_EVERY = 90             # هر چند ثانیه یک پینگ
+PING_TIMEOUT = 30           # بی‌جوابی بیش از این → کارگر هنگ کرده → کشته و دوباره ساخته می‌شود
+
+_state = {
+    "proc": None, "ready": False, "info": {}, "quitting": False,
+    "ready_evt": None, "restarts": [], "ping_id": 0, "pong_id": 0,
+}
 
 
 def enabled() -> bool:
@@ -43,7 +56,7 @@ def ready() -> bool:
     return bool(_state["ready"])
 
 
-# ─── فایل‌های صدا ───────────────────────────────────────────
+# ─── فایل‌های صدا (مشترک با کارگر) ─────────────────────────────
 def custom_path(key: str) -> str:
     return os.path.join(CUSTOM_DIR, f"{key}.raw")
 
@@ -75,9 +88,8 @@ def save_custom(key: str, raw: bytes) -> str:
 
 
 def remove_custom(key: str) -> bool:
-    p = custom_path(key)
     try:
-        os.remove(p)
+        os.remove(custom_path(key))
         return True
     except FileNotFoundError:
         return False
@@ -117,97 +129,171 @@ async def convert_to_raw(data: bytes):
         return None
 
 
-# ─── اتصال ──────────────────────────────────────────────────
+# ─── پروسهٔ کارگر ───────────────────────────────────────────
 async def start() -> bool:
-    """اتصالِ اکانت + موتورِ وویس. خروجی: آماده شد یا نه. هرگز استثنا نمی‌اندازد."""
+    """بالا آوردنِ کارگر و انتظار برای آماده‌شدنش. هرگز استثنا نمی‌اندازد."""
     if not enabled():
         print("🎙 گادِ صوتی خاموش — TG_API_ID/TG_API_HASH/TG_SESSION تنظیم نشده.")
         return False
-    try:
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
-        from pytgcalls import PyTgCalls
-    except Exception as e:
-        print("🎙 گادِ صوتی خاموش — کتابخانه نصب نیست:", e)
+    if not os.path.isfile(WORKER_PATH):
+        print("🎙 گادِ صوتی خاموش — voice_worker.py پیدا نشد.")
         return False
+    _state["quitting"] = False
+    ok = await _spawn()
+    if ok:
+        asyncio.get_running_loop().create_task(_pinger())
+    return ok
+
+
+async def _spawn() -> bool:
+    evt = asyncio.Event()
+    _state.update(ready=False, ready_evt=evt, info={})
     try:
-        client = TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH)
-        await client.connect()
-        if not await client.is_user_authorized():
-            print("⛔ گادِ صوتی: TG_SESSION معتبر نیست — با make_session.py دوباره بساز.")
-            await client.disconnect()
-            return False
-        me = await client.get_me()
-        # 📇 کشِ چت‌ها تا play(chat_id) بتواند گروه را پیدا کند
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-u", WORKER_PATH,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=None,                        # stderr مستقیم به لاگِ رندر
+            cwd=_HERE)
+    except Exception as e:
+        print("⛔ گادِ صوتی: کارگر اجرا نشد:", repr(e))
+        return False
+    _state["proc"] = proc
+    asyncio.get_running_loop().create_task(_pump(proc))
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=60)
+    except asyncio.TimeoutError:
+        print("⚠️ گادِ صوتی: کارگر در ۶۰ ثانیه آماده نشد.")
+    if _state["ready"]:
+        info = _state["info"]
+        print(f"🎙 گادِ صوتی آماده: {info.get('name', '')} (@{info.get('username') or '—'}) — "
+              f"صدا: {TG_VOICE} | بلندی: {TG_VOLUME} | پروسهٔ جدا pid={proc.pid}")
+    return bool(_state["ready"])
+
+
+async def _pump(proc):
+    """خواندنِ stdoutِ کارگر: خط‌های @@ پروتکل‌اند، بقیه لاگ. با پایانِ پروسه → راه‌اندازیِ دوباره."""
+    try:
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", "ignore").rstrip("\n")
+            if line.startswith("@@READY"):
+                try:
+                    _state["info"] = json.loads(line[len("@@READY"):].strip() or "{}")
+                except Exception:
+                    _state["info"] = {}
+                _state["ready"] = True
+                if _state["ready_evt"]:
+                    _state["ready_evt"].set()
+            elif line.startswith("@@FAILED"):
+                print("⛔ گادِ صوتی:", line[len("@@FAILED"):].strip())
+                if _state["ready_evt"]:
+                    _state["ready_evt"].set()
+            elif line.startswith("@@PONG"):
+                try:
+                    _state["pong_id"] = int(line.split()[1])
+                except Exception:
+                    pass
+            elif line:
+                print("🎙│", line)
+    except Exception as e:
+        print("⚠️ گادِ صوتی: خواندنِ خروجیِ کارگر:", repr(e))
+    finally:
+        code = None
         try:
-            await client.get_dialogs(limit=200)
-        except Exception as e:
-            print("⚠️ گادِ صوتی: get_dialogs:", e)
-        calls = PyTgCalls(client)
-        await calls.start()
-        _state.update(client=client, calls=calls, ready=True)
-        missing = [k for k in PHRASES if not phrase_path(k)]
-        print(f"🎙 گادِ صوتی آماده: {me.first_name or ''} (@{me.username or '—'}) — "
-              f"صدا: {TG_VOICE} | بلندی: {TG_VOLUME}"
-              + (f" | ⚠️ فایلِ ناموجود: {missing}" if missing else ""))
-        return True
-    except Exception as e:
-        print("⛔ گادِ صوتی بالا نیامد:", repr(e))
-        return False
+            code = await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            pass
+        if _state["proc"] is proc:
+            _state["ready"] = False
+            _state["proc"] = None
+            if _state["ready_evt"]:
+                _state["ready_evt"].set()
+        if not _state["quitting"]:
+            print(f"⚠️ گادِ صوتی: کارگر خارج شد (code={code}) — بات سالم است؛ فقط صدا قطع شد.")
+            asyncio.get_running_loop().create_task(_restart_later())
 
 
-# ─── پخش ────────────────────────────────────────────────────
-def say(chat_id: int, key: str):
-    """🔊 پخشِ یک جمله در وویس‌چتِ این گروه — غیرِمسدودکننده، بی‌خطا.
-    اگر وویس‌چت باز نباشد یا ماژول آماده نباشد، بی‌صدا رد می‌شود."""
-    if not _state["ready"]:
+async def _restart_later():
+    now = time.time()
+    _state["restarts"] = [t for t in _state["restarts"] if now - t < RESTART_WINDOW]
+    if len(_state["restarts"]) >= RESTART_MAX:
+        print(f"⛔ گادِ صوتی: {RESTART_MAX} بار در یک ساعت افتاد — دیگر تلاش نمی‌کنم "
+              f"(با دیپلوی/ری‌استارت دوباره امتحان می‌شود).")
+        return
+    _state["restarts"].append(now)
+    await asyncio.sleep(RESTART_DELAY)
+    if _state["quitting"] or _state["proc"] is not None:
+        return
+    print("🔄 گادِ صوتی: بالا آوردنِ دوبارهٔ کارگر…")
+    await _spawn()
+
+
+async def _pinger():
+    """هر چند ثانیه یک پینگ؛ اگر کارگر جواب نداد، هنگ کرده → کشته می‌شود (و _pump دوباره می‌سازد)."""
+    while not _state["quitting"]:
+        await asyncio.sleep(PING_EVERY)
+        proc = _state["proc"]
+        if proc is None or not _state["ready"]:
+            continue
+        _state["ping_id"] += 1
+        pid = _state["ping_id"]
+        _send({"cmd": "ping", "id": pid})
+        await asyncio.sleep(PING_TIMEOUT)
+        if _state["proc"] is proc and _state["pong_id"] < pid:
+            print("⚠️ گادِ صوتی: کارگر به پینگ جواب نداد — هنگ کرده؛ کشته می‌شود.")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _send(obj: dict):
+    proc = _state["proc"]
+    if proc is None or proc.stdin is None:
         return
     try:
-        asyncio.get_running_loop().create_task(_say(int(chat_id), key))
-    except RuntimeError:
+        proc.stdin.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+        asyncio.get_running_loop().create_task(_drain(proc))
+    except Exception as e:
+        print("⚠️ گادِ صوتی: ارسال به کارگر:", repr(e))
+
+
+async def _drain(proc):
+    try:
+        await proc.stdin.drain()
+    except Exception:
         pass
 
 
-async def _say(chat_id: int, key: str):
-    path = phrase_path(key)
-    if not path:
-        print(f"⚠️ گادِ صوتی: فایلِ «{key}» نیست.")
+# ─── API برای بات ───────────────────────────────────────────
+def say(chat_id: int, key: str):
+    """🔊 پخشِ یک جمله در وویس‌چتِ این گروه — غیرِمسدودکننده، بی‌خطا.
+    اگر کارگر آماده نباشد یا وویس‌چت باز نباشد، بی‌صدا رد می‌شود."""
+    if not _state["ready"]:
         return
-    lock = _locks.setdefault(chat_id, asyncio.Lock())
-    async with lock:                     # جمله‌ها پشتِ هم، نه روی هم
-        try:
-            from pytgcalls.types.raw import Stream, AudioStream, AudioParameters
-            from ntgcalls import MediaSource
-            stream = Stream(microphone=AudioStream(
-                MediaSource.FILE, path, AudioParameters(48000, 1)))
-            await _state["calls"].play(chat_id, stream)
-            _warned_no_call.discard(chat_id)
-            # 🔊 بلندیِ اکانت در این وویس‌چت — فقط یک‌بار بعد از اولین پخشِ موفق
-            if chat_id not in _volume_set and TG_VOLUME != 100:
-                _volume_set.add(chat_id)
-                try:
-                    await _state["calls"].change_volume_call(chat_id, TG_VOLUME)
-                except Exception as e:
-                    print(f"⚠️ گادِ صوتی: تنظیمِ بلندی در {chat_id}: {type(e).__name__}: {e}")
-            # ⏳ تا تمام‌شدنِ همین جمله صبر کن تا جملهٔ بعدی رویش نیفتد
-            await asyncio.sleep(os.path.getsize(path) / PCM_BYTES_PER_SEC + 0.4)
-        except Exception as e:
-            name = type(e).__name__
-            if name == "NoActiveGroupCall":
-                if chat_id not in _warned_no_call:
-                    _warned_no_call.add(chat_id)
-                    print(f"🎙 گادِ صوتی: وویس‌چتِ {chat_id} باز نیست — «{key}» پخش نشد.")
-            else:
-                print(f"⚠️ گادِ صوتی ({key} در {chat_id}): {name}: {e}")
+    _send({"cmd": "say", "chat": int(chat_id), "key": str(key)})
 
 
 async def leave(chat_id: int):
     """🚪 خروج از وویس‌چتِ این گروه (پایانِ بازی). بی‌خطا."""
     if not _state["ready"]:
         return
+    _send({"cmd": "leave", "chat": int(chat_id)})
+
+
+async def stop():
+    """خاموش‌کردنِ کارگر (هنگامِ پایانِ بات)."""
+    _state["quitting"] = True
+    proc = _state["proc"]
+    if proc is None:
+        return
+    _send({"cmd": "quit"})
     try:
-        await _state["calls"].leave_call(int(chat_id))
+        await asyncio.wait_for(proc.wait(), timeout=10)
     except Exception:
-        pass
-    _warned_no_call.discard(int(chat_id))
-    _volume_set.discard(int(chat_id))
+        try:
+            proc.kill()
+        except Exception:
+            pass
