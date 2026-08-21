@@ -6,3 +6,5 @@ GitPython
 requests
 httpx
 regex
+telethon
+py-tgcalls

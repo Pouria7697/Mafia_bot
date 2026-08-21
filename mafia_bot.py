@@ -22,6 +22,27 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters, TypeHandler, ApplicationHandlerStop
 )
 from collections import defaultdict
+
+# 🎙 گادِ صوتی — اگر ماژول یا تنظیماتش نباشد، یک بدلِ بی‌اثر جایش می‌نشیند
+try:
+    import voice_god
+except Exception as _e:
+    print("🎙 voice_god import:", _e)
+
+    class _VoiceStub:
+        @staticmethod
+        def say(*a, **k): pass
+
+        @staticmethod
+        async def leave(*a, **k): pass
+
+        @staticmethod
+        async def start(): return False
+
+        @staticmethod
+        def ready(): return False
+    voice_god = _VoiceStub()
+
 # --- CALLBACK DATA CONSTANTS ---
 BTN_PLAYER  = "player_name"    
 BTN_DELETE  = "delete_seat"      
@@ -4349,6 +4370,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
         except Exception:
             pass
         await _check_auto_end(ctx, chat_id, g)   # 🏁
+        _bzp_hunter_day_exit(ctx, chat_id, g, exiter)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
 
     # 🏅 امتیازِ رأی نهایی (خروجِ واقعی = وقتی خط خورده باشد)
     _score_votes_final(g, targets, exiter, not protected)
@@ -4920,6 +4942,7 @@ async def announce_winner(ctx, update, g: GameState):
 
     g.phase = "ended"
     store.save()
+    await voice_god.leave(chat.id)     # 🎙 پایانِ بازی → خروج از وویس‌چت
 
     msg = await ctx.bot.send_message(chat.id, "\n".join(lines), parse_mode="HTML")
     try:
@@ -5661,6 +5684,7 @@ async def start_night(ctx, chat_id, g):
     else:
         _body = ("اکت خود را در پیوی بات انجام دهید (دکمه‌ها برایتان ارسال شد).\n"
                  f"در صورت مشکل، اکت خود را به پیوی گاد بفرستید: {god_link}")
+    voice_god.say(chat_id, "night")            # 🎙
     await ctx.bot.send_message(
         chat_id, f"🌙 <b>شب {g.night_number} شروع شد.</b>\n{_body}", parse_mode="HTML")
     await _night_report(ctx, g, f"━━━━━━━━━━━━\n🌙 <b>شب {g.night_number}</b>")
@@ -5885,6 +5909,7 @@ async def end_night(ctx, chat_id, g):
     g.night_sel = {}
     g.night_doc_sel = {}
     store.save()
+    voice_god.say(chat_id, "day")              # 🎙
     await ctx.bot.send_message(chat_id, f"☀️ روز شد. اکت‌گیری شب {g.night_number} پایان یافت.")
     await _night_report(ctx, g, f"☀️ پایان شب {g.night_number}")
     # 🔒 بستن چتِ اتاق مافیا در روز
@@ -6673,6 +6698,7 @@ async def _do_day(ctx, chat_id, g):
         g.maarefe_active = False
         store.save()
         await _room_set_locked(ctx, g, True)
+        voice_god.say(chat_id, "day")          # 🎙
         await ctx.bot.send_message(chat_id, "☀️ روز شد. چت گروه مافیا بسته شد.")
         # 🔄 برچسبِ دکمه‌ی قفل به‌روز شود
         if getattr(g, "mafia_room_id", None):
@@ -6693,6 +6719,7 @@ async def _do_room_open(ctx, chat_id, g):
     opened = False
     if getattr(g, "mafia_room_id", None):
         await _room_set_locked(ctx, g, False)
+        voice_god.say(chat_id, "temp_night")   # 🎙 شبِ موقت
         await ctx.bot.send_message(chat_id, "🔓 چت گروه مافیا باز شد. با «روز» یا «بستن» دوباره بسته می‌شود.")
         opened = True
     else:
@@ -6941,6 +6968,7 @@ async def _baz_duel_count(ctx, chat_id, g):
         pass
 
     await _check_auto_end(ctx, chat_id, g)   # 🏁
+    _bzp_hunter_day_exit(ctx, chat_id, g, loser)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
 
     # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
     _lside = _sc_side(g, loser)
@@ -7830,6 +7858,7 @@ async def _do_room_close(ctx, chat_id, g):
     """🔒 بستنِ چت مافیا — مشترک بین «/بسته» و دکمه."""
     if getattr(g, "mafia_room_id", None):
         await _room_set_locked(ctx, g, True)
+        voice_god.say(chat_id, "temp_night_end")   # 🎙 پایانِ شبِ موقت
         await ctx.bot.send_message(chat_id, "🔒 چت گروه مافیا بسته شد.")
         try:
             await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
@@ -8366,6 +8395,63 @@ def _bzp_detective_positive(g, seat) -> bool:
     if g.night_shiad_guess is not None and det is not None and g.night_shiad_guess == det:
         return False
     return True
+
+
+HUNTER_DRAG_DELAY = 90   # ⏳ بعد از خروجِ روزِ هانتر، این‌قدر صبر (وصیت) و بعد اعلام
+
+
+def _bzp_hunter_drag_target(g, hunter_seat):
+    """🪢 اگر این صندلی هانتر باشد و دیشب به یک مافیای غیرِگادفادر (ناتو/شیاد/جذب‌شده)
+    بسته باشد و آن فرد هنوز زنده است → صندلیِ او؛ وگرنه None."""
+    if not _is_baazpors_scenario(g):
+        return None
+    if _seat_role_norm(g, hunter_seat) != _R_HUNTER:
+        return None
+    ht = getattr(g, "night_hunter_target", None)
+    if not ht or ht not in g.seats or ht in (g.striked or set()):
+        return None
+    if ht not in _mafia_seats(g) or _seat_role_norm(g, ht) == _R_GODFATHER:
+        return None
+    return ht
+
+
+def _bzp_hunter_day_exit(ctx, chat_id, g, hunter_seat):
+    """🪢 خروجِ روزِ هانتر (رأی نهایی / بازپرسی): اگر درست بسته بود، بعد از ۹۰ ثانیه
+    اعلام می‌شود و بسته‌شده هم خط می‌خورد. (شبِ هانتر جداگانه در _resolve_baazpors است)"""
+    ht = _bzp_hunter_drag_target(g, hunter_seat)
+    if ht is None:
+        return
+    hn = escape(g.seats[hunter_seat][1], quote=False)
+    tn = escape(g.seats[ht][1], quote=False)
+
+    async def _later():
+        try:
+            await asyncio.sleep(HUNTER_DRAG_DELAY)
+            if g.phase in ("idle", "ended"):
+                return
+            # ⚠️ در این ۹۰ ثانیه ممکن است اوضاع عوض شده باشد — دوباره چک
+            if hunter_seat not in (g.striked or set()):
+                return          # هانتر برگردانده شده
+            if ht not in g.seats or ht in (g.striked or set()):
+                return          # بسته‌شده خودش قبلاً رفته
+            g.striked.add(ht)
+            store.save()
+            await ctx.bot.send_message(
+                chat_id,
+                f"🪢 {hunter_seat}. {hn} <b>هانتر</b> بود و {ht}. {tn} را با خودش برد — "
+                f"هر دو از لیست خط خوردند.",
+                parse_mode="HTML")
+            await _night_report(ctx, g, f"🪢 هانتر ({hunter_seat}. {hn}) در روز خارج شد → "
+                                        f"{ht}. {tn} را با خود برد.")
+            try:
+                await publish_seating(ctx, chat_id, g, mode=CTRL)
+            except Exception:
+                pass
+            await _check_auto_end(ctx, chat_id, g)   # 🏁
+        except Exception as e:
+            print("⚠️ hunter day drag:", e)
+
+    asyncio.create_task(_later())
 
 
 async def _bzp_broadcast_special(ctx, g, kind):
@@ -17848,8 +17934,8 @@ async def run_timer(ctx, chat: int, seconds: int, token: int | None = None):
         if token is not None and _TIMER_TOKEN.get(chat) != token:
             return
         # ⏰ پایانِ تایم + دکمه‌های تایمرِ بعدی (گاد دیگر تایپ نمی‌کند)
+        voice_god.say(chat, "time_up")          # 🎙 هم‌زمان با متن
         await ctx.bot.send_message(chat, "⏰ تایم تمام شد", reply_markup=_timer_kb())
-#       await play_alarm_sound(ctx, chat)
 
     except asyncio.CancelledError:
         pass   # ⏹ با تایمرِ جدید لغو شد — بی‌صدا
@@ -20217,6 +20303,14 @@ async def main():
 
     # ⛔ لیستِ محرومان را همین‌جا بخوان — قبل از باز شدنِ وب‌هوک، نه وسطِ بازی
     await _god_bans_prime()
+
+    # 🎙 گادِ صوتی — اختیاری؛ اگر بالا نیاید یا طول بکشد، بات بدونِ صدا ادامه می‌دهد
+    try:
+        await asyncio.wait_for(voice_god.start(), timeout=45)
+    except asyncio.TimeoutError:
+        print("⚠️ گادِ صوتی: اتصال بیش از ۴۵ ثانیه طول کشید — بدونِ صدا ادامه می‌دهیم.")
+    except Exception as _ve:
+        print("⚠️ گادِ صوتی:", _ve)
 
     # 🌐 ساخت aiohttp برای وب‌هوک
     from aiohttp import web

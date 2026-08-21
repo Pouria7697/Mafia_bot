@@ -1,0 +1,10 @@
+# 🔑 هیچ‌وقت روی گیت‌هاب نرود
+tg_session.txt
+*.session
+*.session-journal
+
+# محلی
+__pycache__/
+mafia_data.pkl
+mafia_bot_original.py
+.claude/
