@@ -15245,6 +15245,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_moveuser_callback(update, ctx)
         return
 
+    # 🎙 انتخابِ جمله برای وویسِ آپلودشده (پیویِ سازندهٔ بات)
+    if _q and _q.data and _q.data.startswith("vset_"):
+        await handle_voice_set_callback(update, ctx)
+        return
+
     # 🔗 انتخابِ گیرندگانِ لینکِ اتاقِ مافیا (پیویِ گاد — سناریوهای بدونِ موتور)
     if _q and _q.data and _q.data.startswith("mlk_"):
         await handle_mlink_callback(update, ctx)
@@ -20197,11 +20202,207 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
+# ═══════════ 🎙 صدای سفارشیِ گادِ صوتی (آپلود در پیویِ سازنده) ═══════════
+# سازنده در پیوی یک وویس می‌فرستد → می‌پرسیم برای کدام جمله → دانلود، تبدیل به PCM،
+# ذخیره‌ی محلی + ثبتِ file_id در گیست. چون دیسکِ رندر پاک‌شدنی است، بعد از هر
+# بالا آمدن صداها از روی file_id دوباره دانلود می‌شوند.
+VOICE_CUSTOM_FILENAME = "voice_custom.json"
+VOICE_PHRASE_LABELS = {
+    "time_up":        "تایم تمام شد",
+    "day":            "روز شد",
+    "night":          "شب شد",
+    "temp_night":     "شب موقت",
+    "temp_night_end": "پایان شب موقت",
+}
+_VOICE_PENDING: dict[int, str] = {}   # uid → file_id منتظرِ انتخابِ جمله
+
+
+def load_voice_custom() -> dict | None:
+    try:
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(GIST_API_URL, headers=headers, timeout=15.0)
+        if r.status_code != 200:
+            return None
+        f = (r.json().get("files", {}) or {}).get(VOICE_CUSTOM_FILENAME)
+        if not f:
+            return {}
+        return json.loads(f.get("content") or "{}") or {}
+    except Exception as e:
+        print("❌ load_voice_custom:", e)
+        return None
+
+
+def save_voice_custom(data: dict) -> bool:
+    try:
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.patch(GIST_API_URL, headers=headers, timeout=20.0,
+                        json={"files": {VOICE_CUSTOM_FILENAME: {
+                            "content": json.dumps(data, ensure_ascii=False, indent=2)}}})
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print("❌ save_voice_custom:", e)
+        return False
+
+
+def _voice_label_key(text: str):
+    t = _nz(text or "")
+    for k, lbl in VOICE_PHRASE_LABELS.items():
+        if _nz(lbl) == t:
+            return k
+    return None
+
+
+async def _voice_install_from_file_id(bot, key: str, file_id: str) -> tuple[bool, str]:
+    """دانلود از تلگرام + تبدیل + ذخیره‌ی محلی. (موفق؟, مسیر یا پیامِ خطا)"""
+    try:
+        f = await bot.get_file(file_id)
+        data = bytes(await f.download_as_bytearray())
+    except Exception as e:
+        return False, f"دانلود از تلگرام ناموفق: {e}"
+    raw = await voice_god.convert_to_raw(data)
+    if not raw:
+        return False, "تبدیلِ صدا ناموفق بود (ffmpeg در دسترس نیست یا فایل خراب است)."
+    return True, voice_god.save_custom(key, raw)
+
+
+async def _voice_custom_restore(bot):
+    """🔄 بعد از هر بالا آمدن: صداهای سفارشی از روی file_id دوباره نصب می‌شوند."""
+    try:
+        data = await asyncio.to_thread(load_voice_custom)
+        if not data:
+            return
+        n = 0
+        for key, rec in data.items():
+            fid = (rec or {}).get("file_id")
+            if key in VOICE_PHRASE_LABELS and fid:
+                ok, res = await _voice_install_from_file_id(bot, key, fid)
+                if ok:
+                    n += 1
+                else:
+                    print(f"⚠️ صدای سفارشیِ «{key}» بازیابی نشد: {res}")
+        print(f"🎙 صداهای سفارشی بازیابی شد: {n}/{len(data)}")
+    except Exception as e:
+        print("⚠️ voice custom restore:", e)
+
+
+def _voice_pick_kb():
+    rows = [[InlineKeyboardButton(lbl, callback_data=f"vset_{k}")]
+            for k, lbl in VOICE_PHRASE_LABELS.items()]
+    rows.append([InlineKeyboardButton("🚫 انصراف", callback_data="vset_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_voice_upload_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🎙 سازنده در پیوی یک وویس/فایلِ صوتی می‌فرستد → می‌پرسیم برای کدام جمله."""
+    msg = update.message
+    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
+        return
+    media = msg.voice or msg.audio
+    if not media:
+        return
+    _VOICE_PENDING[msg.from_user.id] = media.file_id
+    await msg.reply_text("🎙 این صدا برای کدام جمله است؟", reply_markup=_voice_pick_kb())
+
+
+async def handle_voice_set_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = q.from_user.id
+    data = q.data or ""
+    if uid != ADMIN_ID:
+        await safe_q_answer(q)
+        return
+    mid = q.message.message_id if q.message else None
+    if data == "vset_cancel":
+        _VOICE_PENDING.pop(uid, None)
+        await safe_q_answer(q)
+        try:
+            await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text="🚫 لغو شد.")
+        except Exception:
+            pass
+        return
+    key = data[len("vset_"):]
+    if key not in VOICE_PHRASE_LABELS:
+        await safe_q_answer(q)
+        return
+    fid = _VOICE_PENDING.pop(uid, None)
+    if not fid:
+        await safe_q_answer(q, "اول وویس را بفرست، بعد جمله را انتخاب کن.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    lbl = VOICE_PHRASE_LABELS[key]
+    try:
+        await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text=f"⏳ «{lbl}» در حالِ تبدیل…")
+    except Exception:
+        pass
+    ok, res = await _voice_install_from_file_id(ctx.bot, key, fid)
+    if not ok:
+        await ctx.bot.send_message(uid, f"⛔ {res}")
+        return
+    cur = await asyncio.to_thread(load_voice_custom)
+    if cur is None:
+        await ctx.bot.send_message(
+            uid, f"⚠️ صدای «{lbl}» نصب شد ولی فهرستِ گیست خوانده نشد — بعد از ری‌استارت می‌پرد؛ دوباره بفرست.")
+        return
+    cur[key] = {"file_id": fid, "label": lbl,
+                "at": datetime.now(timezone.utc).timestamp()}
+    saved = await asyncio.to_thread(save_voice_custom, cur)
+    note = "" if saved else "\n⚠️ ذخیره در گیست ناموفق — بعد از ری‌استارت می‌پرد؛ دوباره بفرست."
+    await ctx.bot.send_message(
+        uid, f"✅ صدای «{lbl}» ثبت شد — از همین الان به‌جای صدای پیش‌فرض پخش می‌شود.{note}")
+
+
+async def handle_voice_text_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """«صداها» → فهرست | «حذف صدا <جمله>» → برگشت به صدای پیش‌فرض"""
+    msg = update.message
+    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
+        return
+    text = (msg.text or "").strip()
+    if _nz(text) == _nz("صداها"):
+        cur = await asyncio.to_thread(load_voice_custom)
+        lines = ["🎙 <b>صداهای گادِ صوتی</b>", ""]
+        for k, lbl in VOICE_PHRASE_LABELS.items():
+            if (cur or {}).get(k):
+                st = "سفارشی ✅" if voice_god.has_custom(k) else "سفارشی ⏳ (هنوز دانلود نشده)"
+            else:
+                st = "پیش‌فرض"
+            lines.append(f"• {escape(lbl, quote=False)} — {st}")
+        lines += ["", "<i>عوض کردن: یک وویس بفرست و جمله را انتخاب کن.",
+                  "برگشت به پیش‌فرض: «حذف صدا تایم تمام شد»</i>"]
+        await msg.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+    m = re.match(r"^\s*حذف\s*صدا\s*(.*)$", text)
+    if not m:
+        return
+    key = _voice_label_key(m.group(1))
+    if key is None:
+        await msg.reply_text("⚠️ کدام جمله؟ یکی از این‌ها:\n• " + "\n• ".join(VOICE_PHRASE_LABELS.values()))
+        return
+    lbl = VOICE_PHRASE_LABELS[key]
+    cur = await asyncio.to_thread(load_voice_custom)
+    if cur is None:
+        await msg.reply_text("⚠️ فهرستِ گیست خوانده نشد — کمی بعد دوباره امتحان کن.")
+        return
+    had = cur.pop(key, None) is not None
+    voice_god.remove_custom(key)
+    if had and not await asyncio.to_thread(save_voice_custom, cur):
+        await msg.reply_text("⚠️ فایلِ محلی پاک شد ولی ذخیره در گیست ناموفق بود — بعد از ری‌استارت برمی‌گردد.")
+        return
+    await msg.reply_text(f"↩️ «{lbl}» به صدای پیش‌فرض برگشت." if had else f"ℹ️ «{lbl}» صدای سفارشی نداشت.")
+
+
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_error_handler(on_error)
     # ⛔ دروازهٔ محرومیتِ کامل — گروهِ منفی یعنی قبل از همهٔ هندلرهای دیگر
     app.add_handler(TypeHandler(Update, blocked_gate), group=-1)
+    # 🎙 صدای سفارشیِ گادِ صوتی — فقط پیویِ سازنده؛ قبل از هندلرهای عمومیِ پیوی
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO) & filters.User(ADMIN_ID),
+        handle_voice_upload_pm))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & filters.User(ADMIN_ID)
+        & filters.Regex(r"^\s*(صداها|حذف\s*صدا\b.*)\s*$"),
+        handle_voice_text_pm))
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
     app.add_handler(
         MessageHandler(
@@ -20311,6 +20512,9 @@ async def main():
         print("⚠️ گادِ صوتی: اتصال بیش از ۴۵ ثانیه طول کشید — بدونِ صدا ادامه می‌دهیم.")
     except Exception as _ve:
         print("⚠️ گادِ صوتی:", _ve)
+    # 🎙 صداهای سفارشی را در پس‌زمینه از تلگرام برگردان (دیسکِ رندر پاک‌شدنی است)
+    if voice_god.ready():
+        asyncio.create_task(_voice_custom_restore(app.bot))
 
     # 🌐 ساخت aiohttp برای وب‌هوک
     from aiohttp import web

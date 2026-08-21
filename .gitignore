@@ -3,6 +3,9 @@ tg_session.txt
 *.session
 *.session-journal
 
+# 🎙 صداهای سفارشی — در زمانِ اجرا از تلگرام دانلود می‌شوند
+voice/custom/
+
 # محلی
 __pycache__/
 mafia_data.pkl

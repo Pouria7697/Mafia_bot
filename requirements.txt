@@ -8,3 +8,4 @@ httpx
 regex
 telethon
 py-tgcalls
+imageio-ffmpeg
