@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import pickle, os, random, asyncio
+import pickle, os, random, asyncio, time
 import telegram.error
 import jdatetime
 import requests
@@ -44,6 +44,71 @@ USERNAMES_FILENAME = "usernames.json"
 TOKEN = os.environ.get("TOKEN")
 PERSIST_FILE = "mafia_data.pkl"
 SEAT_EMOJI = "👤"; LOCKED_EMOJI = "🔒"; GOD_EMOJI = "👳🏻‍♂️"; START_EMOJI = "🚀"
+
+
+# ═══════════ 🐌 لاگِ آپدیتِ کُند ═══════════
+# هر آپدیتی که بیشتر از این طول بکشد، در لاگِ رندر چاپ می‌شود — همراه با اینکه
+# چقدرش صرفِ گیت‌هاب (گیست) شده، تا معلوم شود تأخیر از کجاست.
+SLOW_UPDATE_SEC = float(os.environ.get("SLOW_UPDATE_SEC", "2"))
+
+_GIST_TIME = {"sec": 0.0, "calls": 0}
+
+
+def _wrap_gist_http(mod, name):
+    """⏱ زمانِ درخواست‌های api.github.com را جمع می‌زند.
+    بقیهٔ درخواست‌ها دست‌نخورده رد می‌شوند (هیچ رفتاری عوض نمی‌شود)."""
+    orig = getattr(mod, name)
+
+    def wrapper(*a, **k):
+        url = a[0] if a else k.get("url", "")
+        if "api.github.com" not in str(url):
+            return orig(*a, **k)
+        t0 = time.perf_counter()
+        try:
+            return orig(*a, **k)
+        finally:
+            _GIST_TIME["sec"] += time.perf_counter() - t0
+            _GIST_TIME["calls"] += 1
+
+    return wrapper
+
+
+for _mod, _fn in ((httpx, "get"), (httpx, "patch"), (httpx, "post"),
+                  (requests, "get"), (requests, "patch"), (requests, "post")):
+    try:
+        setattr(_mod, _fn, _wrap_gist_http(_mod, _fn))
+    except Exception as _e:
+        print("⚠️ gist timer wrap:", _fn, _e)
+
+
+def _update_label(update) -> str:
+    """توضیحِ کوتاهِ آپدیت برای لاگ."""
+    try:
+        q = getattr(update, "callback_query", None)
+        if q is not None:
+            return f"دکمه «{q.data}»"
+        m = getattr(update, "effective_message", None)
+        if m is not None:
+            t = (getattr(m, "text", None) or getattr(m, "caption", None) or "")
+            t = t.strip().split("\n", 1)[0][:40]
+            return f"پیام «{t}»" if t else "پیام"
+        return "آپدیت"
+    except Exception:
+        return "؟"
+
+
+def _log_slow_update(update, dt: float, gist_sec: float, gist_calls: int):
+    """🐌 چاپِ آپدیتِ کُند در لاگِ رندر."""
+    try:
+        ch = getattr(update, "effective_chat", None)
+        us = getattr(update, "effective_user", None)
+        share = f" | گیست {gist_sec:.1f}s در {gist_calls} درخواست" if gist_calls else ""
+        rest = dt - gist_sec
+        print(f"🐌 آپدیتِ کُند: {dt:.1f}s — {_update_label(update)}"
+              f"{share} | بقیه {rest:.1f}s"
+              f" | chat={getattr(ch, 'id', '—')} uid={getattr(us, 'id', '—')}")
+    except Exception as e:
+        print("⚠️ slow log:", e)
 
 def load_active_groups() -> set[int]:
     try:
@@ -1056,7 +1121,9 @@ def load_god_bans() -> dict | None:
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
-        r = httpx.get(url, headers=headers)
+        # ⏱ تایم‌اوت لازم است: این درخواست کلِ گیست را می‌آورد و اگر معلق بماند
+        #    تردِ پس‌زمینه تا ابد گیر می‌کند.
+        r = httpx.get(url, headers=headers, timeout=15.0)
         if r.status_code != 200:
             return None
         f = (r.json().get("files", {}) or {}).get(GOD_BANS_FILENAME)
@@ -1141,15 +1208,13 @@ def blocked_info(uid):
     return (data.get("blocked") or {}).get(str(uid))
 
 
-async def _god_bans_refresh(force: bool = False):
-    """تازه‌سازیِ کشِ محرومیت‌ها بدون بلاک‌کردنِ حلقهٔ رویداد.
-    در خطا هم ts را جلو می‌بریم تا هر آپدیت دوباره به گیست نزند."""
-    now = datetime.now(timezone.utc).timestamp()
-    if not force and (now - float(_GOD_BAN_CACHE["ts"] or 0)) <= 900:
-        return
-    if _GOD_BAN_CACHE.get("busy"):
-        return
-    _GOD_BAN_CACHE["busy"] = True
+_GOD_BAN_TTL = 900.0     # ⏳ هر ۱۵ دقیقه یک‌بار، آن هم فقط در پس‌زمینه
+
+
+async def _god_bans_refresh():
+    """دانلودِ لیستِ محرومان در تردِ جدا.
+    ⚠️ قفلِ busy را تماس‌گیرنده گذاشته؛ اینجا فقط آزادش می‌کنیم.
+       در خطا هم ts جلو می‌رود تا بلافاصله دوباره تلاش نشود."""
     try:
         d = await asyncio.to_thread(load_god_bans)
         if d is not None:
@@ -1159,6 +1224,28 @@ async def _god_bans_refresh(force: bool = False):
     finally:
         _GOD_BAN_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
         _GOD_BAN_CACHE["busy"] = False
+
+
+def _god_bans_schedule_refresh():
+    """🔄 تازه‌سازی را در پس‌زمینه صف می‌کند — هرگز روی مسیرِ آپدیت منتظر نمی‌ماند.
+    ⚠️ قفل همین‌جا و هم‌زمان گذاشته می‌شود، وگرنه یک رگبارِ آپدیت ده‌ها دانلودِ
+       هم‌زمانِ کلِ گیست می‌سازد (create_task تا تیکِ بعدیِ حلقه اجرا نمی‌شود)."""
+    now = datetime.now(timezone.utc).timestamp()
+    if (now - float(_GOD_BAN_CACHE["ts"] or 0)) <= _GOD_BAN_TTL:
+        return
+    if _GOD_BAN_CACHE.get("busy"):
+        return
+    _GOD_BAN_CACHE["busy"] = True
+    try:
+        asyncio.create_task(_god_bans_refresh())
+    except RuntimeError:
+        _GOD_BAN_CACHE["busy"] = False    # حلقه‌ای در کار نیست
+
+
+async def _god_bans_prime():
+    """⛔ بارِ اول، هنگامِ بالا آمدنِ بات — تا هزینه‌اش روی اولین دکمه‌ی کاربر نیفتد."""
+    _GOD_BAN_CACHE["busy"] = True
+    await _god_bans_refresh()
 
 
 def set_blocked(uid, name=None) -> tuple[bool, str]:
@@ -1397,10 +1484,10 @@ async def blocked_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     if u is None:
         return
-    if float(_GOD_BAN_CACHE["ts"] or 0) <= 0:
-        await _god_bans_refresh(force=True)          # اولین آپدیت بعد از بالا آمدنِ بات
-    elif (datetime.now(timezone.utc).timestamp() - float(_GOD_BAN_CACHE["ts"])) > 900:
-        asyncio.create_task(_god_bans_refresh())     # کهنه شده → در پس‌زمینه تازه شود
+    # ⚠️ اینجا هرگز منتظرِ شبکه نمی‌مانیم: این تابع جلوی «هر» آپدیت است و
+    #    webhook_handler تا تمام‌شدنِ پردازش به تلگرام جواب نمی‌دهد — یک انتظارِ
+    #    کوچک اینجا یعنی لگ روی تک‌تکِ دکمه‌ها.
+    _god_bans_schedule_refresh()
     if u.id == ADMIN_ID or blocked_info(u.id) is None:
         return
     q = update.callback_query
@@ -20086,6 +20173,9 @@ async def main():
     # ✅ initialize application
     await app.initialize()
 
+    # ⛔ لیستِ محرومان را همین‌جا بخوان — قبل از باز شدنِ وب‌هوک، نه وسطِ بازی
+    await _god_bans_prime()
+
     # 🌐 ساخت aiohttp برای وب‌هوک
     from aiohttp import web
     import os
@@ -20096,7 +20186,16 @@ async def main():
     async def webhook_handler(request):
         data = await request.json()
         update = Update.de_json(data, app.bot)
-        await app.process_update(update)
+        # 🐌 سنجشِ زمانِ پردازش — همانی که تلگرام منتظرش می‌ماند
+        _t0 = time.perf_counter()
+        _g0, _c0 = _GIST_TIME["sec"], _GIST_TIME["calls"]
+        try:
+            await app.process_update(update)
+        finally:
+            _dt = time.perf_counter() - _t0
+            if _dt >= SLOW_UPDATE_SEC:
+                _log_slow_update(update, _dt,
+                                 _GIST_TIME["sec"] - _g0, _GIST_TIME["calls"] - _c0)
         return web.Response()
 
     aio_app.router.add_post(f"/{TOKEN}", webhook_handler)
