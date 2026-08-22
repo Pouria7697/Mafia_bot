@@ -5480,6 +5480,10 @@ def _night_all_done(g) -> bool:
             need.add("doctor")
         if alive(_R_GUIDE):
             need.add("guide")
+        # 🔎 شهروندی که راهنمایی گرفته باید استعلامش را بگیرد — تا آن موقع شب تمام نیست
+        _rec = getattr(g, "night_guide_recipient_inv", None)
+        if _rec and _rec in g.seats and _rec not in (g.striked or set()):
+            need.add("ginv")
         return need <= d
 
     if _is_kapu_scenario(g):
@@ -7091,6 +7095,9 @@ async def _burn_advance(ctx, chat_id, g):
             k = role_keys.get(rn)
             if k:
                 g.night_done.add(k)
+        # 🔎 اگر شهروندِ راهنمایی‌گرفته سوخت، استعلامش هم منتفی است
+        if getattr(g, "night_guide_recipient_inv", None) in burned:
+            g.night_done.add("ginv")
         try:
             snp = _find_sniper(g)
             if snp in burned:
@@ -9759,6 +9766,9 @@ async def handle_nemayande_callback(update, ctx):
                            _kb_night_seats(targets, g, "nem_ginv_"))
         if m:
             g.night_pm_msgs[rec_uid] = m.message_id
+        else:
+            await _night_report(ctx, g, f"⚠️ سؤالِ استعلامِ {s}. {escape(tname, quote=False)} ارسال نشد "
+                                        f"(پیوی بسته) — تا استعلام نگیرد شب تمام نمی‌شود؛ با «اکتِ دستی» جایش جواب بده.")
         g.night_done.add("guide")
         store.save()
         await _nem_trigger_mine(ctx, chat_id, g)
@@ -9783,6 +9793,7 @@ async def handle_nemayande_callback(update, ctx):
             _sc_add(g, _seat_of_uid(g, uid), "inq", 5, f"استعلام مثبت ({s})")
         await _close_pm(ctx, uid, mid, f"🔎 استعلام {s}. {tname}: {res}")
         await _night_report(ctx, g, f"🔎 (راهنمایی) استعلام {s}. {escape(tname, quote=False)}: <b>{res}</b>")
+        g.night_done.add("ginv")   # ✅ حالا شب می‌تواند تمام شود
         store.save()
         return
 
