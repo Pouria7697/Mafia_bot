@@ -33,7 +33,8 @@ WORKER_PATH = os.path.join(_HERE, "voice_worker.py")
 PCM_BYTES_PER_SEC = 48000 * 2          # s16le, mono
 
 # جمله‌های موجود (کلید → فایل)
-PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end")
+PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end",
+           "yakuza", "nato", "jalad")
 
 # ── نگهداریِ پروسهٔ کارگر ──
 RESTART_DELAY = 10          # ثانیه صبر قبل از بالا آوردنِ دوباره

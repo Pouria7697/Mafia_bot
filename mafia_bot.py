@@ -5126,6 +5126,14 @@ def _is_neg_scenario(g) -> bool:
 def _alive_seats(g):
     return [s for s in sorted(g.seats) if s not in (g.striked or set())]
 
+
+def _game_chat_id(g):
+    """آیدیِ گروهِ این بازی (برای جاهایی که فقط g در دست است، مثل اعلامِ صوتی)."""
+    for cid, game in store.games.items():
+        if game is g:
+            return cid
+    return None
+
 def _seat_role_norm(g, seat):
     return _nz((g.assigned_roles or {}).get(seat, ""))
 
@@ -8456,6 +8464,10 @@ def _bzp_hunter_day_exit(ctx, chat_id, g, hunter_seat):
 
 async def _bzp_broadcast_special(ctx, g, kind):
     """kind = «یاکوزایی» یا «ناتویی». به همه اطلاع می‌دهد و به دکتر می‌گوید استراحت کند."""
+    # 🎙 اعلامِ صوتی در وویس‌چتِ گروه
+    _cid = _game_chat_id(g)
+    if _cid is not None:
+        voice_god.say(_cid, "yakuza" if _nz(kind) == _nz("یاکوزایی") else "nato")
     doc = _find_seat_by_role(g, _R_DOCTOR)
     for s in _alive_seats(g):
         u = g.seats[s][0]
@@ -10737,6 +10749,7 @@ async def handle_takavar_callback(update, ctx):
         tick = "✅" if correct else "❌"
         await _close_pm(ctx, uid, mid, f"🕵️ ناتویی روی {s}. {tname} ثبت شد.")
         await _night_report(ctx, g, f"🕵️ ناتو → صندلی {s}. {escape(tname, quote=False)} | حدس نقش: {guess_name} {tick}")
+        voice_god.say(chat_id, "nato")   # 🎙 (تکاور به همه پیامِ جداگانه نمی‌دهد)
         g.night_done.add("mafia")
         store.save()
         await _tk_check_open_citizens(ctx, chat_id, g)
@@ -11268,6 +11281,10 @@ async def handle_kapu_callback(update, ctx):
         await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
                          f"جذب: <b>{_room_who(g, s)}</b>")
         await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
+        # 🎙 اعلامِ صوتی در وویس‌چتِ گروه (کاپو جداگانه به همه پیام نمی‌دهد)
+        _cid = _game_chat_id(g)
+        if _cid is not None:
+            voice_god.say(_cid, "yakuza")
         g.night_doctor_blocked = True   # 🥷 شبِ یاکوزایی → زره‌ساز حقِ سیو ندارد
         g.night_done.add("mafia")
         store.save()
@@ -11499,6 +11516,10 @@ def _kp_yakuza_recruit_targets(g):
 
 
 async def _kp_broadcast_jalad(ctx, g):
+    # 🎙 اعلامِ صوتی در وویس‌چتِ گروه
+    _cid = _game_chat_id(g)
+    if _cid is not None:
+        voice_god.say(_cid, "jalad")
     for s in _alive_seats(g):
         try:
             await ctx.bot.send_message(g.seats[s][0], "🌙 امشب جلادی می‌شود.")
@@ -17930,7 +17951,7 @@ def _timer_kb():
          InlineKeyboardButton("۷۵", callback_data="tmr_75"),
          InlineKeyboardButton("۹۰", callback_data="tmr_90")],
         # 🔁 پخشِ دوبارهٔ «تایم تمام شد» در وویس‌چت (وقتی کسی سرِ تایم قطع نمی‌کند)
-        [InlineKeyboardButton("🔁 تکرار", callback_data="tmr_repeat")],
+        [InlineKeyboardButton("🔁 تکرار صدا", callback_data="tmr_repeat")],
     ])
 
 
@@ -20223,6 +20244,9 @@ VOICE_PHRASE_LABELS = {
     "night":          "شب شد",
     "temp_night":     "شب موقت",
     "temp_night_end": "پایان شب موقت",
+    "yakuza":         "یاکوزایی",
+    "nato":           "ناتویی",
+    "jalad":          "جلادی",
 }
 _VOICE_PENDING: dict[int, str] = {}   # uid → file_id منتظرِ انتخابِ جمله
 
