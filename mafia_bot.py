@@ -3779,14 +3779,14 @@ def _bump_defense_history(g, seats):
     store.save()
 
 
-SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳ از صندلی ۵ به سمتِ ۱۰
-SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴ از صندلی ۶ به سمتِ ۱
+SPEAK_ANCHOR_D3 = 6      # 🗣 روز ۳ از صندلی ۶ به سمتِ ۱ (نزولی)
+SPEAK_ANCHOR_D4 = 5      # 🗣 روز ۴ از صندلی ۵ به سمتِ ۱۰ (صعودی)
 
 
 def _day_speak_order(g):
     """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) — چرخهٔ ۴روزه، بعدش ریست:
-    روز ۱: از اولین زنده رو به پایین | روز ۲: از آخرین زنده رو به بالا
-    روز ۳: از صندلی ۵ رو به پایین     | روز ۴: از صندلی ۶ رو به بالا
+    روز ۱: از اولین زنده، صعودی (۱→۱۰) | روز ۲: از آخرین زنده، نزولی (۱۰→۱)
+    روز ۳: از صندلی ۶، نزولی (۶→۱→۱۰…) | روز ۴: از صندلی ۵، صعودی (۵→۱۰→۱…)
     اگر خودِ آن صندلی زنده نباشد، نزدیک‌ترین زنده در همان جهت جایش را می‌گیرد.
     در هر حالت یک دورِ کامل می‌چرخد و به نفرِ پشتِ سرِ شروع‌کننده ختم می‌شود."""
     alive = _alive_seats(g)
@@ -3800,11 +3800,11 @@ def _day_speak_order(g):
     elif k == 2:
         start_seat, step = alive[-1], -1
     elif k == 3:
-        step = 1
-        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D3), alive[0])
-    else:
         step = -1
-        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D4), alive[-1])
+        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D3), alive[-1])
+    else:
+        step = 1
+        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D4), alive[0])
     i = alive.index(start_seat)
     return [alive[(i + step * j) % n] for j in range(n)]
 
@@ -4615,6 +4615,9 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int,
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
 
+    # 🎙 فقط در رأی‌گیریِ اتومات: «رأی‌گیری برای صندلیِ N» روی مایک
+    if getattr(g, "auto_vote_running", False):
+        voice_god.say(chat_id, f"vote_{target_seat}")
     msg = await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
@@ -19000,6 +19003,7 @@ async def do_maarefe(ctx, chat_id, g):
     manual = _is_manual_scenario(g)
     g.maarefe_active = True   # شبِ معارفه (بدون اکت) — با /روز بسته می‌شود
     store.save()
+    voice_god.say(chat_id, "maarefe")          # 🎙
     await ctx.bot.send_message(chat_id, "🎭 <b>شب معارفه</b>", parse_mode="HTML")
     sides = getattr(g, "seat_sides", {}) or {}
     mafia_seats = [s for s in sorted(g.seats) if sides.get(s) == "مافیا"]
@@ -20247,8 +20251,24 @@ VOICE_PHRASE_LABELS = {
     "yakuza":         "یاکوزایی",
     "nato":           "ناتویی",
     "jalad":          "جلادی",
+    "maarefe":        "معارفه",
 }
-_VOICE_PENDING: dict[int, str] = {}   # uid → file_id منتظرِ انتخابِ جمله
+_VOICE_PENDING: dict[int, str] = {}        # uid → file_id منتظرِ انتخابِ جمله
+_VOICE_PENDING_VOTE: dict[int, str] = {}   # uid → file_id منتظرِ شمارهٔ صندلی (رأی‌گیری)
+VOTE_SEAT_MAX = 20
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _voice_key_label(key: str):
+    """برچسبِ فارسیِ یک کلیدِ صدا — None اگر کلید معتبر نباشد."""
+    if key in VOICE_PHRASE_LABELS:
+        return VOICE_PHRASE_LABELS[key]
+    if key == "vote_prefix":
+        return "رأی‌گیری برای (پیشوند)"
+    m = re.match(r"^vote_(\d{1,2})$", key or "")
+    if m and 1 <= int(m.group(1)) <= VOTE_SEAT_MAX:
+        return f"رأی‌گیری صندلی {m.group(1)}"
+    return None
 
 
 def load_voice_custom() -> dict | None:
@@ -20279,10 +20299,19 @@ def save_voice_custom(data: dict) -> bool:
 
 
 def _voice_label_key(text: str):
+    """متنِ فارسی → کلید. «رأی‌گیری برای» → vote_prefix | «رأی‌گیری صندلی ۳» → vote_3"""
     t = _nz(text or "")
     for k, lbl in VOICE_PHRASE_LABELS.items():
         if _nz(lbl) == t:
             return k
+    tt = t.replace("أ", "ا")          # رأی / رای
+    if tt in (_nz("رای‌گیری برای"), _nz("رای‌گیری برای (پیشوند)"), _nz("پیشوند رای‌گیری")):
+        return "vote_prefix"
+    m = re.match(r"^رایگیری(?:برای)?(?:صندلی|سیت)?([0-9۰-۹٠-٩]{1,2})$", tt)
+    if m:
+        n = int(m.group(1).translate(_FA_DIGITS))
+        if 1 <= n <= VOTE_SEAT_MAX:
+            return f"vote_{n}"
     return None
 
 
@@ -20308,7 +20337,7 @@ async def _voice_custom_restore(bot):
         n = 0
         for key, rec in data.items():
             fid = (rec or {}).get("file_id")
-            if key in VOICE_PHRASE_LABELS and fid:
+            if _voice_key_label(key) and fid:
                 ok, res = await _voice_install_from_file_id(bot, key, fid)
                 if ok:
                     n += 1
@@ -20322,8 +20351,30 @@ async def _voice_custom_restore(bot):
 def _voice_pick_kb():
     rows = [[InlineKeyboardButton(lbl, callback_data=f"vset_{k}")]
             for k, lbl in VOICE_PHRASE_LABELS.items()]
+    rows.append([InlineKeyboardButton("🗳 رأی‌گیری برای صندلیِ …", callback_data="vset_vote")])
+    rows.append([InlineKeyboardButton("🗳 رأی‌گیری برای (فقط پیشوند)", callback_data="vset_vote_prefix")])
     rows.append([InlineKeyboardButton("🚫 انصراف", callback_data="vset_cancel")])
     return InlineKeyboardMarkup(rows)
+
+
+async def _voice_install_and_record(ctx, uid: int, key: str, fid: str):
+    """نصبِ صدا برای یک کلید + ثبتِ file_id در گیست + گزارش به سازنده."""
+    lbl = _voice_key_label(key) or key
+    ok, res = await _voice_install_from_file_id(ctx.bot, key, fid)
+    if not ok:
+        await ctx.bot.send_message(uid, f"⛔ {res}")
+        return
+    cur = await asyncio.to_thread(load_voice_custom)
+    if cur is None:
+        await ctx.bot.send_message(
+            uid, f"⚠️ صدای «{lbl}» نصب شد ولی فهرستِ گیست خوانده نشد — بعد از ری‌استارت می‌پرد؛ دوباره بفرست.")
+        return
+    cur[key] = {"file_id": fid, "label": lbl,
+                "at": datetime.now(timezone.utc).timestamp()}
+    saved = await asyncio.to_thread(save_voice_custom, cur)
+    note = "" if saved else "\n⚠️ ذخیره در گیست ناموفق — بعد از ری‌استارت می‌پرد؛ دوباره بفرست."
+    await ctx.bot.send_message(
+        uid, f"✅ صدای «{lbl}» ثبت شد — از همین الان به‌جای صدای پیش‌فرض پخش می‌شود.{note}")
 
 
 async def handle_voice_upload_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -20355,7 +20406,23 @@ async def handle_voice_set_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
             pass
         return
     key = data[len("vset_"):]
-    if key not in VOICE_PHRASE_LABELS:
+    # 🗳 رأی‌گیری برای صندلیِ … → شمارهٔ صندلی را با متن می‌پرسیم
+    if key == "vote":
+        fid = _VOICE_PENDING.pop(uid, None)
+        if not fid:
+            await safe_q_answer(q, "اول وویس را بفرست، بعد جمله را انتخاب کن.", show_alert=True)
+            return
+        _VOICE_PENDING_VOTE[uid] = fid
+        await safe_q_answer(q)
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=uid, message_id=mid,
+                text=f"🗳 این صدا برای رأی‌گیریِ کدام صندلی است؟ فقط شماره را بنویس (۱ تا {VOTE_SEAT_MAX}).")
+        except Exception:
+            pass
+        return
+    lbl = _voice_key_label(key)
+    if lbl is None:
         await safe_q_answer(q)
         return
     fid = _VOICE_PENDING.pop(uid, None)
@@ -20363,26 +20430,31 @@ async def handle_voice_set_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
         await safe_q_answer(q, "اول وویس را بفرست، بعد جمله را انتخاب کن.", show_alert=True)
         return
     await safe_q_answer(q)
-    lbl = VOICE_PHRASE_LABELS[key]
     try:
         await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text=f"⏳ «{lbl}» در حالِ تبدیل…")
     except Exception:
         pass
-    ok, res = await _voice_install_from_file_id(ctx.bot, key, fid)
-    if not ok:
-        await ctx.bot.send_message(uid, f"⛔ {res}")
+    await _voice_install_and_record(ctx, uid, key, fid)
+
+
+async def handle_voice_seat_number_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🗳 شمارهٔ صندلی بعد از «رأی‌گیری برای صندلیِ …» — فقط وقتی وویسی معلق باشد."""
+    msg = update.message
+    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
         return
-    cur = await asyncio.to_thread(load_voice_custom)
-    if cur is None:
-        await ctx.bot.send_message(
-            uid, f"⚠️ صدای «{lbl}» نصب شد ولی فهرستِ گیست خوانده نشد — بعد از ری‌استارت می‌پرد؛ دوباره بفرست.")
+    uid = msg.from_user.id
+    if uid not in _VOICE_PENDING_VOTE:
         return
-    cur[key] = {"file_id": fid, "label": lbl,
-                "at": datetime.now(timezone.utc).timestamp()}
-    saved = await asyncio.to_thread(save_voice_custom, cur)
-    note = "" if saved else "\n⚠️ ذخیره در گیست ناموفق — بعد از ری‌استارت می‌پرد؛ دوباره بفرست."
-    await ctx.bot.send_message(
-        uid, f"✅ صدای «{lbl}» ثبت شد — از همین الان به‌جای صدای پیش‌فرض پخش می‌شود.{note}")
+    try:
+        n = int((msg.text or "").strip().translate(_FA_DIGITS))
+    except ValueError:
+        return
+    if not (1 <= n <= VOTE_SEAT_MAX):
+        await msg.reply_text(f"⚠️ شماره باید بین ۱ تا {VOTE_SEAT_MAX} باشد.")
+        return
+    fid = _VOICE_PENDING_VOTE.pop(uid)
+    await msg.reply_text(f"⏳ «رأی‌گیری صندلی {n}» در حالِ تبدیل…")
+    await _voice_install_and_record(ctx, uid, f"vote_{n}", fid)
 
 
 async def handle_voice_text_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -20400,8 +20472,15 @@ async def handle_voice_text_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 st = "پیش‌فرض"
             lines.append(f"• {escape(lbl, quote=False)} — {st}")
+        # 🗳 رأی‌گیری
+        pref = "سفارشی ✅" if (cur or {}).get("vote_prefix") else "پیش‌فرض"
+        seats = sorted(int(k[5:]) for k in (cur or {}) if re.match(r"^vote_\d+$", k))
+        lines.append(f"• رأی‌گیری برای (پیشوند) — {pref}")
+        lines.append("• رأی‌گیری صندلی‌ها — سفارشیِ کامل: "
+                     + ("، ".join(map(str, seats)) if seats else "هیچ")
+                     + " (بقیه: پیشوند + شمارهٔ پیش‌فرض)")
         lines += ["", "<i>عوض کردن: یک وویس بفرست و جمله را انتخاب کن.",
-                  "برگشت به پیش‌فرض: «حذف صدا تایم تمام شد»</i>"]
+                  "برگشت به پیش‌فرض: «حذف صدا تایم تمام شد» یا «حذف صدا رأی‌گیری صندلی ۳»</i>"]
         await msg.reply_text("\n".join(lines), parse_mode="HTML")
         return
     m = re.match(r"^\s*حذف\s*صدا\s*(.*)$", text)
@@ -20409,9 +20488,10 @@ async def handle_voice_text_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     key = _voice_label_key(m.group(1))
     if key is None:
-        await msg.reply_text("⚠️ کدام جمله؟ یکی از این‌ها:\n• " + "\n• ".join(VOICE_PHRASE_LABELS.values()))
+        await msg.reply_text("⚠️ کدام جمله؟ یکی از این‌ها:\n• " + "\n• ".join(VOICE_PHRASE_LABELS.values())
+                             + "\n• رأی‌گیری برای (پیشوند)\n• رأی‌گیری صندلی ۳")
         return
-    lbl = VOICE_PHRASE_LABELS[key]
+    lbl = _voice_key_label(key) or key
     cur = await asyncio.to_thread(load_voice_custom)
     if cur is None:
         await msg.reply_text("⚠️ فهرستِ گیست خوانده نشد — کمی بعد دوباره امتحان کن.")
@@ -20437,6 +20517,11 @@ async def main():
         filters.ChatType.PRIVATE & filters.TEXT & filters.User(ADMIN_ID)
         & filters.Regex(r"^\s*(صداها|حذف\s*صدا\b.*)\s*$"),
         handle_voice_text_pm))
+    # 🗳 شمارهٔ صندلی بعد از «رأی‌گیری برای صندلیِ …» — گروهِ جدا تا با بقیهٔ پیوی تداخل نکند
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & filters.User(ADMIN_ID)
+        & filters.Regex(r"^\s*[0-9۰-۹٠-٩]{1,2}\s*$"),
+        handle_voice_seat_number_pm), group=2)
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
     app.add_handler(
         MessageHandler(

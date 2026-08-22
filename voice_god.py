@@ -12,6 +12,7 @@
 - TG_VOLUME = بلندیِ اکانت در وویس‌چت، ۱ تا ۲۰۰ (پیش‌فرض ۱۵۰)
 """
 import os
+import re
 import sys
 import json
 import time
@@ -29,12 +30,18 @@ except ValueError:
 _HERE = os.path.dirname(os.path.abspath(__file__))
 VOICE_DIR = os.path.join(_HERE, "voice")
 CUSTOM_DIR = os.path.join(VOICE_DIR, "custom")
+CACHE_DIR = os.path.join(VOICE_DIR, "cache")     # جمله‌های سرِهم‌شده (قابلِ بازسازی)
 WORKER_PATH = os.path.join(_HERE, "voice_worker.py")
 PCM_BYTES_PER_SEC = 48000 * 2          # s16le, mono
 
 # جمله‌های موجود (کلید → فایل)
 PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end",
-           "yakuza", "nato", "jalad")
+           "yakuza", "nato", "jalad", "maarefe")
+
+# 🗳 «رأی‌گیری برای صندلیِ N» — کلیدِ vote_N
+#    سفارشیِ کامل (vote_N) → وگرنه پیشوند (vote_prefix، سفارشی یا پیش‌فرض) + شمارهٔ پیش‌فرض (num_N)
+VOTE_SEAT_MAX = 20
+_VOTE_RE = re.compile(r"^vote_(\d{1,2})$")
 
 # ── نگهداریِ پروسهٔ کارگر ──
 RESTART_DELAY = 10          # ثانیه صبر قبل از بالا آوردنِ دوباره
@@ -67,15 +74,60 @@ def has_custom(key: str) -> bool:
     return os.path.isfile(p) and os.path.getsize(p) > 0
 
 
-def phrase_path(key: str):
-    """مسیرِ فایلِ جمله: سفارشی → صدای انتخابی → dilara."""
-    if has_custom(key):
-        return custom_path(key)
+def _default_path(key: str):
+    """فایلِ پیش‌فرضِ یک کلید: صدای انتخابی → dilara."""
     for voice in (TG_VOICE, "dilara"):
         p = os.path.join(VOICE_DIR, voice, f"{key}.raw")
         if os.path.isfile(p):
             return p
     return None
+
+
+def _vote_path(n: int):
+    """🗳 «رأی‌گیری برای صندلیِ n»: سفارشیِ کامل، وگرنه پیشوند + شماره را سرِ هم می‌کند."""
+    if has_custom(f"vote_{n}"):
+        return custom_path(f"vote_{n}")
+    prefix = custom_path("vote_prefix") if has_custom("vote_prefix") else _default_path("vote_prefix")
+    num = _default_path(f"num_{n}")
+    if not prefix or not num:
+        return None
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        # 🔑 نامِ کش از «هویتِ» منابع ساخته می‌شود (سفارشی/پیش‌فرض + زمان + اندازه) —
+        #    پس با حذف یا تعویضِ پیشوندِ سفارشی، خودبه‌خود کشِ تازه ساخته می‌شود
+        sig = "_".join(f"{'c' if p.startswith(CUSTOM_DIR) else 'd'}{int(os.path.getmtime(p))}-{os.path.getsize(p)}"
+                       for p in (prefix, num))
+        out = os.path.join(CACHE_DIR, f"vote_{n}__{sig}.raw")
+        if os.path.isfile(out) and os.path.getsize(out) > 0:
+            return out
+        with open(prefix, "rb") as a, open(num, "rb") as b:
+            data = a.read() + b.read()
+        tmp = out + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, out)
+        # 🧹 کش‌های قدیمیِ همین صندلی
+        for fn in os.listdir(CACHE_DIR):
+            if fn.startswith(f"vote_{n}__") and fn != os.path.basename(out):
+                try:
+                    os.remove(os.path.join(CACHE_DIR, fn))
+                except Exception:
+                    pass
+        return out
+    except Exception as e:
+        print("⚠️ گادِ صوتی: ساختِ جملهٔ رأی‌گیری:", repr(e))
+        return None
+
+
+def phrase_path(key: str):
+    """مسیرِ فایلِ جمله: سفارشی → صدای انتخابی → dilara. (vote_N سرِ هم می‌شود)"""
+    m = _VOTE_RE.match(key or "")
+    if m:
+        n = int(m.group(1))
+        return _vote_path(n) if 1 <= n <= VOTE_SEAT_MAX else None
+    if has_custom(key):
+        return custom_path(key)
+    return _default_path(key)
 
 
 def save_custom(key: str, raw: bytes) -> str:
