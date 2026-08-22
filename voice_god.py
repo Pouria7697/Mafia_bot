@@ -164,9 +164,13 @@ async def convert_to_raw(data: bytes):
     ff = ffmpeg_exe()
     if not ff or not data:
         return None
+    # ✂️ سکوتِ اول و آخر بریده می‌شود (TTS و ضبطِ گوشی هر دو سکوتِ اضافه دارند)،
+    #    بعد بلندیِ یکنواخت، بعد فقط ۰٫۱۵s سکوت جلو و ۰٫۲۵s عقب — تا جمله‌های
+    #    سرِهم‌شده (پیشوند + شماره) بدونِ مکثِ عجیب و لبه‌ها بدونِ بریدگی باشند.
+    trim = "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.08"
     cmd = [ff, "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
-           # 🔊 بلندیِ یکنواخت و نزدیکِ سقف + کمی سکوت در ابتدا/انتها تا لبه‌ها نیفتد
-           "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,adelay=200|200,apad=pad_dur=0.3",
+           "-af", f"{trim},areverse,{trim},areverse,"
+                  "loudnorm=I=-14:TP=-1.5:LRA=11,adelay=150|150,apad=pad_dur=0.25",
            "-f", "s16le", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1", "pipe:1"]
     try:
         proc = await asyncio.create_subprocess_exec(

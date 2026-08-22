@@ -4526,6 +4526,11 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
                 InlineKeyboardButton("⏹ توقف", callback_data="autovote_stop")]]))
         panel_mid = _m.message_id
         for s in todo:
+            if s in (g.striked or set()):
+                continue
+            # 🎙 «رأی‌گیری برای صندلیِ N» همین اول، تا در مکثِ ۳ ثانیه‌ای گفته شود
+            #    (بعد از «تمام»ِ نفرِ قبل، یا بلافاصله بعد از دکمه برای نفرِ اول)
+            voice_god.say(chat_id, f"vote_{s}")
             # ⏳ مهلتِ ساکت پیش از هر نفر — شاملِ نفرِ اول، تا بعدِ زدنِ دکمه
             #    یکهو شروع نشود. هیچ پیامی نوشته نمی‌شود.
             await asyncio.sleep(AUTO_VOTE_GAP)
@@ -4615,9 +4620,8 @@ async def handle_vote(ctx, chat_id: int, g: GameState, target_seat: int,
     if not hasattr(g, "vote_cleanup_ids"):
         g.vote_cleanup_ids = []
 
-    # 🎙 فقط در رأی‌گیریِ اتومات: «رأی‌گیری برای صندلیِ N» روی مایک
-    if getattr(g, "auto_vote_running", False):
-        voice_god.say(chat_id, f"vote_{target_seat}")
+    # 🎙 صدای «رأی‌گیری برای صندلیِ N» در _run_auto_vote و «قبل از» مکثِ ۳ ثانیه
+    #    پخش می‌شود، نه اینجا — تا جمله در همان مکث گفته شود و با پیام تمام شده باشد.
     msg = await ctx.bot.send_message(
         chat_id,
         f"⏳ رأی‌گیری برای <b>{target_seat}. {g.seats[target_seat][1]}</b>",
