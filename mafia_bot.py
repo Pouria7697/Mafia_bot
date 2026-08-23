@@ -467,6 +467,9 @@ class GameState:
         self.night_jalad_seat = getattr(self, "night_jalad_seat", None)
         self.night_jalad_correct = getattr(self, "night_jalad_correct", False)
         self.night_witch_target = getattr(self, "night_witch_target", None)
+        # 🔮 جادوگر دو شبِ پشتِ‌سرِهم روی یک نفر نمی‌زند (شبِ بعدش دوباره آزاد است)
+        self.witch_last_target = getattr(self, "witch_last_target", None)
+        self.witch_last_night = getattr(self, "witch_last_night", None)
         self.night_attar_poison_target = getattr(self, "night_attar_poison_target", None)
         self.attar_poisoned_seat = getattr(self, "attar_poisoned_seat", None)
         self.attar_poison_used = getattr(self, "attar_poison_used", False)
@@ -11040,7 +11043,7 @@ async def _kp_check_open_witch(ctx, chat_id, g):
         await _kp_check_open_citizens(ctx, chat_id, g)
         return
     wuid = g.seats[witch][0]
-    targets = [s for s in _alive_seats(g) if s != witch]
+    targets = [s for s in _alive_seats(g) if s != witch and s != _witch_blocked_target(g)]
     m = await _safe_pm(ctx, wuid, "🔮 روی چه کسی جادو می‌کنی؟",
                        _kb_night_seats(targets, g, "kp_witch_",
                                        selected=g.night_sel.get(wuid), confirm_cb="kp_witch_confirm"))
@@ -11091,6 +11094,16 @@ async def _kp_check_open_citizens(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[auid] = m.message_id
     store.save()
+
+
+def _witch_blocked_target(g):
+    """🔮 صندلی‌ای که جادوگر امشب حق ندارد بزند: همانی که «دیشب» (شبِ بلافاصله قبل) زده.
+    اگر دیشب اکتی نداشته (سوخته/نبوده)، محدودیتی نیست."""
+    last = getattr(g, "witch_last_target", None)
+    ln = getattr(g, "witch_last_night", None)
+    if last is None or ln is None:
+        return None
+    return last if ln == (g.night_number or 0) - 1 else None
 
 
 def _kp_armorer_targets(g, arm_seat):
@@ -11378,7 +11391,12 @@ async def handle_kapu_callback(update, ctx):
         if not s:
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
+        if s == _witch_blocked_target(g):   # کیبوردِ کهنه
+            await safe_q_answer(q, "دیشب روی همین نفر جادو کردی — امشب نمی‌شود.", show_alert=True)
+            return
         g.night_witch_target = s
+        g.witch_last_target = s
+        g.witch_last_night = g.night_number
         await _room_note(ctx, g, f"🔮 جادو روی <b>{_room_who(g, s)}</b>")
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"🔮 جادو ثبت شد: {s}. {tname}")
@@ -11390,10 +11408,13 @@ async def handle_kapu_callback(update, ctx):
 
     if data.startswith("kp_witch_"):
         s = int(data.rsplit("_", 1)[1])
+        if s == _witch_blocked_target(g):
+            await safe_q_answer(q, "دیشب روی همین نفر جادو کردی — امشب نمی‌شود.", show_alert=True)
+            return
         g.night_sel[uid] = s
         store.save()
         witch = _seat_of_uid(g, uid)
-        targets = [x for x in _alive_seats(g) if x != witch]
+        targets = [x for x in _alive_seats(g) if x != witch and x != _witch_blocked_target(g)]
         await _edit_pm(ctx, uid, mid, "🔮 روی چه کسی جادو می‌کنی؟",
                        _kb_night_seats(targets, g, "kp_witch_", selected=s, confirm_cb="kp_witch_confirm"))
         return
@@ -17109,6 +17130,8 @@ async def shuffle_and_assign(
     g.kp_deng_kb_mid = None
     g.kp_need_manual = False
     g.kp_trust = None
+    g.witch_last_target = None
+    g.witch_last_night = None
     g.kp_gun1_type = None
     g.kp_gun_stage = 0
     g.kp_gun_used_opt = None
