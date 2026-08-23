@@ -3760,7 +3760,7 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
 
 def _final_vote_threshold(alive_count: int, g=None) -> int:
     """حدنصابِ ورود به دفاعیه بر اساس تعداد زنده‌ها:
-    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → نصفِ زنده‌ها (براکت پایین)
+    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → ثلثِ زنده‌ها +۱ (۱۲ → ۵)
     ⚔️ میتیک قانونِ خودش را دارد: نصفِ زنده‌ها، و اگر فرد بود نصف+۱ (۹ → ۵، ۱۰ → ۵)."""
     if g is not None and _is_mythic_scenario(g):
         return (alive_count + 1) // 2
@@ -3770,7 +3770,7 @@ def _final_vote_threshold(alive_count: int, g=None) -> int:
         return 3
     if alive_count <= 10:
         return 4
-    return alive_count // 2
+    return alive_count // 3 + 1
 
 
 def _bump_defense_history(g, seats):
