@@ -1017,10 +1017,12 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
             role = g.assigned_roles.get(seat, "—")
 
             # تعیین ساید بازیکن
-            # اولویت اول: خریداری یا جذب با مذاکره (شهروند → مافیا)
+            # اولویت اول: خریداری یا جذب با مذاکره (شهروند → مافیا) یا اسمیگلِ خیانت‌کرده
             if (getattr(g, "purchased_seat", None) == seat
                     or getattr(g, "purchased_player", None) == seat
-                    or seat in getattr(g, "negotiated_seats", set())):
+                    or seat in getattr(g, "negotiated_seats", set())
+                    or (getattr(g, "gm_smeagol_turned", False)
+                        and _R_SMEAGOL in _nz(role))):
                 side = "مافیا"
             # اولویت دوم: ساید کَش‌شده هنگام تخصیص نقش (قابل اعتماد‌ترین روش)
             elif getattr(g, "seat_sides", None) and seat in g.seat_sides:
@@ -3782,14 +3784,14 @@ def _bump_defense_history(g, seats):
     store.save()
 
 
-SPEAK_ANCHOR_D3 = 6      # 🗣 روز ۳ از صندلی ۶ به سمتِ ۱ (نزولی)
-SPEAK_ANCHOR_D4 = 5      # 🗣 روز ۴ از صندلی ۵ به سمتِ ۱۰ (صعودی)
+SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳: ۵ → ۴ → ۳ → ۲ → ۱ → ۱۰ → ۹ → ۸ → ۷ → ۶
+SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴: ۶ → ۷ → ۸ → ۹ → ۱۰ → ۱ → ۲ → ۳ → ۴ → ۵
 
 
 def _day_speak_order(g):
     """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) — چرخهٔ ۴روزه، بعدش ریست:
     روز ۱: از اولین زنده، صعودی (۱→۱۰) | روز ۲: از آخرین زنده، نزولی (۱۰→۱)
-    روز ۳: از صندلی ۶، نزولی (۶→۱→۱۰…) | روز ۴: از صندلی ۵، صعودی (۵→۱۰→۱…)
+    روز ۳: از صندلی ۵، نزولی (۵→۴→…→۱→۱۰→…→۶) | روز ۴: از صندلی ۶، صعودی (۶→۷→…→۱۰→۱→…→۵)
     اگر خودِ آن صندلی زنده نباشد، نزدیک‌ترین زنده در همان جهت جایش را می‌گیرد.
     در هر حالت یک دورِ کامل می‌چرخد و به نفرِ پشتِ سرِ شروع‌کننده ختم می‌شود."""
     alive = _alive_seats(g)
@@ -3925,6 +3927,18 @@ def _sc_side(g, seat):
     return "مستقل" if s == "مستقل" else ("مافیا" if s == "مافیا" else "شهر")
 
 
+def _sc_side_final(g, seat):
+    """سایدِ «نهایی» برای امتیاز و آمار: مثلِ _sc_side، به‌علاوهٔ اسمیگلِ خیانت‌کرده که
+    در شمارشِ بُرد شهروند می‌ماند ولی امتیاز و بُرد/باختش با تیمِ مافیا ثبت می‌شود."""
+    try:
+        if (getattr(g, "gm_smeagol_turned", False)
+                and _R_SMEAGOL in _seat_role_norm(g, seat)):
+            return "مافیا"
+    except Exception:
+        pass
+    return _sc_side(g, seat)
+
+
 def _score_votes_initial(g):
     """تشخیص: رأی اولیه به مافیا +۵ / به شهروند −۲.۵ (فقط برای رأی‌دهنده‌ی شهروند)."""
     try:
@@ -4011,7 +4025,7 @@ def _score_compute(g):
     kicked = getattr(g, "score_kicked", set()) or set()
     impossible = getattr(g, "score_act_impossible", set()) or set()
     for seat in sorted(g.seats or {}):
-        side = _sc_side(g, seat)
+        side = _sc_side_final(g, seat)   # 🌀 اسمیگلِ خیانت‌کرده → مافیا
         sev = ev.get(seat, []) or []
 
         # 👢 کیک‌شده: همه‌ی امتیازها صفر (برد، تشخیص/فریب/پوش، حدس، انضباط — همه)
@@ -4392,18 +4406,9 @@ def _autovote_pending(g):
     return [x for x in cands if x not in done]
 
 
-AUTOVOTE_SEATS = 10      # 🤖 رأی‌گیریِ اتومات فقط برای بازیِ ۱۰نفره
-
-
 def _autovote_row(g, stage):
-    """ردیفِ دکمهٔ اتومات — اگر از همه رأی گرفته شده، در حالِ اجراست،
-    یا ظرفیتِ سناریو ۱۰ نیست، هیچ (ترتیبِ سرِ صحبت برای ۱۰ نفر تعریف شده).
-    ملاک «ظرفیتِ سناریو»ست نه تعدادِ زنده‌ها — با مردنِ چند نفر دکمه نمی‌رود.
-    ⚔️ میتیک ظرفیتِ رسمیِ خودش (۱۲) را دارد."""
-    _cap = int(getattr(g, "max_seats", 0) or len(g.seats or {}))
-    _want = MYTHIC_SEATS if _is_mythic_scenario(g) else AUTOVOTE_SEATS
-    if _cap != _want:
-        return []
+    """ردیفِ دکمهٔ اتومات — در هر ظرفیتی (ترتیبِ سرِ صحبت برای هر تعدادی کار می‌کند).
+    فقط وقتی از همه رأی گرفته شده یا در حالِ اجراست، هیچ."""
     if getattr(g, "auto_vote_running", False) or not _autovote_pending(g):
         return []
     cb = "autovote_initial" if stage == "initial_vote" else "autovote_final"
@@ -7088,10 +7093,15 @@ async def _burn_advance(ctx, chat_id, g):
         burned = {s for s in (g.night_burned or set()) if s in g.seats}
         if not burned:
             return
+        # 🧩 اصل: اکتِ سوخته «انجام‌شده» حساب می‌شود تا صفِ شب جلو برود.
+        #    نقش → کلیدی که _night_all_done / بازکننده‌های مرحله‌ی بعد منتظرش‌اند
         role_keys = {
             _R_DETECTIVE: "detective", _R_DOCTOR: "doctor", _R_GUARD: "guard",
             _R_GUIDE: "guide", _R_LAWYER: "lawyer", _R_BAAZPORS: "baazpors",
             _R_REPORTER: "reporter", _R_COMMANDO: "commando",
+            _R_WATCHMAN: "watchman", _R_HOSTAGE: "hostage", _R_GUNMAN: "gunman",
+            _R_WITCH: "witch", _R_ARMORER: "armorer", _R_ATTAR: "attar",
+            _R_HACKER: "hacker", _R_SHIAD: "shiad", _R_MINER: "mine",
         }
         for s in burned:
             rn = _seat_role_norm(g, s)
@@ -7107,25 +7117,32 @@ async def _burn_advance(ctx, chat_id, g):
                 g.night_done.add("sniper")
         except Exception:
             pass
-        # تصمیم‌گیرِ تیمِ مافیا و نقش‌های کلیدیِ تیمی
+        # 🩸 تصمیم‌گیرِ تیمِ مافیا (هر سناریو کلیدِ خودش) → اکتِ مافیا انجام‌شده
         shooter = _sc_find_role(g, _SC_SHOOTER_ROLES)
         if shooter in burned:
             g.night_done.add("mafia")
-        for _rn, _key in ((_R_HACKER, "hacker"), (_R_SHIAD, "shiad")):
+        for _dk in ("night_decider_seat", "bzp_decider_seat", "nem_decider_seat",
+                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat"):
+            if getattr(g, _dk, None) in burned:
+                g.night_done.add("mafia")
+        # 🤝 اکتِ مافیا که به یارِ تیم واگذار شده (ناتویی/مذاکره/جلادی) و همان یار سوخت:
+        #    نشانه‌اش این است که آن یار «پرامپتِ باز» داشته
+        _pm = getattr(g, "night_pm_msgs", {}) or {}
+        for _rn in (_R_NATO, _R_NEGOTIATOR, _R_EXECUTIONER):
             try:
-                if _find_seat_by_role(g, _rn) in burned:
-                    g.night_done.add(_key)
+                _ds = _find_seat_by_role(g, _rn)
             except Exception:
-                pass
-        if _is_takavar_scenario(g):
-            _dec = (_find_seat_by_role(g, _R_GODFATHER) or _find_seat_by_role(g, _R_NATO)
-                    or _find_seat_by_role(g, _R_HOSTAGE))
-            if _dec in burned:
+                _ds = None
+            if _ds in burned and g.seats[_ds][0] in _pm and "mafia" not in g.night_done:
                 g.night_done.add("mafia")
         store.save()
 
         # ⛓ زنجیره‌های اولویت‌دار
-        if _is_baazpors_scenario(g):
+        if _is_neg_scenario(g):
+            # 🤝 مذاکره: بعد از اکتِ مافیا، شهروندان باز می‌شوند (یک‌بار)
+            if "mafia" in g.night_done and getattr(g, "night_stage", None) != "citizens":
+                await _night_open_citizens(ctx, chat_id, g)
+        elif _is_baazpors_scenario(g):
             # 🪢 هانترِ سوخته → مرحله‌ی مافیا/شیاد باید باز شود، وگرنه شب قفل می‌ماند
             h = _find_seat_by_role(g, _R_HUNTER)
             if h in burned:
@@ -7144,17 +7161,92 @@ async def _burn_advance(ctx, chat_id, g):
                 g.night_done.add("burn_mine_advanced")
                 store.save()
                 await _nem_open_mafia(ctx, chat_id, g)
+            # ⛓ دن/هکرِ سوخته → بقیه‌ی اکت‌ها باز شوند (idempotent)؛ و اگر همه تمام شد، مین
+            await _nem_check_open_rest(ctx, chat_id, g)
+            await _nem_trigger_mine(ctx, chat_id, g)
         elif _is_takavar_scenario(g):
             # چک‌کننده‌های تکاور idempotent هستند (با مارکرِ opened) — امن برای صدازدن
             await _tk_check_open_mafia(ctx, chat_id, g)
             await _tk_check_open_citizens(ctx, chat_id, g)
             await _tk_check_open_gunman(ctx, chat_id, g)
         elif _is_kapu_scenario(g):
+            # ⛓ دن → جادوگر → شهروندان (هر دو بازکننده با مارکر idempotent‌اند)
+            await _kp_check_open_witch(ctx, chat_id, g)
+            await _kp_check_open_citizens(ctx, chat_id, g)
             # 🧪 اگر رأی‌گیریِ پادزهر فقط منتظرِ سوخته/کیک‌شده بود → جمع‌بندی و ادامه‌ی شب
             if (getattr(g, "poison_phase", False)
                     and not getattr(g, "antidote_done", False)
                     and not _kp_antidote_pending(g)):
                 await _kp_after_vote(ctx, chat_id, g)
+        elif _is_mythic_scenario(g):
+            # ⚔️ میتیک: مافیا (شات/کانسورت) → شهروندان بدونِ اولویت
+            done = g.night_done
+            exp = set(getattr(g, "my_expected", set()) or set())
+            dec = getattr(g, "my_decider_seat", None)
+            co = _my_seat(g, _R_MY_CONSORT)
+            if dec in burned:
+                done.update({"shot", "mchoice"})
+                # اگر انتخابِ «شات یا کانسورت» هنوز معلق بود، هیچ‌کدام انجام نمی‌شود
+                if "mchoice" in exp or co is None or co == dec:
+                    done.add("consort")
+            if co in burned:
+                done.add("consort")
+                if "mchoice" in exp and dec == co:
+                    done.update({"shot", "mchoice"})
+            for _role, _key in ((_R_MY_DOC, "doctor"), (_R_MY_BODY, "bodyguard"),
+                                (_R_MY_DET, "detective"), (_R_MY_SNIPER, "sniper")):
+                if _my_seat(g, _role) in burned:
+                    done.add(_key)
+            store.save()
+            await _my_check_open_citizens(ctx, chat_id, g)
+        elif _is_gamer_scenario(g):
+            # 🎮 گیمر: زنجیرهٔ رابین‌هود → هلمز → مافیا → شهروندان. اکتِ سوخته باید
+            #    «انجام‌شده» حساب شود و مرحلهٔ بعد باز شود، وگرنه شب قفل می‌ماند.
+            done = g.night_done
+
+            def _actor_burned(role_norm) -> bool:
+                rs = _find_seat_by_role(g, role_norm)
+                if rs is None:
+                    return False
+                try:
+                    actor = _gm_actor_for(g, rs)
+                except Exception:
+                    actor = rs
+                return rs in burned or actor in burned
+
+            for _rn, _key in ((_R_ROBIN, "robin"), (_R_HOLMES, "holmes"), (_R_TWOFACE, "bomb"),
+                              (_R_MORIARTY, "moriarty"), (_R_DEXTER, "dexter"),
+                              (_R_CASTIEL, "doctor"), (_R_ELLIOT, "eliot"),
+                              (_R_JAMES, "james"), (_R_RICK, "rick")):
+                if _actor_burned(_rn):
+                    done.add(_key)
+                    if _key == "bomb":
+                        done.add("tfchoice")
+            # 🔫 شات: دستِ گیرندهٔ هدیه، وگرنه دن → موریارتی → تووفیس → دکستر
+            if "shot" not in done:
+                _don = _find_seat_by_role(g, _R_DONC)
+                if (getattr(g, "gm_gift_accepted", False) and _don is not None
+                        and getattr(g, "gm_robbed_seat", None) == _don
+                        and getattr(g, "gm_gift_to", None) is not None):
+                    _shooter = g.gm_gift_to
+                else:
+                    _shooter = (_don or _find_seat_by_role(g, _R_MORIARTY)
+                                or _find_seat_by_role(g, _R_TWOFACE)
+                                or _find_seat_by_role(g, _R_DEXTER))
+                if _shooter in burned:
+                    done.add("shot")
+                    done.add("tfchoice")
+            # 🎁 گیرندهٔ هدیه‌ای که هنوز جواب نداده و سوخت → هدیه منتفی
+            if getattr(g, "gm_gift_pending", False) and getattr(g, "gm_gift_to", None) in burned:
+                g.gm_gift_pending = False
+            store.save()
+            # ⛓ باز کردنِ مرحلهٔ بعد (هر کدام idempotent یا با چکِ «قبلاً پرسیده شده»)
+            exp = set(getattr(g, "gm_expected", set()) or set())
+            if "robin" in done and "holmes" not in done and "holmes" not in exp:
+                await _gm_open_holmes(ctx, chat_id, g)
+            if "holmes" in g.night_done and "mafia_opened" not in g.night_done:
+                await _gm_open_mafia(ctx, chat_id, g)
+            await _gm_check_open_citizens(ctx, chat_id, g)
         elif _is_shahname_scenario(g):
             for _key, _mark in ((_R_KAVEH, "kaveh"), (_R_AFRASIAB, "afrasiab"),
                                 (_R_SIMORGH, "simorgh"), (_R_ROSTAM, "rostam"),
