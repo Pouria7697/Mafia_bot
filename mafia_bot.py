@@ -334,6 +334,28 @@ class GameState:
         self.cvb_gf_seat = getattr(self, "cvb_gf_seat", None)
         self.cvb_done = getattr(self, "cvb_done", False)
         self.cvb_orig_roles = getattr(self, "cvb_orig_roles", {}) or {}
+        # ── هانیبال: معارفه (خریدِ رئیس) + شب ──
+        self.hb_asking = getattr(self, "hb_asking", False)
+        self.hb_invite_seat = getattr(self, "hb_invite_seat", None)
+        self.hb_done = getattr(self, "hb_done", False)
+        self.hb_boss_seat = getattr(self, "hb_boss_seat", None)
+        self.hb_hero_shield = getattr(self, "hb_hero_shield", True)      # 🛡 زرهِ یک‌بارمصرفِ قهرمان
+        self.hb_doc_self = getattr(self, "hb_doc_self", 0)               # 💉 سیوِ خود: حداکثر ۲ بار
+        self.hb_doc_double = getattr(self, "hb_doc_double", False)       # 💉 امشب ۲ سیو (شبِ قبل رد کرد)
+        self.hb_doc_skip_used = getattr(self, "hb_doc_skip_used", False)  # 💉 ردِ سیو فقط یک‌بار در کلِ بازی
+        self.hb_bond = getattr(self, "hb_bond", None)                    # 🧬 بافتِ مؤثرِ امروز (دیشب)
+        self.night_hb_hero = getattr(self, "night_hb_hero", None)
+        self.night_hb_shadow = getattr(self, "night_hb_shadow", None)
+        # 🌑 سایه دو شبِ پشتِ‌سرِهم روی یک نفر نمی‌زند
+        self.hb_shadow_last = getattr(self, "hb_shadow_last", None)
+        self.hb_shadow_last_night = getattr(self, "hb_shadow_last_night", None)
+        self.night_hb_bond = getattr(self, "night_hb_bond", None)
+        self.night_hb_avenge = getattr(self, "night_hb_avenge", None)
+        self.memar_used = getattr(self, "memar_used", False)             # 🏛 کارتِ معمار (یک‌بار)
+        self.hb_card_seat = getattr(self, "hb_card_seat", None)
+        self.hb_card_start = getattr(self, "hb_card_start", None)        # 🗳 شروعِ رأیِ دوئل
+        self.hb_duel_used = getattr(self, "hb_duel_used", False)         # دوئلِ معمار برگزار شده
+        self.hb_duel_pick_wait = getattr(self, "hb_duel_pick_wait", False)
         # ── حالت شبِ خودکار (سناریو نماینده) ──
         self.mine_seat = getattr(self, "mine_seat", None)            # محل مین (تا آخر بازی)
         self.defuse_used = getattr(self, "defuse_used", False)        # خنثی‌سازی یکبار در بازی
@@ -3164,6 +3186,12 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and not getattr(g, "nem_yaghi_used", False)):
         rows.append([InlineKeyboardButton("💣 یاغی", callback_data="ctl_yaghi")])
 
+    # 🏛 دکمه‌ی یک‌بارمصرفِ معمار — هانیبال، بعد از معارفه، تا برگزاریِ دوئل
+    #    ⚠️ دیدنی بودنش به وجودِ کارت وابسته نیست تا چیزی لو نرود
+    if (_is_hanibal_scenario(g) and getattr(g, "maarefe_done", False)
+            and not getattr(g, "hb_duel_used", False)):
+        rows.append([InlineKeyboardButton("🏛 معمار", callback_data="ctl_memar")])
+
     # ⚔️ دکمه‌ی یک‌بارمصرفِ شاهنامه — بعد از معارفه، فقط روز ۱
     if (_is_shahname_scenario(g) and getattr(g, "maarefe_done", False)
             and getattr(g, "night_number", 0) == 0
@@ -3784,14 +3812,14 @@ def _bump_defense_history(g, seats):
     store.save()
 
 
-SPEAK_ANCHOR_D3 = 5      # 🗣 روز ۳: ۵ → ۴ → ۳ → ۲ → ۱ → ۱۰ → ۹ → ۸ → ۷ → ۶
-SPEAK_ANCHOR_D4 = 6      # 🗣 روز ۴: ۶ → ۷ → ۸ → ۹ → ۱۰ → ۱ → ۲ → ۳ → ۴ → ۵
+SPEAK_ANCHOR_D3 = 6      # 🗣 روز ۳: ۶ → ۷ → ۸ → ۹ → ۱۰ → ۱ → ۲ → ۳ → ۴ → ۵ (صعودی، آخر ۵)
+SPEAK_ANCHOR_D4 = 5      # 🗣 روز ۴: ۵ → ۴ → ۳ → ۲ → ۱ → ۱۰ → ۹ → ۸ → ۷ → ۶ (نزولی، آخر ۶)
 
 
 def _day_speak_order(g):
     """🗣 ترتیبِ سرِ صحبت (و رأی‌گیری) — چرخهٔ ۴روزه، بعدش ریست:
     روز ۱: از اولین زنده، صعودی (۱→۱۰) | روز ۲: از آخرین زنده، نزولی (۱۰→۱)
-    روز ۳: از صندلی ۵، نزولی (۵→۴→…→۱→۱۰→…→۶) | روز ۴: از صندلی ۶، صعودی (۶→۷→…→۱۰→۱→…→۵)
+    روز ۳: از صندلی ۶، صعودی (۶→۷→…→۱۰→۱→…→۵) | روز ۴: از صندلی ۵، نزولی (۵→۴→…→۱→۱۰→…→۶)
     اگر خودِ آن صندلی زنده نباشد، نزدیک‌ترین زنده در همان جهت جایش را می‌گیرد.
     در هر حالت یک دورِ کامل می‌چرخد و به نفرِ پشتِ سرِ شروع‌کننده ختم می‌شود."""
     alive = _alive_seats(g)
@@ -3805,13 +3833,22 @@ def _day_speak_order(g):
     elif k == 2:
         start_seat, step = alive[-1], -1
     elif k == 3:
-        step = -1
-        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D3), alive[-1])
-    else:
         step = 1
-        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D4), alive[0])
+        start_seat = next((s for s in alive if s >= SPEAK_ANCHOR_D3), alive[0])
+    else:
+        step = -1
+        start_seat = next((s for s in reversed(alive) if s <= SPEAK_ANCHOR_D4), alive[-1])
     i = alive.index(start_seat)
     return [alive[(i + step * j) % n] for j in range(n)]
+
+
+_FA_OUT = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def _fa_seq(seats) -> str:
+    """دنبالهٔ صندلی‌ها با عددِ فارسی و ویرگول — تا در چتِ راست‌به‌چپ وارونه دیده نشود.
+    (عددِ انگلیسی + فلش در متنِ فارسی، جهتِ خط را به‌هم می‌ریخت و ترتیب برعکس رندر می‌شد.)"""
+    return "، ".join(str(s).translate(_FA_OUT) for s in seats)
 
 
 async def _announce_speak_order(ctx, chat_id, g):
@@ -3828,7 +3865,8 @@ async def _announce_speak_order(ctx, chat_id, g):
             chat_id,
             f"🗣 <b>روز {day}</b> — سرِ صحبت: "
             f"<b>{first}. {escape(g.seats[first][1], quote=False)}</b>\n"
-            f"ترتیب: {' ← '.join(str(s) for s in order)}",
+            f"ترتیب: {_fa_seq(order)}\n"
+            f"نفرِ آخر: <b>{order[-1]}. {escape(g.seats[order[-1]][1], quote=False)}</b>",
             parse_mode="HTML")
     except Exception as e:
         print("⚠️ speak order:", e)
@@ -4388,6 +4426,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
             pass
         await _check_auto_end(ctx, chat_id, g)   # 🏁
         _bzp_hunter_day_exit(ctx, chat_id, g, exiter)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
+        _hb_day_exit(ctx, chat_id, g, exiter)           # 🧬 بافتِ هانیبال → ۹۰ ثانیه بعد
 
     # 🏅 امتیازِ رأی نهایی (خروجِ واقعی = وقتی خط خورده باشد)
     _score_votes_final(g, targets, exiter, not protected)
@@ -4527,7 +4566,7 @@ async def _run_auto_vote(ctx, chat_id, g, stage):
         _m = await ctx.bot.send_message(
             chat_id,
             "🤖 <b>رأی‌گیریِ اتومات شروع شد</b>\n"
-            f"ترتیب: {' ← '.join(str(s) for s in todo)}\n"
+            f"ترتیب: {_fa_seq(todo)}\n"
             "<i>گاد لازم نیست دکمه بزند؛ بات خودش تا آخر می‌رود.</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
@@ -4889,6 +4928,10 @@ async def announce_winner(ctx, update, g: GameState):
         elif _nz(role) in mafia_roles:
             marker = "◾️"  # مافیا
             role_display = role
+        elif (getattr(g, "seat_sides", {}) or {}).get(seat) == "مافیا":
+            # 👑 نقش‌هایی که وسطِ بازی مافیا شده‌اند (مثل «رئیس مافیا»ی هانیبال)
+            marker = "◾️"
+            role_display = role
         elif _nz(role) in indep_for_this:
             marker = "♦️"  # مستقل
             role_display = role
@@ -5183,6 +5226,8 @@ def _mafia_role_set(g):
         return _sh_dark_role_norms(g)
     if _is_mythic_scenario(g):
         return _MY_MAFIA
+    if _is_hanibal_scenario(g):
+        return _HB_MAFIA
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
@@ -5524,6 +5569,12 @@ def _night_all_done(g) -> bool:
             return False
         return (getattr(g, "my_expected", set()) or set()) <= d
 
+    if _is_hanibal_scenario(g):
+        if "citizens_opened" not in d or "avenger_opened" not in d:
+            return False
+        return ({"hero", "shadow", "bond", "mafia",
+                 "detective", "doctor", "memar", "avenger"} <= d)
+
     return False
 
 
@@ -5548,7 +5599,8 @@ def _is_manual_scenario(g) -> bool:
     """✋ سناریویی که موتورِ اکتِ خودکار ندارد — همه‌چیزش دستِ گاد است."""
     return not (_is_neg_scenario(g) or _is_baazpors_scenario(g) or _is_nemayande_scenario(g)
                 or _is_takavar_scenario(g) or _is_kapu_scenario(g) or _is_gamer_scenario(g)
-                or _is_shahname_scenario(g) or _is_mythic_scenario(g))
+                or _is_shahname_scenario(g) or _is_mythic_scenario(g)
+                or _is_hanibal_scenario(g))
 
 
 async def start_night(ctx, chat_id, g):
@@ -5560,6 +5612,7 @@ async def start_night(ctx, chat_id, g):
     is_gm = _is_gamer_scenario(g)
     is_sh = _is_shahname_scenario(g)
     is_my = _is_mythic_scenario(g)
+    is_hb = _is_hanibal_scenario(g)
     # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
     #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
     is_manual = _is_manual_scenario(g)
@@ -5646,6 +5699,11 @@ async def start_night(ctx, chat_id, g):
     g.night_jalad_seat = None
     g.night_jalad_correct = False
     g.night_witch_target = None
+    # 🩸 هانیبال — per-night
+    g.night_hb_hero = None
+    g.night_hb_shadow = None
+    g.night_hb_bond = None
+    g.night_hb_avenge = None
     g.night_attar_poison_target = None
     g.poison_phase = False
     g.antidote_votes = {}
@@ -5764,6 +5822,10 @@ async def start_night(ctx, chat_id, g):
             g.night_stage = "mythic"
             store.save()
             await _my_start(ctx, chat_id, g)
+        elif is_hb:
+            g.night_stage = "hanibal"
+            store.save()
+            await _hb_open_hero(ctx, chat_id, g)
         else:
             g.night_stage = "robin"
             store.save()
@@ -6189,7 +6251,7 @@ _LAST_CB = {"q": None, "uid": None, "ts": 0.0}
 
 # دکمه‌هایی که ممکن است بازی را تمام کنند (پاسخشان تا بعدِ اجرا نگه داشته می‌شود)
 _MAY_END_CB = ("vote_done_final", "ctl_day", "strike_toggle_done", "kick_toggle_done",
-               "ctl_terror", "ctl_yaghi")   # 💣 هر دو می‌توانند دو نفر را با هم ببرند
+               "ctl_terror", "ctl_yaghi", "ctl_memar")   # 💣 می‌توانند بازی را تمام کنند / پاپ‌آپ دارند
 
 
 async def _late_ack(q, delay=3.0):
@@ -6442,6 +6504,8 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_shahname(ctx, chat_id, g)
     elif _is_mythic_scenario(g):
         await _resolve_mythic(ctx, chat_id, g)
+    elif _is_hanibal_scenario(g):
+        await _resolve_hanibal(ctx, chat_id, g)
     else:
         await _resolve_manual(ctx, chat_id, g)
 
@@ -6996,6 +7060,7 @@ async def _baz_duel_count(ctx, chat_id, g):
 
     await _check_auto_end(ctx, chat_id, g)   # 🏁
     _bzp_hunter_day_exit(ctx, chat_id, g, loser)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
+    _hb_day_exit(ctx, chat_id, g, loser)           # 🧬 بافتِ هانیبال → ۹۰ ثانیه بعد
 
     # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
     _lside = _sc_side(g, loser)
@@ -7019,7 +7084,9 @@ async def handle_baz_duel_callback(update, ctx):
     uid = q.from_user.id
     g = None; chat_id = None
     for cid, game in store.games.items():
-        if not _is_baazpors_scenario(game) or game.phase in ("idle", "ended"):
+        # 🏛 دوئلِ معمارِ هانیبال هم از همین سازوکارِ شمارش استفاده می‌کند
+        if not (_is_baazpors_scenario(game) or _is_hanibal_scenario(game)) \
+                or game.phase in ("idle", "ended"):
             continue
         if data == "bzd_end" and game.god_id == uid and getattr(game, "baz_duel_active", False):
             g, chat_id = game, cid
@@ -7178,6 +7245,21 @@ async def _burn_advance(ctx, chat_id, g):
                     and not getattr(g, "antidote_done", False)
                     and not _kp_antidote_pending(g)):
                 await _kp_after_vote(ctx, chat_id, g)
+        elif _is_hanibal_scenario(g):
+            # 🩸 هانیبال: قهرمان → سایه → مافیا (بافت+شات) → شهروندان → انتقام‌جو
+            done = g.night_done
+            for _rn, _key in ((_R_HB_HERO, "hero"), (_R_HB_SHADOW, "shadow"),
+                              (_R_HB_HANIBAL, "bond"), (_R_HB_MEMAR, "memar"),
+                              (_R_HB_AVENGER, "avenger")):
+                if _find_seat_by_role(g, _rn) in burned:
+                    done.add(_key)
+            store.save()
+            if "hero" in done:
+                await _hb_open_shadow(ctx, chat_id, g)      # با مارکر idempotent
+            if "shadow" in done:
+                await _hb_open_mafia(ctx, chat_id, g)
+            await _hb_check_open_citizens(ctx, chat_id, g)
+            await _hb_check_open_avenger(ctx, chat_id, g)
         elif _is_mythic_scenario(g):
             # ⚔️ میتیک: مافیا (شات/کانسورت) → شهروندان بدونِ اولویت
             done = g.night_done
@@ -8480,6 +8562,928 @@ async def handle_cover_callback(update, ctx):
             store.save()
             return
         await _cvb_make_godfather(ctx, g, mj)
+        return
+
+
+# ═════════════════════════════════════════════════════════════
+#  🩸 موتور شبِ خودکار — سناریو «هانیبال» (۱۰ نفره)
+#  معارفه: هانیبال سایه را می‌شناسد و رئیس را می‌خرد (مثل کاوربازپرس؛ طرفدار = مجهول)
+#  شب: قهرمان → سایه (شب‌های فرد) → [باز شدنِ اتاق] هانیبال + رئیس →
+#       کاراگاه/دکتر/معمار → انتقام‌جو (آخر، فقط اگر شات شده و سیو نشده)
+# ═════════════════════════════════════════════════════════════
+HANIBAL_KEY   = "هانیبال"
+_R_HB_HANIBAL = _nz("هانیبال")
+_R_HB_SHADOW  = _nz("سایه")
+_R_HB_BOSS    = _nz("رئیس مافیا")
+_R_HB_HERO    = _nz("قهرمان")
+_R_HB_MEMAR   = _nz("معمار")
+_R_HB_AVENGER = _nz("انتقام‌جو")
+_R_HB_FAN     = _nz("طرفدار")
+_HB_MAFIA = (_R_HB_HANIBAL, _R_HB_SHADOW, _R_HB_BOSS)
+
+
+def _is_hanibal_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(HANIBAL_KEY) in _nz(g.scenario.name))
+
+
+def _hb_find_game(uid):
+    """بازیِ هانیبالِ این کاربر — مثلِ کاوربازپرس، به فازِ شب وابسته نیست."""
+    for cid, game in store.games.items():
+        if game.phase in ("idle", "ended"):
+            continue
+        if _is_hanibal_scenario(game) and _seat_of_uid(game, uid) is not None:
+            return game, cid
+    return None, None
+
+
+def _hb_shadow_blocked(g):
+    """🌑 صندلی‌ای که سایه امشب حق ندارد بزند: همانی که «دیشب» زده (دو شبِ متوالی ممنوع)."""
+    last = getattr(g, "hb_shadow_last", None)
+    ln = getattr(g, "hb_shadow_last_night", None)
+    if last is None or ln is None:
+        return None
+    return last if ln == (g.night_number or 0) - 1 else None
+
+
+def _hb_doc_targets(g, doc_seat):
+    """💉 دکتر: خودش حداکثر ۲ بار در کلِ بازی."""
+    return [s for s in _alive_seats(g)
+            if s != doc_seat or int(getattr(g, "hb_doc_self", 0) or 0) < 2]
+
+
+def _hb_det_result(g, seat) -> bool:
+    """🔎 استعلام: هانیبال/سایه مثبت؛ رئیس و شهروندان منفی؛ کاراگاهِ سایه‌خورده همه منفی."""
+    det = _find_seat_by_role(g, _R_DETECTIVE)
+    if det is not None and getattr(g, "night_hb_shadow", None) == det:
+        return False
+    return _seat_role_norm(g, seat) in (_R_HB_HANIBAL, _R_HB_SHADOW)
+
+
+# ── معارفه: خریدِ رئیس ─────────────────────────────────────────
+async def _hb_start(ctx, chat_id, g):
+    hb = _find_seat_by_role(g, _R_HB_HANIBAL, alive_only=False)
+    sh = _find_seat_by_role(g, _R_HB_SHADOW, alive_only=False)
+    if hb is None:
+        await _night_report(ctx, g, "⚠️ هانیبالی در بازی نیست — خریدِ رئیس انجام نشد.")
+        return
+    g.hb_asking = True
+    g.hb_invite_seat = None
+    store.save()
+    intro = (f"🌑 سایهٔ تیمِ تو: <b>{_room_who(g, sh)}</b>\n\n" if sh is not None else "")
+    targets = [s for s in sorted(g.seats) if s not in (hb, sh)]
+    m = await _safe_pm(ctx, g.seats[hb][0],
+                       intro + "🤝 چه کسی را به‌عنوان رئیسِ مافیا می‌خری؟",
+                       _kb_night_seats(targets, g, "hb_pick_",
+                                       selected=g.night_sel.get(g.seats[hb][0]),
+                                       confirm_cb="hb_pick_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[hb][0]] = m.message_id
+    else:
+        await _night_report(ctx, g, "⚠️ پیویِ هانیبال بسته است — با «اکتِ دستی» جایش انتخاب کن.")
+    store.save()
+
+
+async def _hb_make_boss(ctx, g, seat, transfer_to_fan: bool):
+    """👑 این صندلی رئیسِ مافیا می‌شود؛ لینک و لیستِ یاران برای هر سه عضو می‌رود."""
+    old = (g.assigned_roles or {}).get(seat, "—")
+    if not getattr(g, "cvb_orig_roles", None):
+        g.cvb_orig_roles = {}
+    g.cvb_orig_roles.setdefault(seat, old)
+    fan = _find_seat_by_role(g, _R_HB_FAN, alive_only=False)
+    if transfer_to_fan and fan is not None and fan != seat:
+        g.cvb_orig_roles.setdefault(fan, (g.assigned_roles or {}).get(fan, "طرفدار"))
+        g.assigned_roles[fan] = old
+        if getattr(g, "seat_sides", None) is not None:
+            g.seat_sides[fan] = "شهر"
+        try:
+            await ctx.bot.send_message(g.seats[fan][0],
+                                       f"🎭 نقش شما: <b>{escape(str(old), quote=False)}</b>",
+                                       parse_mode="HTML")
+        except Exception:
+            pass
+        await _night_report(ctx, g, f"🎭 طرفدار ({_room_who(g, fan)}) نقشِ "
+                                    f"<b>{escape(str(old), quote=False)}</b> را گرفت.")
+    g.assigned_roles[seat] = "رئیس مافیا"
+    if getattr(g, "seat_sides", None) is not None:
+        g.seat_sides[seat] = "مافیا"
+    g.hb_boss_seat = seat
+    g.hb_done = True
+    g.hb_asking = False
+    g.hb_invite_seat = None
+    store.save()
+    # 👥 معارفهٔ تیم + لینک برای هر سه
+    team = [s for s in sorted(_mafia_seats(g)) if s in g.seats]
+    for s in team:
+        mates = [f"{m}. {g.seats[m][1]} — {g.assigned_roles.get(m, '—')}"
+                 for m in team if m != s]
+        head = "👑 شما رئیسِ مافیا شدید.\n\n" if s == seat else ""
+        try:
+            await ctx.bot.send_message(
+                g.seats[s][0],
+                head + "😈 یاران مافیای شما:\n" + ("\n".join(mates) if mates else "—"))
+        except Exception:
+            pass
+        await _room_send_link(ctx, g, g.seats[s][0])
+    await _night_report(ctx, g, f"👑 رئیسِ مافیا: <b>{_room_who(g, seat)}</b> "
+                                f"(نقشِ قبلی: {escape(str(old), quote=False)}) — "
+                                "لینکِ اتاق برای هر سه رفت.")
+
+
+# ── شب: مرحله‌ها ───────────────────────────────────────────────
+async def _hb_open_hero(ctx, chat_id, g):
+    hero = _find_seat_by_role(g, _R_HB_HERO)
+    if hero is None:
+        g.night_done.add("hero")
+        store.save()
+        if _dead_priority_delay(g, _R_HB_HERO):
+            _open_next_delayed(ctx, chat_id, g, _hb_open_shadow)
+        else:
+            await _hb_open_shadow(ctx, chat_id, g)
+        return
+    huid = g.seats[hero][0]
+    targets = [s for s in _alive_seats(g) if s != hero]
+    m = await _safe_pm(ctx, huid, "🛡 امشب از چه کسی در برابرِ سایه محافظت می‌کنی؟",
+                       _kb_night_seats(targets, g, "hb_hero_",
+                                       selected=g.night_sel.get(huid), confirm_cb="hb_hero_ok"))
+    if m:
+        g.night_pm_msgs[huid] = m.message_id
+    store.save()
+
+
+async def _hb_open_shadow(ctx, chat_id, g):
+    if "hb_shadow_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("hb_shadow_opened")
+    store.save()
+    sh = _find_seat_by_role(g, _R_HB_SHADOW)
+    if sh is None:
+        g.night_done.add("shadow")
+        store.save()
+        if _dead_priority_delay(g, _R_HB_SHADOW):
+            _open_next_delayed(ctx, chat_id, g, _hb_open_mafia)
+        else:
+            await _hb_open_mafia(ctx, chat_id, g)
+        return
+    suid = g.seats[sh][0]
+    protected = getattr(g, "night_hb_hero", None)
+    targets = [s for s in _alive_seats(g)
+               if s not in _mafia_seats(g, alive_only=True)
+               and s != protected and s != _hb_shadow_blocked(g)]
+    kb = _kb_night_seats(targets, g, "hb_sh_",
+                         selected=g.night_sel.get(suid), confirm_cb="hb_sh_ok")
+    rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("🚫 امشب سایه نمی‌اندازم",
+                                                             callback_data="hb_sh_skip")]]
+    m = await _safe_pm(ctx, suid, "🌑 روی چه کسی سایه می‌اندازی؟", InlineKeyboardMarkup(rows))
+    if m:
+        g.night_pm_msgs[suid] = m.message_id
+    store.save()
+
+
+async def _hb_open_mafia(ctx, chat_id, g):
+    if "hb_mafia_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("hb_mafia_opened")
+    store.save()
+    # 🔓 اتاقِ مافیا تازه حالا باز می‌شود (بعد از اکتِ سایه)
+    try:
+        await _room_set_locked(ctx, g, False)
+    except Exception:
+        pass
+    # 🧬 بافتِ هانیبال
+    hb = _find_seat_by_role(g, _R_HB_HANIBAL)
+    if hb is None:
+        g.night_done.add("bond")
+    else:
+        huid = g.seats[hb][0]
+        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        m = await _safe_pm(ctx, huid, "🧬 امشب خودت را به چه کسی بافت می‌زنی؟",
+                           _kb_night_seats(targets, g, "hb_bond_",
+                                           selected=g.night_sel.get(huid), confirm_cb="hb_bond_ok"))
+        if m:
+            g.night_pm_msgs[huid] = m.message_id
+    # 🔫 تصمیم‌گیرِ شات: رئیس → سایه → هانیبال → جذب‌شده
+    boss = _find_seat_by_role(g, _R_HB_BOSS)
+    decider = (boss or _find_seat_by_role(g, _R_HB_SHADOW) or hb)
+    if decider is None:
+        converted = sorted(_mafia_seats(g, alive_only=True))
+        decider = converted[0] if converted else None
+    if decider is None:
+        g.night_done.add("mafia")
+    else:
+        g.night_decider_seat = decider
+        rows = [[InlineKeyboardButton("🔫 شات", callback_data="hb_act_shot")]]
+        if decider == boss and not g.nato_used:
+            rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="hb_act_nato")])
+        m = await _safe_pm(ctx, g.seats[decider][0],
+                           f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
+                           InlineKeyboardMarkup(rows))
+        if m:
+            g.night_pm_msgs[g.seats[decider][0]] = m.message_id
+    store.save()
+    await _hb_check_open_citizens(ctx, chat_id, g)
+
+
+async def _hb_check_open_citizens(ctx, chat_id, g):
+    if "citizens_opened" in (g.night_done or set()):
+        return
+    if "mafia" not in (g.night_done or set()):
+        return
+    g.night_done.add("citizens_opened")
+    store.save()
+    # 🔎 کاراگاه
+    det = _find_seat_by_role(g, _R_DETECTIVE)
+    if det is None:
+        g.night_done.add("detective")
+    else:
+        duid = g.seats[det][0]
+        m = await _safe_pm(ctx, duid, "🔎 استعلام چه کسی را می‌گیری؟",
+                           _kb_night_seats([s for s in _alive_seats(g) if s != det],
+                                           g, "hb_det_"))
+        if m:
+            g.night_pm_msgs[duid] = m.message_id
+    # 💉 دکتر
+    doc = _find_seat_by_role(g, _R_DOCTOR)
+    if doc is None:
+        g.night_done.add("doctor")
+    else:
+        duid = g.seats[doc][0]
+        need = 2 if getattr(g, "hb_doc_double", False) else 1
+        g.night_doc_need = need
+        kb = _kb_night_seats(_hb_doc_targets(g, doc), g, "hb_doc_",
+                             selected=set(), confirm_cb="hb_doc_ok")
+        rows = list(kb.inline_keyboard)
+        if need == 1 and not getattr(g, "hb_doc_skip_used", False):
+            rows.append([InlineKeyboardButton("🚫 امشب سیو نمی‌دهم (شب بعد ۲ سیو — یک‌بار در بازی)",
+                                              callback_data="hb_doc_skip")])
+        m = await _safe_pm(ctx, duid, f"💉 چه کسی را سیو می‌دهی؟ ({need} نفر)",
+                           InlineKeyboardMarkup(rows))
+        if m:
+            g.night_pm_msgs[duid] = m.message_id
+    # 🏛 معمار
+    mm = _find_seat_by_role(g, _R_HB_MEMAR)
+    if mm is None or getattr(g, "memar_used", False):
+        g.night_done.add("memar")
+    else:
+        muid = g.seats[mm][0]
+        m = await _safe_pm(ctx, muid, "🏛 می‌خواهی امشب کارتِ معمار را جلوی کسی بگذاری؟ (یک‌بار در کلِ بازی)",
+                           InlineKeyboardMarkup([
+                               [InlineKeyboardButton("✅ بله", callback_data="hb_mm_yes")],
+                               [InlineKeyboardButton("🚫 خیر", callback_data="hb_mm_no")]]))
+        if m:
+            g.night_pm_msgs[muid] = m.message_id
+    store.save()
+    await _hb_check_open_avenger(ctx, chat_id, g)
+
+
+async def _hb_check_open_avenger(ctx, chat_id, g):
+    """🗡 انتقام‌جو آخر از همه — فقط وقتی شات و سیو معلوم شده."""
+    if "avenger_opened" in (g.night_done or set()):
+        return
+    d = g.night_done or set()
+    if not ({"mafia", "doctor", "detective", "memar"} <= d):
+        return
+    g.night_done.add("avenger_opened")
+    store.save()
+    av = _find_seat_by_role(g, _R_HB_AVENGER)
+    if av is None:
+        g.night_done.add("avenger")
+        store.save()
+        return
+    auid = g.seats[av][0]
+    st = getattr(g, "night_shot_target", None)
+    attacked = (st == av and av not in set(g.night_doc_saved or []))
+    if not attacked:
+        # 👎 دیسلایک — یا شات نشده یا دکتر نجاتش داده (خودش نمی‌فهمد کدام)
+        g.night_done.add("avenger")
+        store.save()
+        try:
+            await ctx.bot.send_message(auid, "👎 دیسلایک — امشب اتفاقی برایت نیفتاد.")
+        except Exception:
+            pass
+        return
+    m = await _safe_pm(ctx, auid,
+                       "👍 لایک — امشب شات شدی! می‌توانی انتقام بگیری؛ به چه کسی شلیک می‌کنی؟",
+                       InlineKeyboardMarkup(
+                           list(_kb_night_seats([s for s in _alive_seats(g) if s != av],
+                                                g, "hb_av_",
+                                                selected=g.night_sel.get(auid),
+                                                confirm_cb="hb_av_ok").inline_keyboard)
+                           + [[InlineKeyboardButton("🚫 شلیک نمی‌کنم", callback_data="hb_av_skip")]]))
+    if m:
+        g.night_pm_msgs[auid] = m.message_id
+    store.save()
+
+
+# ── نتیجهٔ شب ─────────────────────────────────────────────────
+async def _resolve_hanibal(ctx, chat_id, g):
+    dead, reasons, zereh = set(), {}, []
+    saved = set(g.night_doc_saved or [])
+    hero = _find_seat_by_role(g, _R_HB_HERO)
+    st = g.night_shot_target
+    if st and st in g.seats and st not in (g.striked or set()):
+        if st in saved:
+            pass
+        elif hero is not None and st == hero and getattr(g, "hb_hero_shield", True):
+            g.hb_hero_shield = False
+            await _night_report(ctx, g, "🛡 زرهِ قهرمان شات را گرفت — خودش نمی‌فهمد؛ زره افتاد.")
+        else:
+            dead.add(st); reasons[st] = "شلیک مافیا"
+    # 🕵️ ناتویی رئیس
+    nt = getattr(g, "night_nato_target", None)
+    if nt and nt in g.seats and getattr(g, "night_nato_correct", False):
+        dead.add(nt); reasons[nt] = "ناتویی درست"
+    # 🗡 انتقام
+    av = _find_seat_by_role(g, _R_HB_AVENGER)
+    tgt = getattr(g, "night_hb_avenge", None)
+    if av is not None and tgt and tgt in g.seats and av in dead:
+        if getattr(g, "night_hb_shadow", None) == av:
+            await _night_report(ctx, g, "🌑 انتقام‌جو سایه‌خورده بود — تیرش به خودش برگشت؛ هدف سالم ماند.")
+        elif _seat_role_norm(g, tgt) in (_R_HB_HANIBAL, _R_HB_SHADOW):
+            dead.add(tgt); reasons[tgt] = "انتقامِ انتقام‌جو"
+        else:
+            await _night_report(ctx, g, "🗡 انتقام‌جو به غیرِ سایه/هانیبال زد — فقط خودش رفت.")
+    _add_night_kick(g, dead, reasons)
+    # 🏛 اگر دارندهٔ کارتِ معمار امشب کشته شد و دوئل هنوز برگزار نشده → کارت برمی‌گردد
+    if (getattr(g, "hb_card_seat", None) in dead and not getattr(g, "hb_duel_used", False)):
+        g.memar_used = False
+        g.hb_card_seat = None
+        g.hb_card_start = None
+        await _night_report(ctx, g, "🏛 دارندهٔ کارتِ معمار کشته شد — معمار شبِ بعد دوباره می‌تواند کارت بگذارد.")
+    await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
+    # 🧬 بافتِ امشب، فردا اثر دارد
+    g.hb_bond = getattr(g, "night_hb_bond", None)
+    store.save()
+
+
+def _hb_day_exit(ctx, chat_id, g, exiter):
+    """🧬 خروجِ روزِ هانیبال (رأی/دوئل): اگر بافتش شهرسادهٔ زنده بود، ۹۰ ثانیه بعد او هم می‌رود."""
+    if not _is_hanibal_scenario(g):
+        return
+    if _seat_role_norm(g, exiter) != _R_HB_HANIBAL:
+        return
+    bond = getattr(g, "hb_bond", None)
+    if not bond or bond not in g.seats or bond in (g.striked or set()):
+        return
+    if _seat_role_norm(g, bond) not in _R_CITIZEN:
+        # نقش‌دار: هانیبال تنها می‌رود و اکتش اعلام نمی‌شود
+        asyncio.create_task(_night_report(ctx, g, "🧬 بافتِ هانیبال نقش‌دار بود — تنها رفت (اعلام نمی‌شود)."))
+        return
+    hn = escape(g.seats[exiter][1], quote=False)
+    bn = escape(g.seats[bond][1], quote=False)
+
+    async def _later():
+        try:
+            await asyncio.sleep(HUNTER_DRAG_DELAY)
+            if g.phase in ("idle", "ended"):
+                return
+            if exiter not in (g.striked or set()):
+                return
+            if bond not in g.seats or bond in (g.striked or set()):
+                return
+            g.striked.add(bond)
+            store.save()
+            await ctx.bot.send_message(
+                chat_id,
+                f"🧬 {exiter}. {hn} <b>هانیبال</b> بود و به {bond}. {bn} بافت زده بود — "
+                f"{bond}. {bn} بدونِ وصیت از بازی خارج شد.",
+                parse_mode="HTML")
+            await _night_report(ctx, g, f"🧬 هانیبال در روز رفت → بافتش ({bond}. {bn}) هم خارج شد.")
+            try:
+                await publish_seating(ctx, chat_id, g, mode=CTRL)
+            except Exception:
+                pass
+            await _check_auto_end(ctx, chat_id, g)
+        except Exception as e:
+            print("⚠️ hb day drag:", e)
+
+    asyncio.create_task(_later())
+
+
+async def _hb_memar_button(ctx, chat_id, g):
+    """🏛 دکمهٔ معمار (گاد): اگر کارتی هست، از دارنده‌اش وسطِ گروه حریف خواسته می‌شود."""
+    card = getattr(g, "hb_card_seat", None)
+    if (not card or card not in g.seats or card in (g.striked or set())
+            or getattr(g, "hb_duel_used", False)):
+        await _night_report(ctx, g, "🏛 کارتِ معماری در کار نیست — فقط تو می‌دانی.")
+        return
+    g.hb_duel_pick_wait = True
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"🏛 کارتِ معمار جلوی <b>{card}. {escape(g.seats[card][1], quote=False)}</b> است!\n"
+        f"با چه کسی دوئل می‌کنی؟ فقط شماره‌ی صندلی را بنویس.",
+        parse_mode="HTML")
+
+
+HB_DUEL_DEFENSE_SEC = 150   # ⏳ دو دفاعِ ۳۰ثانیه‌ای × ۲ + حاشیه
+
+
+async def _hb_duel_begin(ctx, chat_id, g, opponent):
+    """🏛 بعد از انتخابِ حریف: ۱۵۰ ثانیه دفاع، بعد رأی‌گیری مثل بازپرسی."""
+    card = getattr(g, "hb_card_seat", None)
+    g.hb_duel_pick_wait = False
+    g.hb_duel_used = True
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"⚔️ <b>{card}. {escape(g.seats[card][1], quote=False)}</b> و "
+        f"<b>{opponent}. {escape(g.seats[opponent][1], quote=False)}</b> دوئل می‌کنند — "
+        f"۱۵۰ ثانیه فرصتِ دفاع.",
+        parse_mode="HTML")
+    pair = [card, opponent]
+    start = getattr(g, "hb_card_start", None)
+
+    async def _later():
+        try:
+            await asyncio.sleep(HB_DUEL_DEFENSE_SEC)
+            if g.phase in ("idle", "ended"):
+                return
+            g.baz_duel_active = True
+            g.baz_duel_pair = [s for s in pair if s in g.seats]
+            g.baz_duel_votes = {}
+            g.baz_duel_unread = set()
+            store.save()
+            # 🗳 شروعِ رأی از انتخابِ معمار؛ اگر خودش در دوئل است، از نفرِ بعدی‌اش
+            s0 = start
+            alive = _alive_seats(g)
+            if s0 in pair and alive:
+                nxt = [x for x in alive if x > s0 and x not in pair]
+                s0 = (nxt or [x for x in alive if x not in pair] or [None])[0]
+            frm = f" — شروعِ رأی از {s0}" if s0 else ""
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧮 پایان شمارش",
+                                                             callback_data="bzd_end")]])
+            await ctx.bot.send_message(
+                chat_id,
+                f"🗳 <b>رأی‌گیری دوئل</b> — شماره‌ی صندلیِ یکی از این دو را بفرستید "
+                f"({pair[0]} یا {pair[1]}){frm}.",
+                parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            print("⚠️ hb duel:", e)
+
+    asyncio.create_task(_later())
+
+
+# ── کال‌بک‌ها ─────────────────────────────────────────────────
+async def handle_hanibal_callback(update, ctx):
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستیِ گاد
+    g, chat_id = _find_active_night_game(uid, q)
+    if g is None:
+        g, chat_id = _hb_find_game(uid)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    # ── معارفه: انتخابِ رئیس ──
+    if data == "hb_pick_ok":
+        if getattr(g, "hb_done", False) or not getattr(g, "hb_asking", False):
+            return
+        if _seat_of_uid(g, uid) != _find_seat_by_role(g, _R_HB_HANIBAL, alive_only=False):
+            return
+        s = g.night_sel.get(uid)
+        if not s or s not in g.seats:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.hb_asking = False
+        g.hb_invite_seat = s
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🤝 {s}. {g.seats[s][1]} را انتخاب کردی.")
+        await _night_report(ctx, g, f"🤝 هانیبال → پیشنهادِ رئیسی به: <b>{_room_who(g, s)}</b>")
+        # 🎭 طرفدار چاره‌ای جز قبول ندارد
+        if _seat_role_norm(g, s) == _R_HB_FAN:
+            await _hb_make_boss(ctx, g, s, transfer_to_fan=False)
+            return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👍 لایک (قبول)", callback_data="hb_ans_yes")],
+            [InlineKeyboardButton("👎 دیسلایک (رد)", callback_data="hb_ans_no")],
+        ])
+        m = await _safe_pm(ctx, g.seats[s][0],
+                           "👑 پیشنهادِ رئیسیِ تیمِ مافیا به تو داده شد — قبول می‌کنی؟", kb)
+        if m:
+            g.night_pm_msgs[g.seats[s][0]] = m.message_id
+        else:
+            await _night_report(ctx, g, "⚠️ پیویِ فردِ انتخابی بسته است — با «اکتِ دستی» جایش جواب بده.")
+        store.save()
+        return
+
+    if data.startswith("hb_pick_"):
+        if getattr(g, "hb_done", False) or not getattr(g, "hb_asking", False):
+            return
+        hb = _find_seat_by_role(g, _R_HB_HANIBAL, alive_only=False)
+        if _seat_of_uid(g, uid) != hb:
+            return
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        sh = _find_seat_by_role(g, _R_HB_SHADOW, alive_only=False)
+        targets = [x for x in sorted(g.seats) if x not in (hb, sh)]
+        await _edit_pm(ctx, uid, mid, "🤝 چه کسی را به‌عنوان رئیسِ مافیا می‌خری؟",
+                       _kb_night_seats(targets, g, "hb_pick_", selected=s, confirm_cb="hb_pick_ok"))
+        return
+
+    if data in ("hb_ans_yes", "hb_ans_no"):
+        if getattr(g, "hb_done", False):
+            return
+        s = _seat_of_uid(g, uid)
+        if s is None or s != getattr(g, "hb_invite_seat", None):
+            return
+        if data == "hb_ans_yes":
+            await _close_pm(ctx, uid, mid, "👍 قبول کردی — رئیسِ مافیا شدی.")
+            await _night_report(ctx, g, f"👍 {_room_who(g, s)} پیشنهاد را قبول کرد.")
+            await _hb_make_boss(ctx, g, s, transfer_to_fan=True)
+            return
+        await _close_pm(ctx, uid, mid, "👎 رد کردی — نقشت همان است که بود.")
+        await _night_report(ctx, g, f"👎 {_room_who(g, s)} پیشنهاد را رد کرد.")
+        fan = _find_seat_by_role(g, _R_HB_FAN, alive_only=False)
+        if fan is None:
+            await _night_report(ctx, g, "⚠️ طرفداری در بازی نیست — رئیسی به کسی نرسید.")
+            g.hb_done = True
+            g.hb_invite_seat = None
+            store.save()
+            return
+        await _hb_make_boss(ctx, g, fan, transfer_to_fan=False)
+        return
+
+    # ── قهرمان ──
+    if data == "hb_hero_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_hb_hero = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("hero")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🛡 محافظت از {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🛡 قهرمان → محافظت از <b>{_room_who(g, s)}</b>")
+        await _hb_open_shadow(ctx, chat_id, g)
+        return
+
+    if data.startswith("hb_hero_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        hero = _seat_of_uid(g, uid)
+        await _edit_pm(ctx, uid, mid, "🛡 امشب از چه کسی در برابرِ سایه محافظت می‌کنی؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != hero],
+                                       g, "hb_hero_", selected=s, confirm_cb="hb_hero_ok"))
+        return
+
+    # ── سایه ──
+    if data == "hb_sh_skip":
+        g.night_hb_shadow = None
+        g.night_sel.pop(uid, None)
+        g.night_done.add("shadow")
+        store.save()
+        await _close_pm(ctx, uid, mid, "🚫 امشب سایه نینداختی.")
+        await _night_report(ctx, g, "🌑 سایه → اکت نزد")
+        await _hb_open_mafia(ctx, chat_id, g)
+        return
+
+    if data == "hb_sh_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        if s == _hb_shadow_blocked(g):   # کیبوردِ کهنه
+            await safe_q_answer(q, "دیشب روی همین نفر سایه انداختی — امشب نمی‌شود.", show_alert=True)
+            return
+        g.night_hb_shadow = s
+        g.hb_shadow_last = s
+        g.hb_shadow_last_night = g.night_number
+        g.night_sel.pop(uid, None)
+        g.night_done.add("shadow")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🌑 سایه روی {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🌑 سایه → روی <b>{_room_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🌑 سایه روی <b>{_room_who(g, s)}</b>")
+        await _hb_open_mafia(ctx, chat_id, g)
+        return
+
+    if data.startswith("hb_sh_"):
+        s = int(data.rsplit("_", 1)[1])
+        if s == _hb_shadow_blocked(g):
+            await safe_q_answer(q, "دیشب روی همین نفر سایه انداختی — امشب نمی‌شود.", show_alert=True)
+            return
+        g.night_sel[uid] = s
+        store.save()
+        protected = getattr(g, "night_hb_hero", None)
+        targets = [x for x in _alive_seats(g)
+                   if x not in _mafia_seats(g, alive_only=True)
+                   and x != protected and x != _hb_shadow_blocked(g)]
+        kb = _kb_night_seats(targets, g, "hb_sh_", selected=s, confirm_cb="hb_sh_ok")
+        rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("🚫 امشب سایه نمی‌اندازم",
+                                                                 callback_data="hb_sh_skip")]]
+        await _edit_pm(ctx, uid, mid, "🌑 روی چه کسی سایه می‌اندازی؟", InlineKeyboardMarkup(rows))
+        return
+
+    # ── بافتِ هانیبال ──
+    if data == "hb_bond_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_hb_bond = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("bond")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🧬 بافت به {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🧬 هانیبال → بافت به <b>{_room_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🧬 بافتِ هانیبال به <b>{_room_who(g, s)}</b>")
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    if data.startswith("hb_bond_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        await _edit_pm(ctx, uid, mid, "🧬 امشب خودت را به چه کسی بافت می‌زنی؟",
+                       _kb_night_seats(targets, g, "hb_bond_", selected=s, confirm_cb="hb_bond_ok"))
+        return
+
+    # ── اکتِ مافیا (رئیس) ──
+    if data == "hb_act_back":
+        g.night_sel.pop(uid, None)
+        store.save()
+        boss = _find_seat_by_role(g, _R_HB_BOSS)
+        dec = getattr(g, "night_decider_seat", None)
+        rows = [[InlineKeyboardButton("🔫 شات", callback_data="hb_act_shot")]]
+        if dec == boss and not g.nato_used:
+            rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="hb_act_nato")])
+        await _edit_pm(ctx, uid, mid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
+                       InlineKeyboardMarkup(rows))
+        return
+
+    if data == "hb_act_shot":
+        await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
+                       _kb_add_back(_kb_night_seats(list(_alive_seats(g)), g, "hb_st_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="hb_st_ok"),
+                                    "hb_act_back"))
+        return
+
+    if data == "hb_st_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_shot_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("mafia")
+        store.save()
+        await _room_announce_shot(ctx, g, s)
+        await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {g.seats[s][1]}")
+        await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(g.seats[s][1], quote=False)}</b>")
+        await _hb_check_open_citizens(ctx, chat_id, g)
+        return
+
+    if data.startswith("hb_st_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔫 هدف شلیک را انتخاب کن:",
+                       _kb_add_back(_kb_night_seats(list(_alive_seats(g)), g, "hb_st_",
+                                                    selected=s, confirm_cb="hb_st_ok"),
+                                    "hb_act_back"))
+        return
+
+    if data == "hb_act_nato":
+        if g.nato_used:
+            await safe_q_answer(q, "ناتویی قبلاً استفاده شده.", show_alert=True)
+            return
+        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+        await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟",
+                       _kb_add_back(_kb_night_seats(targets, g, "hb_nt_",
+                                                    selected=g.night_sel.get(uid),
+                                                    confirm_cb="hb_nt_ok"),
+                                    "hb_act_back"))
+        return
+
+    if data == "hb_nt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_nato_seat = s
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _room_note(ctx, g, f"🕵️ ناتویی روی <b>{_room_who(g, s)}</b>")
+        names = _nem_citizen_role_names(g)
+        rows = [[InlineKeyboardButton(rn, callback_data=f"hb_nr_{i}")] for i, rn in enumerate(names)]
+        await _edit_pm(ctx, uid, mid, f"🕵️ نقش صندلی {s} را حدس بزن:", InlineKeyboardMarkup(rows))
+        return
+
+    if data.startswith("hb_nt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        targets = [x for x in _alive_seats(g) if x not in _mafia_seats(g, alive_only=True)]
+        await _edit_pm(ctx, uid, mid, "🕵️ چه کسی را ناتویی می‌کنی؟",
+                       _kb_add_back(_kb_night_seats(targets, g, "hb_nt_", selected=s,
+                                                    confirm_cb="hb_nt_ok"),
+                                    "hb_act_back"))
+        return
+
+    if data.startswith("hb_nr_"):
+        i = int(data.rsplit("_", 1)[1])
+        names = _nem_citizen_role_names(g)
+        if i >= len(names):
+            return
+        guess = names[i]
+        s = getattr(g, "night_nato_seat", None)
+        if not s:
+            await safe_q_answer(q, "اول هدف را انتخاب کن.", show_alert=True)
+            return
+        correct = (_nz(guess) == _seat_role_norm(g, s))
+        g.night_nato_correct = correct
+        g.night_nato_target = s
+        g.nato_used = True
+        g.night_done.add("mafia")
+        store.save()
+        tick = "✅" if correct else "❌"
+        await _close_pm(ctx, uid, mid, f"🕵️ ناتویی روی {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🕵️ رئیس → ناتویی {s}. "
+                                    f"{escape(g.seats[s][1], quote=False)} | حدس: {guess} {tick}")
+        await _hb_check_open_citizens(ctx, chat_id, g)
+        return
+
+    # ── کاراگاه ──
+    if data.startswith("hb_det_"):
+        s = int(data.rsplit("_", 1)[1])
+        res = "مثبت ✅" if _hb_det_result(g, s) else "منفی ❌"
+        shadowed = (getattr(g, "night_hb_shadow", None) == _seat_of_uid(g, uid))
+        g.night_done.add("detective")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔎 استعلام {s}. {g.seats[s][1]}: {res}")
+        await _night_report(ctx, g, f"🔎 کاراگاه → استعلام {s}. "
+                                    f"{escape(g.seats[s][1], quote=False)}: <b>{res}</b>"
+                                    + (" (سایه‌خورده — همه منفی)" if shadowed else ""))
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    # ── دکتر ──
+    if data == "hb_doc_skip":
+        if getattr(g, "hb_doc_skip_used", False):   # کیبوردِ کهنه — فقط یک‌بار در بازی
+            await safe_q_answer(q, "قبلاً یک‌بار سیو را رد کرده‌ای.", show_alert=True)
+            return
+        g.hb_doc_skip_used = True
+        g.hb_doc_double = True
+        g.night_doc_saved = []
+        g.night_doc_sel.pop(uid, None)
+        g.night_done.add("doctor")
+        store.save()
+        await _close_pm(ctx, uid, mid, "🚫 امشب سیو ندادی — شبِ بعد ۲ سیو داری.")
+        await _night_report(ctx, g, "💉 دکتر → سیو نداد (شبِ بعد ۲ سیو)")
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    if data == "hb_doc_ok":
+        sel = set(g.night_doc_sel.get(uid, []))
+        need = getattr(g, "night_doc_need", 1)
+        if len(sel) != need:
+            await safe_q_answer(q, f"باید دقیقاً {need} نفر انتخاب کنی.", show_alert=True)
+            return
+        doc = _seat_of_uid(g, uid)
+        if getattr(g, "night_hb_shadow", None) == doc:
+            # 🌑 سایه روی دکتر: سیو روی خودش می‌نشیند (خودش نمی‌فهمد؛ جزو سهمِ خود حساب نمی‌شود)
+            g.night_doc_saved = [doc]
+            await _night_report(ctx, g, "🌑 دکتر سایه‌خورده بود — سیو روی خودش نشست (خودش نمی‌داند).")
+        else:
+            g.night_doc_saved = sorted(sel)
+            if doc in sel:
+                g.hb_doc_self = int(getattr(g, "hb_doc_self", 0) or 0) + 1
+        g.hb_doc_double = False
+        g.night_doc_sel.pop(uid, None)
+        g.night_done.add("doctor")
+        store.save()
+        names = "، ".join(f"{s}. {g.seats[s][1]}" for s in sorted(sel))
+        await _close_pm(ctx, uid, mid, f"💉 سیو ثبت شد: {names}")
+        await _night_report(ctx, g, f"💉 دکتر → سیو: <b>{escape(names, quote=False)}</b>")
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    if data.startswith("hb_doc_"):
+        s = int(data.rsplit("_", 1)[1])
+        sel = set(g.night_doc_sel.get(uid, []))
+        need = getattr(g, "night_doc_need", 1)
+        if s in sel:
+            sel.remove(s)
+        elif len(sel) >= need:
+            await safe_q_answer(q, f"فقط {need} نفر.", show_alert=True)
+            return
+        else:
+            sel.add(s)
+        g.night_doc_sel[uid] = list(sel)
+        store.save()
+        doc = _seat_of_uid(g, uid)
+        kb = _kb_night_seats(_hb_doc_targets(g, doc), g, "hb_doc_",
+                             selected=sel, confirm_cb="hb_doc_ok")
+        rows = list(kb.inline_keyboard)
+        if need == 1 and not getattr(g, "hb_doc_skip_used", False):
+            rows.append([InlineKeyboardButton("🚫 امشب سیو نمی‌دهم (شب بعد ۲ سیو — یک‌بار در بازی)",
+                                              callback_data="hb_doc_skip")])
+        await _edit_pm(ctx, uid, mid, f"💉 چه کسی را سیو می‌دهی؟ ({need} نفر)",
+                       InlineKeyboardMarkup(rows))
+        return
+
+    # ── معمار ──
+    if data == "hb_mm_no":
+        g.night_done.add("memar")
+        store.save()
+        await _close_pm(ctx, uid, mid, "🏛 امشب کارت نگذاشتی.")
+        await _night_report(ctx, g, "🏛 معمار → کارت نگذاشت")
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    if data == "hb_mm_yes":
+        mm = _seat_of_uid(g, uid)
+        targets = [s for s in _alive_seats(g) if s != mm]
+        await _edit_pm(ctx, uid, mid, "🏛 کارت را جلوی چه کسی می‌گذاری؟",
+                       _kb_night_seats(targets, g, "hb_mmt_",
+                                       selected=g.night_sel.get(uid), confirm_cb="hb_mmt_ok"))
+        return
+
+    if data == "hb_mmt_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        mm = _seat_of_uid(g, uid)
+        if getattr(g, "night_hb_shadow", None) == mm:
+            # 🌑 سایه روی معمار: کارت جلوی خودش می‌افتد
+            g.hb_card_seat = mm
+            await _night_report(ctx, g, "🌑 معمار سایه‌خورده بود — کارت جلوی خودش افتاد (خودش نمی‌داند).")
+        else:
+            g.hb_card_seat = s
+        g.memar_used = True
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _night_report(ctx, g, f"🏛 معمار → کارت جلوی <b>{_room_who(g, g.hb_card_seat)}</b>")
+        starts = [x for x in _alive_seats(g) if x != mm]   # ⚖️ خودش شروع‌کننده نمی‌شود
+        await _edit_pm(ctx, uid, mid, "🗳 رأی‌گیریِ دوئل از چه کسی شروع شود؟ (خودت نه)",
+                       _kb_night_seats(starts, g, "hb_mms_", confirm_cb=None))
+        return
+
+    if data.startswith("hb_mmt_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        mm = _seat_of_uid(g, uid)
+        await _edit_pm(ctx, uid, mid, "🏛 کارت را جلوی چه کسی می‌گذاری؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != mm],
+                                       g, "hb_mmt_", selected=s, confirm_cb="hb_mmt_ok"))
+        return
+
+    if data.startswith("hb_mms_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.hb_card_start = s
+        g.night_done.add("memar")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🏛 ثبت شد — کارت جلوی {g.hb_card_seat}، شروعِ رأی از {s}.")
+        await _night_report(ctx, g, f"🏛 معمار → شروعِ رأیِ دوئل از <b>{s}</b>")
+        await _hb_check_open_avenger(ctx, chat_id, g)
+        return
+
+    # ── انتقام‌جو ──
+    if data == "hb_av_skip":
+        g.night_hb_avenge = None
+        g.night_sel.pop(uid, None)
+        g.night_done.add("avenger")
+        store.save()
+        await _close_pm(ctx, uid, mid, "🚫 شلیک نکردی.")
+        await _night_report(ctx, g, "🗡 انتقام‌جو → شلیک نکرد")
+        return
+
+    if data == "hb_av_ok":
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_hb_avenge = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("avenger")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🗡 شلیک به {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🗡 انتقام‌جو → شلیک به <b>{_room_who(g, s)}</b>")
+        return
+
+    if data.startswith("hb_av_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        av = _seat_of_uid(g, uid)
+        kb = _kb_night_seats([x for x in _alive_seats(g) if x != av], g, "hb_av_",
+                             selected=s, confirm_cb="hb_av_ok")
+        rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("🚫 شلیک نمی‌کنم",
+                                                                 callback_data="hb_av_skip")]]
+        await _edit_pm(ctx, uid, mid,
+                       "👍 لایک — امشب شات شدی! می‌توانی انتقام بگیری؛ به چه کسی شلیک می‌کنی؟",
+                       InlineKeyboardMarkup(rows))
         return
 
 
@@ -13115,6 +14119,8 @@ async def _pass_shot_to_next_mafia(ctx, g, ks):
                 "tk_decider_seat":  ("tk_st_", "tk_st_confirm"),
                 "kp_decider_seat":  ("kp_st_", "kp_st_confirm"),
             }.get(key, ("night_shot_", "night_shot_confirm"))
+            if _is_hanibal_scenario(g):
+                prefix, confirm = "hb_st_", "hb_st_ok"
             kb = _kb_night_seats(list(_alive_seats(g)), g, prefix, confirm_cb=confirm)
             text = f"{head} — هدف را انتخاب کن:"
 
@@ -15418,13 +16424,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
-    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "nem_", "tk_", "kp_",
+    if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
                                               "gm_", "sh_", "my_")):
         _dt = _q.data
         if _dt.startswith("my_"):
             await handle_mythic_callback(update, ctx)
         elif _dt.startswith("night_"):
             await handle_night_callback(update, ctx)
+        elif _dt.startswith("hb_"):
+            await handle_hanibal_callback(update, ctx)
         elif _dt.startswith("cvb_"):
             await handle_cover_callback(update, ctx)
         elif _dt.startswith("bzp_"):
@@ -15845,9 +16853,27 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
                 "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
-                "ctl_terror", "ctl_yaghi"):
+                "ctl_terror", "ctl_yaghi", "ctl_memar"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+
+        # 🏛 معمارِ هانیبال — اگر کارتی نیست، فقط گاد می‌فهمد
+        if data == "ctl_memar":
+            if not _is_hanibal_scenario(g):
+                await safe_q_answer(q, "فقط سناریوی هانیبال.", show_alert=True)
+                return
+            if getattr(g, "hb_duel_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if getattr(g, "night_active", False) or getattr(g, "maarefe_active", False):
+                await safe_q_answer(q, "دوئلِ معمار فقط در روز.", show_alert=True)
+                return
+            if getattr(g, "hb_duel_pick_wait", False):
+                await safe_q_answer(q, "همین حالا منتظرِ انتخابِ حریف هستیم.", show_alert=True)
+                return
+            await safe_q_answer(q)
+            await _hb_memar_button(ctx, chat, g)
             return
 
         # 💣 تروریستِ میتیک — پاسخِ ردها فقط پاپ‌آپِ خودِ گاد است، نه پیام در گروه
@@ -17199,6 +18225,23 @@ async def shuffle_and_assign(
     g.cvb_gf_seat = None
     g.cvb_done = False
     g.cvb_orig_roles = {}
+    # 🩸 هانیبال — همه‌چیز با نقش‌های تازه از نو
+    g.hb_asking = False
+    g.hb_invite_seat = None
+    g.hb_done = False
+    g.hb_boss_seat = None
+    g.hb_hero_shield = True
+    g.hb_doc_self = 0
+    g.hb_doc_double = False
+    g.hb_doc_skip_used = False
+    g.hb_bond = None
+    g.hb_shadow_last = None
+    g.hb_shadow_last_night = None
+    g.memar_used = False
+    g.hb_card_seat = None
+    g.hb_card_start = None
+    g.hb_duel_used = False
+    g.hb_duel_pick_wait = False
     g.nem_deng_button_used = False
     g.nem_deng_active = False
     g.nem_deng_stage = 0
@@ -17548,6 +18591,16 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         else:
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
+
+    # 🏛 انتخابِ حریفِ دوئلِ معمار (هانیبال) — فقط دارندهٔ کارت، فقط بعد از دکمهٔ گاد
+    if (_is_hanibal_scenario(g) and getattr(g, "hb_duel_pick_wait", False)
+            and not getattr(g, "night_active", False)):
+        _card = getattr(g, "hb_card_seat", None)
+        if (_card is not None and _card in g.seats and uid == g.seats[_card][0]):
+            _opp = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _card])
+            if _opp is not None:
+                await _hb_duel_begin(ctx, msg.chat.id, g, _opp)
+                return
 
     # 💣 عددِ ترور (میتیک) — شروعش با دکمهٔ گاد است، نه نوشتنِ کفِ گروه.
     #    ⚠️ کلمهٔ راه‌انداز عمداً برداشته شده: هرکس می‌توانست «ترور» بنویسد و با
@@ -18869,7 +19922,9 @@ async def _room_sync_on_night(ctx, g):
     """در /شب: باز کردن چت + حذف مافیای مرده + چرخشِ لینک + ارسال لینکِ معوق + چکِ جوین‌نشده‌ها."""
     if not g.mafia_room_id:
         return
-    await _room_set_locked(ctx, g, False)
+    # 🩸 هانیبال: اتاق تا اکتِ سایه بسته می‌ماند (در _hb_open_mafia باز می‌شود)
+    if not _is_hanibal_scenario(g):
+        await _room_set_locked(ctx, g, False)
     removed_any = False
     for uid in list(g.mafia_room_members):
         if uid == g.god_id:
@@ -19187,6 +20242,10 @@ async def do_maarefe(ctx, chat_id, g):
     if _is_cover_scenario(g) and not getattr(g, "cvb_done", False):
         await _cvb_start(ctx, chat_id, g)
 
+    # 🩸 هانیبال: خریدِ رئیس — لینک بعد از تعیینِ رئیس برای هر سه می‌رود
+    if _is_hanibal_scenario(g) and not getattr(g, "hb_done", False):
+        await _hb_start(ctx, chat_id, g)
+
     # سناریو گیمر: دن‌کارلئونه باید یک جمله بنویسد (به مسترهلمز می‌رسد)
     if _is_gamer_scenario(g):
         don = _find_seat_by_role(g, _R_DONC)
@@ -19236,6 +20295,7 @@ def _diag_scenario_report(g) -> str:
     if _is_neg_scenario(g): detected.append("مذاکره")
     if _is_baazpors_scenario(g): detected.append("بازپرس")
     if _is_cover_scenario(g): detected.append("کاوربازپرس")
+    if _is_hanibal_scenario(g): detected.append("هانیبال")
     if _is_nemayande_scenario(g): detected.append("نماینده")
     if _is_takavar_scenario(g): detected.append("تکاور")
     if _is_kapu_scenario(g): detected.append("کاپو")
@@ -19371,6 +20431,16 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                         else:
                             await _sh_arrow_aim(ctx, msg.chat.id, g, _bseat, _bv)
                         return
+
+    # 🏛 انتخابِ حریفِ دوئلِ معمار (هانیبال) — فقط دارندهٔ کارت، فقط بعد از دکمهٔ گاد
+    if (_is_hanibal_scenario(g) and getattr(g, "hb_duel_pick_wait", False)
+            and not getattr(g, "night_active", False)):
+        _card = getattr(g, "hb_card_seat", None)
+        if (_card is not None and _card in g.seats and uid == g.seats[_card][0]):
+            _opp = _deng_parse_strict(text, [s for s in _alive_seats(g) if s != _card])
+            if _opp is not None:
+                await _hb_duel_begin(ctx, msg.chat.id, g, _opp)
+                return
 
     # 💣 عددِ ترور (میتیک) — شروعش با دکمهٔ گاد است، نه نوشتنِ کفِ گروه.
     #    ⚠️ کلمهٔ راه‌انداز عمداً برداشته شده: هرکس می‌توانست «ترور» بنویسد و با
