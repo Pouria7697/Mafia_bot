@@ -354,8 +354,10 @@ class GameState:
         self.memar_used = getattr(self, "memar_used", False)             # 🏛 کارتِ معمار (یک‌بار)
         self.hb_card_seat = getattr(self, "hb_card_seat", None)
         self.hb_card_start = getattr(self, "hb_card_start", None)        # 🗳 شروعِ رأیِ دوئل
+        self.hb_card_dir = getattr(self, "hb_card_dir", 1)               # 🗳 +۱ پایین (→۱۰) | −۱ بالا (→۱)
         self.hb_duel_used = getattr(self, "hb_duel_used", False)         # دوئلِ معمار برگزار شده
         self.hb_duel_pick_wait = getattr(self, "hb_duel_pick_wait", False)
+        self.hb_duel_pending = getattr(self, "hb_duel_pending", []) or []  # جفتِ دوئل، منتظرِ دکمهٔ گاد
         # ── حالت شبِ خودکار (سناریو نماینده) ──
         self.mine_seat = getattr(self, "mine_seat", None)            # محل مین (تا آخر بازی)
         self.defuse_used = getattr(self, "defuse_used", False)        # خنثی‌سازی یکبار در بازی
@@ -624,6 +626,7 @@ class GameState:
         self.stats_save_error = getattr(self, "stats_save_error", None)   # ⚠️ شکستِ ثبتِ آمار
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
+        self.game_start_ts = getattr(self, "game_start_ts", None)   # ⏰ لحظهٔ پخشِ نقش‌ها
 
 
 class Store:
@@ -4875,6 +4878,19 @@ async def handle_god_rating_callback(update, ctx):
         pass
 
 
+_TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))   # 🇮🇷 ایران DST ندارد
+
+
+def _teh_clock(ts=None) -> str:
+    """⏰ «HH:MM» به وقتِ تهران — بدونِ ts یعنی همین الان؛ ts نامعتبر → «—»."""
+    try:
+        dt = (datetime.now(_TEHRAN_TZ) if ts is None
+              else datetime.fromtimestamp(float(ts), _TEHRAN_TZ))
+        return dt.strftime("%H:%M")
+    except Exception:
+        return "—"
+
+
 async def announce_winner(ctx, update, g: GameState):
     chat = update.effective_chat
     group_title = chat.title or "—"
@@ -4897,6 +4913,9 @@ async def announce_winner(ctx, update, g: GameState):
         f"🎭 <b>{event_title}</b>",
         f"░⚜️🎮 گروه: {group_link}",
         f"░⚜️📅 تاریخ: {date_str}",
+        f"░⚜️⏰ ساعت: "
+        f"{_teh_clock(g.game_start_ts) if getattr(g, 'game_start_ts', None) else '—'}"
+        f" تا {_teh_clock()}",
         f"░⚜️🎯 شماره رویداد:{event_num}",
         f"░💡🔱 راوی: <a href='tg://user?id={g.god_id}'>{g.god_name or '❓'}</a>"
         f"{medal_tag(g.god_id)}",
@@ -8717,12 +8736,11 @@ async def _hb_open_shadow(ctx, chat_id, g):
     store.save()
     sh = _find_seat_by_role(g, _R_HB_SHADOW)
     if sh is None:
+        # ⚡ سایه مرده/نیست → اتاقِ مافیا بلافاصله باز می‌شود؛ تأخیرِ ضدلورفتن لازم نیست
+        #    چون فقط خودِ تیم بازشدنِ اتاق را می‌بیند و آن‌ها می‌دانند یارشان مرده.
         g.night_done.add("shadow")
         store.save()
-        if _dead_priority_delay(g, _R_HB_SHADOW):
-            _open_next_delayed(ctx, chat_id, g, _hb_open_mafia)
-        else:
-            await _hb_open_mafia(ctx, chat_id, g)
+        await _hb_open_mafia(ctx, chat_id, g)
         return
     suid = g.seats[sh][0]
     # ⚠️ محافظت‌شدهٔ قهرمان عمداً از لیست حذف «نمی‌شود» — وگرنه سایه می‌فهمد
@@ -8976,52 +8994,73 @@ async def _hb_memar_button(ctx, chat_id, g):
         parse_mode="HTML")
 
 
-HB_DUEL_DEFENSE_SEC = 150   # ⏳ دو دفاعِ ۳۰ثانیه‌ای × ۲ + حاشیه
+def _hb_vote_order(g, pair):
+    """🗳 ترتیبِ رأی‌دهندگانِ دوئل: از شروع‌کنندهٔ انتخابیِ معمار، در جهتِ انتخابی‌اش،
+    با دورِ کامل؛ دو طرفِ دوئل و مرده‌ها رد می‌شوند (اگر شروع‌کننده خودش در دوئل/مرده
+    باشد، نفرِ بعدی در همان جهت جایش را می‌گیرد)."""
+    eligible = [s for s in _alive_seats(g) if s not in pair]
+    if not eligible:
+        return []
+    start = getattr(g, "hb_card_start", None) or eligible[0]
+    step = -1 if (getattr(g, "hb_card_dir", 1) or 1) == -1 else 1
+    n = max(g.seats) if g.seats else 0
+    order, cur = [], start
+    for _ in range(n):
+        if cur in eligible:
+            order.append(cur)
+        cur += step
+        if cur < 1:
+            cur = n
+        elif cur > n:
+            cur = 1
+    return order
 
 
 async def _hb_duel_begin(ctx, chat_id, g, opponent):
-    """🏛 بعد از انتخابِ حریف: ۱۵۰ ثانیه دفاع، بعد رأی‌گیری مثل بازپرسی."""
+    """🏛 بعد از انتخابِ حریف: دفاع‌ها آزادند؛ رأی‌گیری با دکمهٔ گاد شروع می‌شود."""
     card = getattr(g, "hb_card_seat", None)
     g.hb_duel_pick_wait = False
     g.hb_duel_used = True
+    g.hb_duel_pending = [card, opponent]
     store.save()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗳 شروعِ رأی‌گیری",
+                                                     callback_data="hb_duel_vote")]])
     await ctx.bot.send_message(
         chat_id,
         f"⚔️ <b>{card}. {escape(g.seats[card][1], quote=False)}</b> و "
         f"<b>{opponent}. {escape(g.seats[opponent][1], quote=False)}</b> دوئل می‌کنند — "
-        f"۱۵۰ ثانیه فرصتِ دفاع.",
-        parse_mode="HTML")
-    pair = [card, opponent]
-    start = getattr(g, "hb_card_start", None)
+        f"هر کدام دو دفاعِ ۳۰ ثانیه‌ای.\n"
+        f"وقتی دفاع‌ها تمام شد، راوی «شروعِ رأی‌گیری» را می‌زند.",
+        parse_mode="HTML", reply_markup=kb)
 
-    async def _later():
-        try:
-            await asyncio.sleep(HB_DUEL_DEFENSE_SEC)
-            if g.phase in ("idle", "ended"):
-                return
-            g.baz_duel_active = True
-            g.baz_duel_pair = [s for s in pair if s in g.seats]
-            g.baz_duel_votes = {}
-            g.baz_duel_unread = set()
-            store.save()
-            # 🗳 شروعِ رأی از انتخابِ معمار؛ اگر خودش در دوئل است، از نفرِ بعدی‌اش
-            s0 = start
-            alive = _alive_seats(g)
-            if s0 in pair and alive:
-                nxt = [x for x in alive if x > s0 and x not in pair]
-                s0 = (nxt or [x for x in alive if x not in pair] or [None])[0]
-            frm = f" — شروعِ رأی از {s0}" if s0 else ""
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧮 پایان شمارش",
-                                                             callback_data="bzd_end")]])
-            await ctx.bot.send_message(
-                chat_id,
-                f"🗳 <b>رأی‌گیری دوئل</b> — شماره‌ی صندلیِ یکی از این دو را بفرستید "
-                f"({pair[0]} یا {pair[1]}){frm}.",
-                parse_mode="HTML", reply_markup=kb)
-        except Exception as e:
-            print("⚠️ hb duel:", e)
 
-    asyncio.create_task(_later())
+async def _hb_duel_vote_start(ctx, chat_id, g):
+    """🗳 شروعِ شمارشِ دوئل — فقط با دکمهٔ گاد."""
+    pair = [s for s in (getattr(g, "hb_duel_pending", []) or []) if s in g.seats]
+    if len(pair) != 2:
+        return False
+    g.hb_duel_pending = []
+    g.baz_duel_active = True
+    g.baz_duel_pair = pair
+    g.baz_duel_votes = {}
+    g.baz_duel_unread = set()
+    store.save()
+    # 🗳 ترتیبِ رأی: از انتخابِ معمار در جهتِ انتخابیِ او؛ دو طرفِ دوئل و مرده‌ها رد می‌شوند
+    order = _hb_vote_order(g, pair)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🧮 پایان شمارش",
+                                                     callback_data="bzd_end")]])
+    extra = ""
+    if order:
+        _d = "بالا" if (getattr(g, "hb_card_dir", 1) or 1) == -1 else "پایین"
+        extra = (f"\nترتیبِ رأی (به سمتِ {_d}): {_fa_seq(order)}"
+                 f"\nشروع: <b>{order[0]}. {escape(g.seats[order[0]][1], quote=False)}</b>"
+                 f" | نفرِ آخر: <b>{order[-1]}. {escape(g.seats[order[-1]][1], quote=False)}</b>")
+    await ctx.bot.send_message(
+        chat_id,
+        f"🗳 <b>رأی‌گیری دوئل</b> — شماره‌ی صندلیِ یکی از این دو را بفرستید "
+        f"({pair[0]} یا {pair[1]}).{extra}",
+        parse_mode="HTML", reply_markup=kb)
+    return True
 
 
 # ── کال‌بک‌ها ─────────────────────────────────────────────────
@@ -9449,10 +9488,25 @@ async def handle_hanibal_callback(update, ctx):
     if data.startswith("hb_mms_"):
         s = int(data.rsplit("_", 1)[1])
         g.hb_card_start = s
+        store.save()
+        await _edit_pm(ctx, uid, mid,
+                       f"🗳 رأی از {s} شروع شود و به کدام سمت برود؟",
+                       InlineKeyboardMarkup([
+                           [InlineKeyboardButton("⬆️ بالا (به سمتِ صندلی ۱)", callback_data="hb_mmd_u")],
+                           [InlineKeyboardButton("⬇️ پایین (به سمتِ صندلی آخر)", callback_data="hb_mmd_d")]]))
+        return
+
+    if data in ("hb_mmd_u", "hb_mmd_d"):
+        if getattr(g, "hb_card_start", None) is None:
+            await safe_q_answer(q, "اول شروع‌کننده را انتخاب کن.", show_alert=True)
+            return
+        g.hb_card_dir = -1 if data == "hb_mmd_u" else 1
         g.night_done.add("memar")
         store.save()
-        await _close_pm(ctx, uid, mid, f"🏛 ثبت شد — کارت جلوی {g.hb_card_seat}، شروعِ رأی از {s}.")
-        await _night_report(ctx, g, f"🏛 معمار → شروعِ رأیِ دوئل از <b>{s}</b>")
+        _d = "بالا (به سمتِ ۱)" if g.hb_card_dir == -1 else "پایین (به سمتِ آخر)"
+        await _close_pm(ctx, uid, mid,
+                        f"🏛 ثبت شد — کارت جلوی {g.hb_card_seat}، رأی از {g.hb_card_start} به سمتِ {_d}.")
+        await _night_report(ctx, g, f"🏛 معمار → شروعِ رأی از <b>{g.hb_card_start}</b> به سمتِ {_d}")
         await _hb_check_open_avenger(ctx, chat_id, g)
         return
 
@@ -16430,6 +16484,26 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_sh_bow_callback(update, ctx)
         return
 
+    # 🏛 شروعِ رأی‌گیریِ دوئلِ معمار — دکمهٔ گاد در گروه (قبل از مسیرِ hb_ی پیوی)
+    if _q and _q.data == "hb_duel_vote":
+        _chat = update.effective_chat.id if update.effective_chat else None
+        _g2 = gs(_chat) if _chat else None
+        if _g2 is None or _q.from_user.id != _g2.god_id:
+            await safe_q_answer(_q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        if not (getattr(_g2, "hb_duel_pending", []) or []):
+            await safe_q_answer(_q, "رأی‌گیری قبلاً شروع شده.", show_alert=True)
+            return
+        await safe_q_answer(_q)
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=_chat,
+                                                    message_id=_q.message.message_id,
+                                                    reply_markup=None)
+        except Exception:
+            pass
+        await _hb_duel_vote_start(ctx, _chat, _g2)
+        return
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
                                               "gm_", "sh_", "my_")):
@@ -18190,6 +18264,9 @@ async def shuffle_and_assign(
         else:
             g.seat_sides[_seat] = "شهر"
 
+    # ⏰ ساعتِ شروعِ بازی = لحظهٔ پخشِ نقش‌ها
+    g.game_start_ts = datetime.now(timezone.utc).timestamp()
+
     # 🔄 نقش‌های جدید = صفرشدنِ هرچه به نقش/سایدِ قبلی وابسته بود
     #    (بارِ اول همه‌چیز خالی است و بی‌اثر؛ در رندوم/پخشِ مجدد ریستِ واقعی است)
     g.chaos_auto = False
@@ -18247,8 +18324,10 @@ async def shuffle_and_assign(
     g.memar_used = False
     g.hb_card_seat = None
     g.hb_card_start = None
+    g.hb_card_dir = 1
     g.hb_duel_used = False
     g.hb_duel_pick_wait = False
+    g.hb_duel_pending = []
     g.nem_deng_button_used = False
     g.nem_deng_active = False
     g.nem_deng_stage = 0
