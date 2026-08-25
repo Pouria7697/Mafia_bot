@@ -8725,10 +8725,11 @@ async def _hb_open_shadow(ctx, chat_id, g):
             await _hb_open_mafia(ctx, chat_id, g)
         return
     suid = g.seats[sh][0]
-    protected = getattr(g, "night_hb_hero", None)
+    # ⚠️ محافظت‌شدهٔ قهرمان عمداً از لیست حذف «نمی‌شود» — وگرنه سایه می‌فهمد
+    #    قهرمان روی چه کسی است. اگر او را بزند، اکت بی‌صدا بی‌اثر می‌شود.
     targets = [s for s in _alive_seats(g)
                if s not in _mafia_seats(g, alive_only=True)
-               and s != protected and s != _hb_shadow_blocked(g)]
+               and s != _hb_shadow_blocked(g)]
     kb = _kb_night_seats(targets, g, "hb_sh_",
                          selected=g.night_sel.get(suid), confirm_cb="hb_sh_ok")
     rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("🚫 امشب سایه نمی‌اندازم",
@@ -9152,7 +9153,14 @@ async def handle_hanibal_callback(update, ctx):
         if s == _hb_shadow_blocked(g):   # کیبوردِ کهنه
             await safe_q_answer(q, "دیشب روی همین نفر سایه انداختی — امشب نمی‌شود.", show_alert=True)
             return
-        g.night_hb_shadow = s
+        _prot = getattr(g, "night_hb_hero", None)
+        if _prot is not None and s == _prot:
+            # 🛡 به محافظت‌شدهٔ قهرمان خورد — بی‌اثر، ولی سایه چیزی نمی‌فهمد
+            g.night_hb_shadow = None
+            await _night_report(ctx, g, f"🛡 سایه به محافظت‌شدهٔ قهرمان ({_room_who(g, s)}) خورد — "
+                                        "بی‌اثر شد؛ سایه نمی‌داند (فقط تو می‌دانی).")
+        else:
+            g.night_hb_shadow = s
         g.hb_shadow_last = s
         g.hb_shadow_last_night = g.night_number
         g.night_sel.pop(uid, None)
@@ -9171,10 +9179,9 @@ async def handle_hanibal_callback(update, ctx):
             return
         g.night_sel[uid] = s
         store.save()
-        protected = getattr(g, "night_hb_hero", None)
         targets = [x for x in _alive_seats(g)
                    if x not in _mafia_seats(g, alive_only=True)
-                   and x != protected and x != _hb_shadow_blocked(g)]
+                   and x != _hb_shadow_blocked(g)]
         kb = _kb_night_seats(targets, g, "hb_sh_", selected=s, confirm_cb="hb_sh_ok")
         rows = list(kb.inline_keyboard) + [[InlineKeyboardButton("🚫 امشب سایه نمی‌اندازم",
                                                                  callback_data="hb_sh_skip")]]
