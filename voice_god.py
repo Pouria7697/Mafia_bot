@@ -241,6 +241,11 @@ async def _pump(proc):
                 except Exception:
                     _state["info"] = {}
                 _state["ready"] = True
+                # 🎥 کارگرِ تازه از ضبط‌های در جریان خبر ندارد — دوباره بگو
+                for _c, _st in _rec_games.items():
+                    _send({"cmd": "rec_watch", "chat": _c, **_st})
+                while _rec_finishes:
+                    _send(_rec_finishes.pop(0))
                 if _state["ready_evt"]:
                     _state["ready_evt"].set()
             elif line.startswith("@@FAILED"):
@@ -338,6 +343,49 @@ async def leave(chat_id: int):
     if not _state["ready"]:
         return
     _send({"cmd": "leave", "chat": int(chat_id)})
+
+
+# ─── 🎥 ضبطِ بازی ───────────────────────────────────────────
+# اکانتِ صوتی خودش ضبطِ تلگرام را باز و بسته می‌کند؛ چون بازکنندهٔ ضبط است،
+# فایلِ همهٔ پارت‌ها (حتی وقتی نتِ گاد مایک را می‌بندد) به Saved Messages
+# خودش می‌رسد و بعد از اتمامِ بازی یک‌جا زیرِ لیستِ چنلِ آرشیو فرستاده می‌شود.
+_rec_games: dict[int, dict] = {}     # chat → {"title","since"} بازی‌های زیرِ نظر
+_rec_finishes: list[dict] = []       # پایان‌هایی که موقعِ نبودنِ کارگر صف شدند
+
+
+def record_watch(chat_id: int, title: str, since=None):
+    """🎥 شروعِ بازی: برو رویِ مایک، ضبط را روشن کن و تا «اتمام بازی» هوایِ
+    باز/بسته‌شدنِ مایک را داشته باش (هر بازشدن = پارتِ تازه با «ادامه …»)."""
+    if not enabled():
+        return
+    chat_id = int(chat_id)
+    # پخشِ مجددِ نقش‌ها وسطِ همان بازی → قدیمی‌ترین لحظهٔ شروع معتبر می‌ماند
+    cand = [float(since)] if since else []
+    prev = _rec_games.get(chat_id)
+    if prev:
+        cand.append(prev["since"])
+    st = {"title": str(title), "since": min(cand) if cand else time.time()}
+    _rec_games[chat_id] = st
+    if _state["ready"]:
+        _send({"cmd": "rec_watch", "chat": chat_id, **st})
+
+
+def record_finish(chat_id: int, channel):
+    """🏁 اتمامِ بازی: ضبط بسته، از مایک پایین، همهٔ پارت‌ها → چنل (زیرِ لیست)."""
+    st = _rec_games.pop(int(chat_id), None)
+    if st is None:
+        return
+    cmd = {"cmd": "rec_finish", "chat": int(chat_id), "channel": channel, **st}
+    if _state["ready"]:
+        _send(cmd)
+    else:
+        _rec_finishes.append(cmd)    # کارگر که برگشت، فرستاده می‌شود
+
+
+def record_abort(chat_id: int):
+    """🚮 ریستِ وسطِ بازی: ضبط بسته و از مایک پایین — بدونِ ارسال به چنل."""
+    if _rec_games.pop(int(chat_id), None) is not None and _state["ready"]:
+        _send({"cmd": "rec_abort", "chat": int(chat_id)})
 
 
 async def stop():

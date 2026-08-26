@@ -41,6 +41,15 @@ except Exception as _e:
 
         @staticmethod
         def ready(): return False
+
+        @staticmethod
+        def record_watch(*a, **k): pass
+
+        @staticmethod
+        def record_finish(*a, **k): pass
+
+        @staticmethod
+        def record_abort(*a, **k): pass
     voice_god = _VoiceStub()
 
 # --- CALLBACK DATA CONSTANTS ---
@@ -176,9 +185,13 @@ def save_active_groups(active_groups: set[int]) -> bool:
 # ⚔️ تنظیم‌های سناریو «شاهنامه» (موتورش پایین‌تر است؛ اینجا چون در GameState لازم‌اند)
 SH_SIMORGH_FEATHERS = 5     # 🪶 کلِ پرهای سیمرغ در یک بازی
 SH_SIMORGH_PER_NIGHT = 2    # 🪶 حداکثر پر در یک شب
-# ⏳ ثانیه تا اعلامِ سایدِ کسی که خارج شد — مشترکِ همهٔ سناریوها
-# (بلنداست تا وسطِ وصیتِ طرف نیفتد)
-SIDE_ANNOUNCE_DELAY = 75
+# ⏳ ثانیه تا اعلامِ سایدِ کسی که خارج شد — مشترکِ همهٔ سناریوها و هر دو ساید
+SIDE_ANNOUNCE_DELAY = 55
+
+
+def _side_delay(side) -> int:
+    """⏳ مکث تا خواندنِ ساید — برای همه یکسان (۵۵ ثانیه)."""
+    return SIDE_ANNOUNCE_DELAY
 SH_BOW_DEFENSE_DELAY = 60   # ⏳ ثانیه‌ی دفاعِ هدفِ کمان، تا بعدش دکمه‌های تصمیم بیاید
 SH_VOTE_THRESHOLD = 4       # 🗳 حدنصابِ ورود به رأی‌گیریِ نهایی (وقتی مبارزه‌ای شکل نگرفته)
 
@@ -627,6 +640,7 @@ class GameState:
         self.awaiting_rerandom_decision = getattr(self, "awaiting_rerandom_decision", False)
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
         self.game_start_ts = getattr(self, "game_start_ts", None)   # ⏰ لحظهٔ پخشِ نقش‌ها
+        self.rec_title = getattr(self, "rec_title", None)   # 🎥 اسمِ ضبطِ این بازی («ایونت N»)
 
 
 class Store:
@@ -5075,6 +5089,13 @@ async def announce_winner(ctx, update, g: GameState):
     except Exception as e:
         print("⚠️ archive to channel:", e)
 
+    # 🎥 پایانِ ضبط: بسته می‌شود، اکانت از مایک پایین می‌آید و همهٔ پارت‌ها
+    #    (بعد از اینکه تلگرام فایلِ آخر را ساخت) زیرِ همین لیست به چنل می‌روند
+    try:
+        voice_god.record_finish(chat.id, get_archive_channel())
+    except Exception as e:
+        print("⚠️ record_finish:", e)
+
     # 🔗 پایان بازی: پاک‌سازی اتاق مافیا (حذف همه + باطل‌کردن لینک)
     await _room_cleanup(ctx, g)
 
@@ -6756,6 +6777,16 @@ async def _resolve_baazpors(ctx, chat_id, g):
 
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
 
+    # 🧑‍⚖️ اعلامِ خودکارِ بازپرسیِ امروز — بعد از اعلامِ کشته‌های شب، که گاد
+    #    لازم نباشد خودش بگوید بین چه کسانی است
+    bt_day = sorted(t for t in bt if t in g.seats and t not in (g.striked or set()))
+    if (getattr(g, "baazpors_used", False) and len(bt_day) == 2
+            and g.phase not in ("idle", "ended")):
+        await ctx.bot.send_message(
+            chat_id,
+            f"🧑‍⚖️ بازپرسیِ امروز بین صندلیِ <b>{bt_day[0]}</b> و <b>{bt_day[1]}</b> است.",
+            parse_mode="HTML")
+
 
 async def _resolve_nemayande(ctx, chat_id, g):
     dead, reasons, zereh = set(), {}, []
@@ -7081,12 +7112,12 @@ async def _baz_duel_count(ctx, chat_id, g):
     _bzp_hunter_day_exit(ctx, chat_id, g, loser)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
     _hb_day_exit(ctx, chat_id, g, loser)           # 🧬 بافتِ هانیبال → ۹۰ ثانیه بعد
 
-    # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (مافیا ۵۰، بقیه ۷۵ ثانیه)
     _lside = _sc_side(g, loser)
 
     async def _side_after_will():
         try:
-            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
+            await asyncio.sleep(_side_delay(_lside))
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(
@@ -11283,12 +11314,12 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
                                 f"(جنگی — خارج شد، {_sc_side(g, target)})")
     await _check_auto_end(ctx, chat_id, g)   # 🏁
 
-    # ⏳ ساید بعد از وصیت اعلام می‌شود (۷۵ ثانیه بعد)
+    # ⏳ ساید بعد از وصیت اعلام می‌شود (مافیا ۵۰، بقیه ۷۵ ثانیه)
     _tside = _sc_side(g, target)
 
     async def _tk_side_later():
         try:
-            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
+            await asyncio.sleep(_side_delay(_tside))
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(
@@ -11524,7 +11555,7 @@ async def _kp_gun_resolve(ctx, chat_id, g, opt):
 
         async def _kp_side_later():
             try:
-                await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
+                await asyncio.sleep(_side_delay(_lside))
                 if g.phase in ("idle", "ended"):
                     return
                 await ctx.bot.send_message(chat_id, f"ساید {target}. {_tn}: <b>{_lside}</b>",
@@ -15929,7 +15960,7 @@ async def _sh_arrow_fire(ctx, chat_id, g, shooter, target):
 
     async def _sh_side_later():
         try:
-            await asyncio.sleep(SIDE_ANNOUNCE_DELAY)
+            await asyncio.sleep(_side_delay(_tside))
             if g.phase in ("idle", "ended"):
                 return
             await ctx.bot.send_message(chat_id, f"ساید {target}. {tname}: <b>{_tside}</b>",
@@ -18267,6 +18298,15 @@ async def shuffle_and_assign(
     # ⏰ ساعتِ شروعِ بازی = لحظهٔ پخشِ نقش‌ها
     g.game_start_ts = datetime.now(timezone.utc).timestamp()
 
+    # 🎥 اکانتِ صوتی می‌رود رویِ مایک و ضبطِ تلگرام را باز می‌کند («ایونت N»)؛
+    #    تا اتمامِ بازی هر بار مایک بسته/باز شود، پارتِ تازه («ادامه …») ضبط می‌شود
+    try:
+        _ev = int(get_event_numbers().get(str(chat_id), 1))
+        g.rec_title = f"ایونت {_ev}".translate(_FA_OUT)
+        voice_god.record_watch(chat_id, g.rec_title, since=g.game_start_ts)
+    except Exception as _rw_e:
+        print("⚠️ record_watch:", _rw_e)
+
     # 🔄 نقش‌های جدید = صفرشدنِ هرچه به نقش/سایدِ قبلی وابسته بود
     #    (بارِ اول همه‌چیز خالی است و بی‌اثر؛ در رندوم/پخشِ مجدد ریستِ واقعی است)
     g.chaos_auto = False
@@ -18986,6 +19026,12 @@ async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = Non
             await _room_cleanup(ctx, old)
         except Exception:
             pass
+
+    # 🎥 اگر ضبطی از بازیِ نیمه‌کاره در جریان است، بی‌سروصدا بسته شود (بدونِ ارسال به چنل)
+    try:
+        voice_god.record_abort(chat_id)
+    except Exception:
+        pass
 
     # 🔄 بارگذاری نام‌ها (خطای خواندن نباید باعثِ نوشتنِ دادهٔ خالی شود)
     usernames = load_usernames_from_gist()
@@ -21920,6 +21966,14 @@ async def main():
     # 🎙 صداهای سفارشی را در پس‌زمینه از تلگرام برگردان (دیسکِ رندر پاک‌شدنی است)
     if voice_god.ready():
         asyncio.create_task(_voice_custom_restore(app.bot))
+        # 🎥 اگر وسطِ بازی دیپلوی/ری‌استارت شد، نگهبانیِ ضبطِ بازی‌های در جریان برگردد
+        for _rc, _rg in store.games.items():
+            try:
+                if (getattr(_rg, "rec_title", None) and getattr(_rg, "game_start_ts", None)
+                        and getattr(_rg, "phase", None) != "ended"):
+                    voice_god.record_watch(_rc, _rg.rec_title, since=_rg.game_start_ts)
+            except Exception as _re:
+                print("⚠️ record re-arm:", _re)
 
     # 🌐 ساخت aiohttp برای وب‌هوک
     from aiohttp import web
