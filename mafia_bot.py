@@ -409,6 +409,7 @@ class GameState:
         self.nem_guard_target = getattr(self, "nem_guard_target", None)
         self.nem_yaghi_used = getattr(self, "nem_yaghi_used", False)
         self.nem_yaghi_asking = getattr(self, "nem_yaghi_asking", False)     # [اول، دوم] منتظرِ تأیید در «باز»
+        self.night_open_warned = getattr(self, "night_open_warned", False)   # 🚦 اخطارِ «اول باز، بعد شب»
         # ── 🏅 امتیازدهی (نسخه‌ی تستی) ──
         self.score_events = getattr(self, "score_events", {}) or {}          # seat → [(cat, pts, reason)]
         self.score_kicked = getattr(self, "score_kicked", set()) or set()
@@ -1034,9 +1035,11 @@ async def _broadcast_season_end(bot, text: str, first_chat_id=None):
 
 
 def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
-                        group_title=None, date_str=None):
+                        group_title=None, date_str=None,
+                        chat_id=None, event_num=None):
     """بعد از پایان بازی، آمار هر بازیکن را بر اساس ساید و نتیجه به‌روز می‌کند (+ امتیاز کل + تاریخچه).
-    اگر فصل تمام شود (صدرنشین ≥ ۲۰۰۰)، متنِ اعلانِ مدال‌ها را برمی‌گرداند."""
+    اگر فصل تمام شود (صدرنشین ≥ ۲۰۰۰)، متنِ اعلانِ مدال‌ها را برمی‌گرداند.
+    با chat_id/event_num سندِ رویداد هم ثبت می‌شود (برای «حذف رویداد N»)."""
     season_msg = None
     g.stats_save_error = None
     try:
@@ -1050,6 +1053,7 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                                   "پاک نشود، هیچ‌چیز ذخیره نشد.")
             return None
         hist_rows = []
+        led_rows = []   # 🗑 سندِ اثرِ این بازی روی هر بازیکن (برای «حذف رویداد N»)
 
         for seat in sorted(g.seats):
             uid, name = g.seats[seat]
@@ -1078,6 +1082,8 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
             # کی‌آس هیچ تأثیری روی برد ندارد؛ مافیای داخل کی‌آس هم اگر مافیا ببرد برنده است
             won = (side == g.winner_side)
             hist_rows.append((uid, side, won))
+            led_row = {"u": uid, "s": side, "w": 1 if won else 0}
+            led_rows.append(led_row)
 
             key = str(uid)
             p = stats.get(key, {
@@ -1110,6 +1116,7 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                         p["score_citizen_games"] = int(p.get("score_citizen_games", 0) or 0) + 1
                         if won:
                             p["score_citizen_wins"] = int(p.get("score_citizen_wins", 0) or 0) + 1
+                    led_row["sc"] = _tot   # 🗑 در سند: امتیازِ این بازی هم برگشت‌پذیر باشد
                 except Exception:
                     pass
 
@@ -1161,8 +1168,12 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                 for _u, _s, _w in hist_rows:
                     k = str(_u)
                     lst = hist.get(k, [])
-                    lst.append({"d": date_str or "—", "g": group_title or "—",
-                                "s": _s, "w": 1 if _w else 0})
+                    _row = {"d": date_str or "—", "g": group_title or "—",
+                            "s": _s, "w": 1 if _w else 0}
+                    if chat_id is not None and event_num is not None:
+                        _row["c"] = int(chat_id)      # 🗑 نشانیِ رویداد — برای «حذف رویداد N»
+                        _row["e"] = int(event_num)
+                    lst.append(_row)
                     hist[k] = lst[-50:]   # سقفِ ۵۰ بازیِ اخیر برای هر نفر
                 if not save_game_history(hist):
                     raise RuntimeError("نوشتنِ تاریخچه ناموفق بود")
@@ -1170,6 +1181,26 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
                 print("❌ game history save:", _e)
                 g.stats_save_error = ((g.stats_save_error or "")
                                       + " | تاریخچهٔ «بازی من» هم ثبت نشد.").strip(" |")
+
+        # 🗑 سندِ این رویداد — تا مدیرِ اصلی بتواند با «حذف رویداد N» برش گرداند
+        if chat_id is not None and event_num is not None:
+            try:
+                led = load_game_ledger()
+                if led is None:
+                    raise RuntimeError("خواندنِ سندِ رویدادها ناموفق بود")
+                ck = str(chat_id)
+                ent = led.get(ck, {}) or {}
+                ent[str(int(event_num))] = {"d": date_str or "—", "g": group_title or "—",
+                                            "god": int(g.god_id or 0), "p": led_rows}
+                # 📦 سقف: فقط ۴۰ رویدادِ اخیرِ هر گروه سند دارد
+                if len(ent) > 40:
+                    for _old in sorted(ent, key=lambda x: int(x))[:len(ent) - 40]:
+                        ent.pop(_old, None)
+                led[ck] = ent
+                if not save_game_ledger(led):
+                    raise RuntimeError("نوشتنِ سندِ رویدادها ناموفق بود")
+            except Exception as _le:
+                print("❌ game ledger save:", _le)
     except Exception as e:
         print("❌ update_player_stats error:", e)
         g.stats_save_error = f"خطای غیرمنتظره در ثبتِ آمار: {e}"
@@ -1634,6 +1665,229 @@ def format_game_history(rows: list) -> str:
         lines.append(f"{i}. {r.get('d', '—')} — {escape(str(r.get('g', '—')), quote=False)} — "
                      f"{side_ico.get(r.get('s'), '▫️')} {r.get('s', '—')} — {res}")
     return "\n".join(lines)
+
+
+# ─── 🗑 سندِ رویدادها — برای «حذف رویداد N» ──────────────────────
+# هر بازی که تمام می‌شود، اثرش روی آمار/امتیازِ تک‌تکِ بازیکنان اینجا سند
+# می‌شود تا اگر بازی‌ای «الکی» بود، مدیرِ اصلی بتواند دقیقاً همان را برگرداند.
+LEDGER_FILENAME = "game_ledger.json"
+
+
+def load_game_ledger() -> dict | None:
+    try:
+        url = f"https://api.github.com/gists/{GIST_ID}"
+        headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+        r = httpx.get(url, headers=headers)
+        if r.status_code != 200:
+            print("❌ game_ledger fetch failed:", r.status_code)
+            return None   # ⚠️ خطا ≠ «خالی»
+        f = (r.json().get("files", {}) or {}).get(LEDGER_FILENAME)
+        if not f:
+            return {}     # فایل واقعاً وجود ندارد (اولین بار)
+        import json as _json
+        return _json.loads(f.get("content") or "{}") or {}
+    except Exception as e:
+        print("❌ load_game_ledger:", e)
+        return None
+
+
+def save_game_ledger(led: dict) -> bool:
+    """⚠️ برخلافِ آمار، سندِ خالی هم ذخیره می‌شود — حذفِ آخرین سند هم باید نوشته شود."""
+    import json as _json
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+    data = {"files": {LEDGER_FILENAME: {"content": _json.dumps(led, ensure_ascii=False)}}}
+    for attempt in (1, 2):
+        try:
+            r = httpx.patch(url, headers=headers, json=data)
+            if getattr(r, "status_code", 0) in (200, 201):
+                return True
+            print(f"❌ save_game_ledger failed (تلاش {attempt}):",
+                  getattr(r, "status_code", "?"))
+        except Exception as e:
+            print(f"❌ save_game_ledger error (تلاش {attempt}):", e)
+    return False
+
+
+_DELEV_RE = re.compile(r"^حذف\s+(?:رویداد|ایونت)\s*[:#]?\s*(\d{1,7})$")
+
+
+def _parse_del_event_text(text):
+    """«حذف رویداد ۱۲» / «حذف ایونت 12» → شماره؛ وگرنه None. (_FA_DIGITS پایین‌تر تعریف شده)"""
+    t = " ".join(str(text or "").split()).translate(_FA_DIGITS)
+    m = _DELEV_RE.match(t)
+    return int(m.group(1)) if m else None
+
+
+def _stat_dec(p: dict, key: str, amt=1, fl=False):
+    """کم‌کردنِ امنِ یک شمارنده — هیچ‌وقت منفی نمی‌شود (مثلاً اگر وسطش فصل ریست شده باشد)."""
+    try:
+        if fl:
+            p[key] = round(max(0.0, float(p.get(key, 0) or 0) - float(amt)), 1)
+        else:
+            p[key] = max(0, int(p.get(key, 0) or 0) - int(amt))
+    except Exception:
+        pass
+
+
+async def _del_event_prompt(ctx, msg, event_num: int):
+    """🗑 پیش‌نمایش و دکمهٔ تأیید برای حذفِ آمار/امتیاز/تاریخچهٔ یک رویدادِ همین گروه."""
+    led = load_game_ledger()
+    if led is None:
+        await msg.reply_text("⚠️ سندِ رویدادها از گیست خوانده نشد — کمی بعد دوباره امتحان کن.")
+        return
+    ent = (led.get(str(msg.chat.id)) or {}).get(str(int(event_num)))
+    if not ent:
+        await msg.reply_text(
+            f"ℹ️ برای رویداد {event_num} در این گروه سندی نیست — یا قبلاً حذف شده، "
+            f"یا مالِ قبل از این قابلیت است (فقط بازی‌های جدید سند دارند).")
+        return
+    rows = ent.get("p", []) or []
+    tot = round(sum(float(r.get("sc", 0) or 0) for r in rows), 1)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑 حذف کن", callback_data=f"delev_ok_{int(event_num)}"),
+        InlineKeyboardButton("❌ بی‌خیال", callback_data="delev_no"),
+    ]])
+    await msg.reply_text(
+        f"🗑 حذفِ <b>رویداد {event_num}</b> این گروه؟\n"
+        f"📅 {ent.get('d', '—')} | 👥 {len(rows)} بازیکن | 🏅 مجموعِ امتیاز: {tot}\n"
+        f"بازی/برد، امتیازها و تاریخچهٔ همین رویداد از آمارِ همه کم می‌شود.\n"
+        f"(اگر با این بازی فصلی بسته شده باشد، مدال‌هایش برنمی‌گردد)",
+        parse_mode="HTML", reply_markup=kb)
+
+
+async def _del_event_apply(ctx, q, chat_id: int, event_num: int):
+    """🗑 اجرای حذف: دقیقاً برعکسِ همان چیزی که update_player_stats اضافه کرده بود."""
+    led = load_game_ledger()
+    if led is None:
+        await safe_q_answer(q, "⚠️ گیست خوانده نشد — دوباره امتحان کن.", show_alert=True)
+        return
+    ck = str(chat_id)
+    ent = (led.get(ck) or {}).get(str(int(event_num)))
+    if not ent:
+        try:
+            await q.edit_message_text(f"ℹ️ رویداد {event_num} سندی ندارد (شاید همین حالا حذف شد).")
+        except Exception:
+            pass
+        return
+    stats = load_player_stats()
+    if stats is None:
+        await safe_q_answer(q, "⚠️ آمار از گیست خوانده نشد — هیچ‌چیز حذف نشد.", show_alert=True)
+        return
+    rows = ent.get("p", []) or []
+    for row in rows:
+        p = stats.get(str(row.get("u")))
+        if not p:
+            continue
+        side, won = row.get("s"), bool(row.get("w"))
+        _stat_dec(p, "games")
+        if won:
+            _stat_dec(p, "wins")
+        if side == "مافیا":
+            _stat_dec(p, "mafia_games")
+            if won:
+                _stat_dec(p, "mafia_wins")
+        elif side == "مستقل":
+            _stat_dec(p, "indep_games")
+            if won:
+                _stat_dec(p, "indep_wins")
+        else:
+            _stat_dec(p, "citizen_games")
+            if won:
+                _stat_dec(p, "citizen_wins")
+        if "sc" in row:
+            _sc = float(row.get("sc") or 0)
+            _stat_dec(p, "score_total", _sc, fl=True)
+            _stat_dec(p, "score_games")
+            if won:
+                _stat_dec(p, "score_wins")
+            if side == "مافیا":
+                _stat_dec(p, "score_mafia", _sc, fl=True)
+                _stat_dec(p, "score_mafia_games")
+                if won:
+                    _stat_dec(p, "score_mafia_wins")
+            elif side == "شهر":
+                _stat_dec(p, "score_citizen", _sc, fl=True)
+                _stat_dec(p, "score_citizen_games")
+                if won:
+                    _stat_dec(p, "score_citizen_wins")
+    _god = str(ent.get("god") or "")
+    if _god in stats:
+        _stat_dec(stats[_god], "god_games")
+    if not save_player_stats(stats):
+        await safe_q_answer(q, "⚠️ نوشتنِ آمار روی گیست ناموفق بود — هیچ‌چیز حذف نشد.",
+                            show_alert=True)
+        return
+    # 🎮 تاریخچهٔ «بازی من»: ردِ همین رویداد از هر بازیکن پاک می‌شود
+    n_hist = 0
+    try:
+        hist = load_game_history()
+        if hist:
+            for row in rows:
+                lst = hist.get(str(row.get("u")))
+                if not lst:
+                    continue
+                for i in range(len(lst) - 1, -1, -1):
+                    r = lst[i]
+                    if (r.get("c") == chat_id
+                            and str(r.get("e", "")) == str(int(event_num))):
+                        lst.pop(i)
+                        n_hist += 1
+                        break
+            if n_hist and not save_game_history(hist):
+                n_hist = 0
+    except Exception as _he:
+        print("❌ del event history:", _he)
+    # 🗂 سند مصرف شد — که دوبار حذف نشود
+    led_warn = ""
+    (led.get(ck) or {}).pop(str(int(event_num)), None)
+    if not led.get(ck):
+        led.pop(ck, None)
+    if not save_game_ledger(led):
+        led_warn = "\n⚠️ سندش پاک نشد — دیگر «حذف رویداد» را برای همین شماره نزن!"
+    # 🔢 اگر همین آخرین رویدادِ گروه بود، شمارنده هم برگردد تا بازیِ بعدی همین شماره را بگیرد
+    num_note = ""
+    try:
+        nums = get_event_numbers()
+        if int(nums.get(ck, 1)) == int(event_num) + 1:
+            nums[ck] = int(event_num)
+            if save_event_numbers(nums):
+                num_note = f"\n🔢 بازیِ بعدی دوباره رویداد {event_num} می‌شود."
+            else:
+                num_note = "\n⚠️ برگرداندنِ شمارهٔ رویداد روی گیست ننشست."
+        else:
+            num_note = "\n🔢 شمارهٔ رویدادها دست نخورد (بعد از این رویداد، بازیِ جدیدتری ثبت شده)."
+    except Exception as _ne:
+        print("❌ del event number rollback:", _ne)
+    try:
+        await q.edit_message_text(
+            f"✅ رویداد {event_num} حذف شد — آمار و امتیازِ {len(rows)} بازیکن برگشت"
+            + (f" و {n_hist} ردِ تاریخچه پاک شد." if n_hist else ".") + led_warn + num_note)
+    except Exception:
+        pass
+
+
+async def handle_del_event_callback(update, ctx):
+    """🗑 دکمه‌های تأیید/انصرافِ «حذف رویداد» — فقط مدیرِ اصلیِ بات (ADMIN_ID)."""
+    q = update.callback_query
+    if not q or not q.message:
+        return
+    if q.from_user.id != ADMIN_ID:
+        await safe_q_answer(q, "⛔ فقط مدیرِ اصلیِ بات.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    if q.data == "delev_no":
+        try:
+            await q.edit_message_text("❌ حذفِ رویداد منتفی شد.")
+        except Exception:
+            pass
+        return
+    if q.data.startswith("delev_ok_"):
+        try:
+            _ev = int(q.data[len("delev_ok_"):])
+        except Exception:
+            return
+        await _del_event_apply(ctx, q, q.message.chat.id, _ev)
 
 
 # ═══════════ 🔀 انتقالِ آمارِ یک بازیکن به آیدیِ جدید ═══════════
@@ -3930,8 +4184,17 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
     if _is_nemayande_scenario(g):
         lt = getattr(g, "night_lawyer_target", None)
         if lt in qualified:
-            qualified.remove(lt)
-            lawyer_seat = lt
+            # 💻 اگر هکر همان شب اکتِ وکیل را روی همین موکل بسته باشد،
+            #    وکالت به او نرسیده → مثلِ بقیه واردِ دفاع می‌شود (گروه چیزی نمی‌فهمد)
+            _law = _find_seat_role_sub(g, _R_LAWYER, alive_only=False)
+            if (_law is not None
+                    and getattr(g, "night_hacker_actor", None) == _law
+                    and getattr(g, "night_hacker_target", None) == lt):
+                await _night_report(ctx, g, f"💻 وکالتِ <b>{lt}</b> دیشب هک شده بود → بی‌اثر؛ "
+                                            f"واردِ دفاع می‌شود (فقط تو می‌دانی).")
+            else:
+                qualified.remove(lt)
+                lawyer_seat = lt
 
     if not qualified and lawyer_seat is None:
         await ctx.bot.send_message(chat_id, f"ℹ️ هیچ‌کس به حدنصاب دفاعیه ({thr} رأی) نرسید.")
@@ -5015,7 +5278,8 @@ async def announce_winner(ctx, update, g: GameState):
 
     # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل + چکِ پایانِ فصل)
     season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
-                                     group_title=group_title, date_str=date_str)
+                                     group_title=group_title, date_str=date_str,
+                                     chat_id=chat.id, event_num=event_num)
 
     # ⚠️ اگر ثبتِ آمار شکست خورد، بی‌صدا رد نشو — به گاد و سازندهٔ بات خبر بده
     _serr = getattr(g, "stats_save_error", None)
@@ -5693,6 +5957,7 @@ async def start_night(ctx, chat_id, g):
     g.maarefe_active = False
     g.phase = "playing"   # برگرداندنِ فاز از حالت‌های رأی‌گیریِ روز
     g.night_number = (g.night_number or 0) + 1
+    g.night_open_warned = False   # 🚦 اخطارِ «اول باز، بعد شب» مالِ روزِ قبل بود
     g.night_is_negotiation = False
     g.night_negotiation_target = None
     g.night_shot_target = None
@@ -6936,6 +7201,52 @@ async def _do_room_open(ctx, chat_id, g):
             await publish_seating(ctx, chat_id, g, mode=CTRL)   # 🔄 برچسبِ دکمه‌ی قفل
         except Exception:
             pass
+    # 🚦 «باز» زده شد → اخطارِ قبلیِ «اول باز، بعد شب» از نو حساب می‌شود
+    g.night_open_warned = False
+    store.save()
+
+
+def _room_open_pending(g):
+    """⏸ چیزی منتظرِ دکمهٔ «باز» است؟ برچسبش را برگردان (وگرنه None).
+    آینه‌ی همان شرط‌های داخلِ _do_room_open."""
+    try:
+        if _is_gamer_scenario(g) and getattr(g, "gm_bomb_seat", None):
+            if _find_seat_by_role(g, _R_ELLIOT) and g.gm_bomb_seat in g.seats:
+                return "سؤالِ بمب از الیوت"
+        if (_is_kapu_scenario(g) and getattr(g, "assigned_roles", None)
+                and not getattr(g, "kp_trust", None)):
+            _kres = getattr(g, "kp_deng_result", None)
+            if ((_kres is not None and _kres in g.seats and _kres not in (g.striked or set()))
+                    or getattr(g, "kp_need_manual", False)):
+                return "تأیید/انتخابِ معتمدِ کاپو"
+        if (_is_nemayande_scenario(g) and getattr(g, "assigned_roles", None)
+                and g.night_number == 0 and not getattr(g, "nem_ding_used", False)):
+            if not (g.nem_reps or []) or getattr(g, "nem_awaiting_ding", False):
+                return "دنگِ نمایندگی (روزِ اول)"
+        if (_is_shahname_scenario(g) and (getattr(g, "sh_duels", []) or [])
+                and not getattr(g, "sh_council_done", False)):
+            return "نظرِ انجمن دربارهٔ مبارزه‌ها"
+    except Exception:
+        pass
+    return None
+
+
+async def _night_blocked_for_open(ctx, chat_id, g) -> bool:
+    """🚦 گاد «شب» زد ولی چیزی منتظرِ «باز» است → یک‌بار جلویش را بگیر و راه را نشان بده.
+    بارِ دوم (اصرارِ گاد) رد می‌شود که هیچ‌وقت بازی قفل نماند."""
+    lbl = _room_open_pending(g)
+    if not lbl:
+        return False
+    if getattr(g, "night_open_warned", False):
+        return False
+    g.night_open_warned = True
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"⏸ <b>شب نکن!</b> بات منتظرِ دکمهٔ «باز» است: <b>{lbl}</b>.\n"
+        f"اول «باز» (شبِ موقت) را بزن؛ اگر مطمئنی می‌خواهی بدونِ آن شب کنی، دوباره «شب» را بزن.",
+        parse_mode="HTML")
+    return True
 
 
 _FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -10314,6 +10625,13 @@ async def _nem_yaghi_apply(ctx, chat_id, g, seat, target):
     g.nem_yaghi_used = True
     grd = _find_seat_by_role(g, _R_GUARD, alive_only=False)
     prot = getattr(g, "nem_guard_target", None)
+    # 💻 اگر هکر دیشب اکتِ محافظ را روی همین محافظت‌شده بسته باشد،
+    #    محافظت به او «نرسیده» → یاغی می‌تواند او را ببرد (مصونیتِ خودِ محافظ سرِ جاست)
+    hacked_prot = (prot is not None and grd is not None
+                   and getattr(g, "night_hacker_actor", None) == grd
+                   and getattr(g, "night_hacker_target", None) == prot)
+    if hacked_prot:
+        prot = None
     empty = ((grd is not None and target == grd)
              or (prot is not None and target == prot))
 
@@ -10333,6 +10651,8 @@ async def _nem_yaghi_apply(ctx, chat_id, g, seat, target):
     await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
     await _night_report(ctx, g, f"💣 یاغی: {seat} → {target} | "
                         + ("دست خالی (محافظ/محافظت‌شده)" if empty else "هر دو خارج"))
+    if hacked_prot and target == getattr(g, "nem_guard_target", None):
+        await _night_report(ctx, g, "💻 (محافظتِ دیشب روی همین فرد هک شده بود → بی‌اثر شد؛ فقط تو می‌دانی)")
     try:
         await publish_seating(ctx, chat_id, g, mode=CTRL)
     except Exception:
@@ -10526,6 +10846,7 @@ async def _nem_trigger_mine(ctx, chat_id, g):
         return
     g.night_mine_handled = True
     store.save()
+    voice_god.say(chat_id, "mine_on")          # 🎙 هم‌زمان با پیویِ بازیکن‌ها
     for s in _alive_seats(g):
         try:
             await ctx.bot.send_message(g.seats[s][0], "💥 امشب مین فعال شد!")
@@ -16419,6 +16740,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_selected_callback(update, ctx)
         return
 
+    # 🗑 تأیید/انصرافِ «حذف رویداد» (مدیرانِ اصلی — داخلِ گروه)
+    if _q and _q.data and _q.data.startswith("delev_"):
+        await handle_del_event_callback(update, ctx)
+        return
+
     # 👢 کیک شب (گاد در پیوی) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith("nkick_"):
         await handle_night_kick_callback(update, ctx)
@@ -17147,7 +17473,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         elif data == "ctl_night":
-            await start_night(ctx, chat, g)
+            if not await _night_blocked_for_open(ctx, chat, g):
+                await start_night(ctx, chat, g)
         elif data == "ctl_day":
             await _do_day(ctx, chat, g)
         else:  # ctl_roomlock
@@ -18615,6 +18942,14 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if await _can_unban(ctx, chat_id, uid):
             await _god_unban_from_reply(ctx, msg, by_uid=uid)
         return   # غیرِ ادمین: بی‌صدا نادیده گرفته می‌شود
+
+    # 🗑 «حذف رویداد N» — فقط مدیرِ اصلی (ADMIN_ID): آمار/امتیاز/تاریخچهٔ همان رویدادِ
+    #    همین گروه برمی‌گردد (برای بازی‌های الکی که فقط برای امتیاز باز و بسته می‌شوند)
+    if uid == ADMIN_ID:
+        _ev_del = _parse_del_event_text(text)
+        if _ev_del is not None:
+            await _del_event_prompt(ctx, msg, _ev_del)
+            return
 
     # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
     if _try_capture_vote(g, msg, uid, text):
@@ -20622,7 +20957,8 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     # 🌙 شروع/پایان اکت‌گیریِ شب (فقط گادِ فعلی)
     if text == "/شب":
         if uid == g.god_id:
-            await start_night(ctx, chat_id, g)
+            if not await _night_blocked_for_open(ctx, chat_id, g):
+                await start_night(ctx, chat_id, g)
         return
 
     if text == "/روز":
@@ -21584,6 +21920,7 @@ VOICE_PHRASE_LABELS = {
     "nato":           "ناتویی",
     "jalad":          "جلادی",
     "maarefe":        "معارفه",
+    "mine_on":        "مین فعال شد",
 }
 _VOICE_PENDING: dict[int, str] = {}        # uid → file_id منتظرِ انتخابِ جمله
 _VOICE_PENDING_VOTE: dict[int, str] = {}   # uid → file_id منتظرِ شمارهٔ صندلی (رأی‌گیری)

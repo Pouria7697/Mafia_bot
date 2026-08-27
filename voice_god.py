@@ -36,7 +36,7 @@ PCM_BYTES_PER_SEC = 48000 * 2          # s16le, mono
 
 # جمله‌های موجود (کلید → فایل)
 PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end",
-           "yakuza", "nato", "jalad", "maarefe")
+           "yakuza", "nato", "jalad", "maarefe", "mine_on")
 
 # 🗳 «رأی‌گیری برای صندلیِ N» — کلیدِ vote_N
 #    سفارشیِ کامل (vote_N) → وگرنه پیشوند (vote_prefix، سفارشی یا پیش‌فرض) + شمارهٔ پیش‌فرض (num_N)
