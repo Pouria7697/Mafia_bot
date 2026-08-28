@@ -427,6 +427,19 @@ class GameState:
         self.baz_duel_votes = getattr(self, "baz_duel_votes", {}) or {}
         self.baz_duel_pair = getattr(self, "baz_duel_pair", []) or []
         self.baz_duel_unread = getattr(self, "baz_duel_unread", set()) or set()
+        # ── 🎩 کلاسیک / کلاسیک‌دن ──
+        self.cl_doc_self = getattr(self, "cl_doc_self", 0)            # 💉 سیوِ خودِ پزشک (سقف ۲ در بازی)
+        self.cl_don_inq = getattr(self, "cl_don_inq", 0)              # 🔎 دفعاتِ استعلامِ دن (بار دوم مثبت)
+        self.cl_vote_active = getattr(self, "cl_vote_active", None)   # 🗳 init | runoff | final
+        self.cl_votes = getattr(self, "cl_votes", {}) or {}           # uid → ([صندلی‌ها], seq)
+        self.cl_vote_unread = getattr(self, "cl_vote_unread", set()) or set()
+        self.cl_vote_seq = getattr(self, "cl_vote_seq", 0)
+        self.cl_vote_kb_mid = getattr(self, "cl_vote_kb_mid", None)
+        self.cl_runoff_cands = getattr(self, "cl_runoff_cands", []) or []
+        self.cl_runoff_fixed = getattr(self, "cl_runoff_fixed", []) or []
+        self.cl_runoff_need = getattr(self, "cl_runoff_need", 0)
+        self.cl_defense = getattr(self, "cl_defense", []) or []       # 🧍 دو نفرِ دفاعِ امروز
+        self.cl_terror_wait = getattr(self, "cl_terror_wait", None)   # 💣 تروریستِ منتظرِ شماره
         self.pending_kicks = getattr(self, "pending_kicks", set()) or set()   # 👢 کیکِ روز (حالتِ انتخاب)
         # 🔥 سوزوندنِ اکت (گاد)
         self.night_burned = getattr(self, "night_burned", set()) or set()
@@ -3403,8 +3416,8 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         InlineKeyboardButton("⚠️ اخطار", callback_data="warn_mode"),
         InlineKeyboardButton("✂️ خط‌زدن", callback_data="strike_out"),
     ])
-    # 📊 میتیک اصلاً استعلامِ وضعیت ندارد → دکمه‌اش نمایش داده نمی‌شود
-    if not _is_mythic_scenario(g):
+    # 📊 میتیک و کلاسیک اصلاً استعلامِ وضعیت ندارند → دکمه‌اش نمایش داده نمی‌شود
+    if not (_is_mythic_scenario(g) or _is_classic_scenario(g)):
         rows.append([InlineKeyboardButton("📊 استعلام وضعیت", callback_data="status_auto")])
 
     rows.extend([
@@ -5532,6 +5545,8 @@ def _mafia_role_set(g):
         return _MY_MAFIA
     if _is_hanibal_scenario(g):
         return _HB_MAFIA
+    if _is_classic_scenario(g):
+        return (_R_DON, _R_CL_TERROR, _R_SIMPLE_MAFIA)
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
@@ -5795,6 +5810,16 @@ def _night_all_done(g) -> bool:
     if _is_takavar_scenario(g):
         return "gunman" in d
 
+    if _is_classic_scenario(g):
+        if "mafia" not in d:
+            return False
+        need = set()
+        if alive(_R_DOCTOR):
+            need.add("doctor")
+        if alive(_R_DETECTIVE):
+            need.add("detective")
+        return need <= d
+
     if _is_neg_scenario(g):
         if "mafia" not in d:
             return False
@@ -5904,7 +5929,7 @@ def _is_manual_scenario(g) -> bool:
     return not (_is_neg_scenario(g) or _is_baazpors_scenario(g) or _is_nemayande_scenario(g)
                 or _is_takavar_scenario(g) or _is_kapu_scenario(g) or _is_gamer_scenario(g)
                 or _is_shahname_scenario(g) or _is_mythic_scenario(g)
-                or _is_hanibal_scenario(g))
+                or _is_hanibal_scenario(g) or _is_classic_scenario(g))
 
 
 async def start_night(ctx, chat_id, g):
@@ -5917,6 +5942,7 @@ async def start_night(ctx, chat_id, g):
     is_sh = _is_shahname_scenario(g)
     is_my = _is_mythic_scenario(g)
     is_hb = _is_hanibal_scenario(g)
+    is_cl = _is_classic_scenario(g)
     # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
     #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
     is_manual = _is_manual_scenario(g)
@@ -5940,6 +5966,16 @@ async def start_night(ctx, chat_id, g):
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    # 🎩 رأی/دفاع/تروریستِ کلاسیک — با آمدنِ شب بسته می‌شود
+    g.cl_vote_active = None
+    g.cl_votes = {}
+    g.cl_vote_unread = set()
+    g.cl_vote_kb_mid = None
+    g.cl_runoff_cands = []
+    g.cl_runoff_fixed = []
+    g.cl_runoff_need = 0
+    g.cl_defense = []
+    g.cl_terror_wait = None
     # 🗳 شمارشِ دنگِ نیمه‌کاره با آمدنِ شب بسته می‌شود (نتیجه‌ی ثبت‌شده می‌ماند)
     g.nem_deng_active = False
     g.nem_deng_votes = {}
@@ -6131,6 +6167,10 @@ async def start_night(ctx, chat_id, g):
             g.night_stage = "hanibal"
             store.save()
             await _hb_open_hero(ctx, chat_id, g)
+        elif is_cl:
+            g.night_stage = "classic"
+            store.save()
+            await _cl_open_all(ctx, chat_id, g)
         else:
             g.night_stage = "robin"
             store.save()
@@ -6811,6 +6851,8 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_mythic(ctx, chat_id, g)
     elif _is_hanibal_scenario(g):
         await _resolve_hanibal(ctx, chat_id, g)
+    elif _is_classic_scenario(g):
+        await _resolve_classic(ctx, chat_id, g)
     else:
         await _resolve_manual(ctx, chat_id, g)
 
@@ -7503,6 +7545,538 @@ async def handle_baz_duel_callback(update, ctx):
         return
 
 
+# ═════════════════════════════════════════════════════════════
+#  🎩 کلاسیک / کلاسیک‌دن
+#  شب: مافیا (شلیک) → پزشک (سیو، خودش حداکثر ۲ بار) → کاراگاه (استعلام)
+#  استعلام: مافیاساده/تروریست مثبت؛ دن بارِ اول منفی و از بارِ دوم مثبت؛ بقیه منفی
+#  روز: رأیِ اولیهٔ «دو شماره‌ای» → دو نفرِ برتر به دفاع (تساوی → رأیِ دوبارهٔ تک‌شماره‌ای)
+#       رأیِ نهاییِ «تک‌شماره‌ای» بینِ آن دو با حدنصابِ همیشگی؛ تساوی → کسی خارج نمی‌شود
+#  تروریست (کلاسیک‌دن): با خروج از رأیِ نهایی، یک شماره می‌نویسد؛ آن فرد بی‌وصیت
+#  با او می‌رود و شب می‌شود
+# ═════════════════════════════════════════════════════════════
+CLASSIC_KEY = "کلاسیک"
+_R_CL_TERROR = _nz("تروریست")
+
+
+def _is_classic_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(CLASSIC_KEY) in _nz(g.scenario.name))
+
+
+def _cl_shooter(g):
+    """🔫 تصمیم‌گیرِ شلیکِ مافیا: دن → تروریست → مافیاساده (اولین زنده)."""
+    return (_find_seat_by_role(g, _R_DON)
+            or _find_seat_by_role(g, _R_CL_TERROR)
+            or _find_seat_by_role(g, _R_SIMPLE_MAFIA))
+
+
+# ─── 🌙 شب — ترتیبِ اکت ندارد: هر سه اکت هم‌زمان باز می‌شوند ───
+async def _cl_open_all(ctx, chat_id, g):
+    await _cl_open_mafia(ctx, chat_id, g)
+    await _cl_open_doctor(ctx, chat_id, g)
+    await _cl_open_detective(ctx, chat_id, g)
+    await _maybe_notify_god_done(ctx, g)   # اگر هیچ‌کدام زنده نبودند، شب همین حالا کامل است
+
+
+async def _cl_open_mafia(ctx, chat_id, g):
+    if "cl_mafia_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("cl_mafia_opened")
+    store.save()
+    shooter = _cl_shooter(g)
+    if shooter is None:
+        g.night_done.add("mafia")
+        store.save()
+        await _night_report(ctx, g, "🔫 مافیایی برای شلیک زنده نیست.")
+        return
+    targets = [s for s in _alive_seats(g) if s != shooter]
+    m = await _safe_pm(ctx, g.seats[shooter][0], "🔫 شلیکِ امشبِ مافیا — چه کسی؟",
+                       _kb_night_seats(targets, g, "cl_shot_", confirm_cb="cl_shot_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[shooter][0]] = m.message_id
+    store.save()
+
+
+async def _cl_open_doctor(ctx, chat_id, g):
+    if "cl_doc_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("cl_doc_opened")
+    store.save()
+    doc = _find_seat_by_role(g, _R_DOCTOR)
+    # 🔥 پزشکِ سوخته/غایب: اکتش «انجام‌شده» است — بدونِ پرامپت
+    if doc is None or "doctor" in (g.night_done or set()):
+        g.night_done.add("doctor")
+        store.save()
+        return
+    self_ok = int(getattr(g, "cl_doc_self", 0) or 0) < 2
+    targets = [s for s in _alive_seats(g) if s != doc or self_ok]
+    note = "" if self_ok else "\n(سهمِ دو سیوِ خودت تمام شده)"
+    m = await _safe_pm(ctx, g.seats[doc][0], "💉 چه کسی را سیو می‌کنی؟" + note,
+                       _kb_night_seats(targets, g, "cl_doc_", confirm_cb="cl_doc_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[doc][0]] = m.message_id
+    store.save()
+
+
+async def _cl_open_detective(ctx, chat_id, g):
+    if "cl_det_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("cl_det_opened")
+    store.save()
+    det = _find_seat_by_role(g, _R_DETECTIVE)
+    # 🔥 کاراگاهِ سوخته/غایب: بدونِ پرامپت
+    if det is None or "detective" in (g.night_done or set()):
+        g.night_done.add("detective")
+        store.save()
+        return
+    targets = [s for s in _alive_seats(g) if s != det]
+    m = await _safe_pm(ctx, g.seats[det][0], "🔎 استعلامِ چه کسی را می‌گیری؟",
+                       _kb_night_seats(targets, g, "cl_det_", confirm_cb="cl_det_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[det][0]] = m.message_id
+    store.save()
+
+
+async def handle_classic_callback(update, ctx):
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
+    g, chat_id = _find_active_night_game(uid, q)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    mid = q.message.message_id if q.message else None
+
+    # ── 🔫 شلیک مافیا ──
+    if data == "cl_shot_ok":
+        if "mafia" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s or s not in g.seats or s in (g.striked or set()):
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_shot_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("mafia")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔫 شلیک به {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🔫 مافیا → شلیک به <b>{s}. {escape(g.seats[s][1], quote=False)}</b>")
+        await _room_note(ctx, g, f"🔫 شلیکِ امشب: <b>{_room_who(g, s)}</b>")
+        return
+
+    if data.startswith("cl_shot_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        sh = _seat_of_uid(g, uid)
+        targets = [x for x in _alive_seats(g) if x != sh]
+        await _edit_pm(ctx, uid, mid, "🔫 شلیکِ امشبِ مافیا — چه کسی؟",
+                       _kb_night_seats(targets, g, "cl_shot_", selected=s, confirm_cb="cl_shot_ok"))
+        return
+
+    # ── 💉 پزشک ──
+    if data == "cl_doc_ok":
+        if "doctor" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s or s not in g.seats or s in (g.striked or set()):
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        doc = _seat_of_uid(g, uid)
+        if s == doc:
+            if int(getattr(g, "cl_doc_self", 0) or 0) >= 2:
+                await safe_q_answer(q, "سهمِ سیوِ خودت (۲ بار) تمام شده.", show_alert=True)
+                return
+            g.cl_doc_self = int(getattr(g, "cl_doc_self", 0) or 0) + 1
+        g.night_doc_saved = [s]
+        g.night_sel.pop(uid, None)
+        g.night_done.add("doctor")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"💉 سیوِ {s}. {g.seats[s][1]} ثبت شد.")
+        _self_note = f" (سیوِ خود: {g.cl_doc_self}/۲)" if s == doc else ""
+        await _night_report(ctx, g, f"💉 پزشک → سیوِ <b>{s}. {escape(g.seats[s][1], quote=False)}</b>{_self_note}")
+        return
+
+    if data.startswith("cl_doc_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        doc = _seat_of_uid(g, uid)
+        self_ok = int(getattr(g, "cl_doc_self", 0) or 0) < 2
+        targets = [x for x in _alive_seats(g) if x != doc or self_ok]
+        await _edit_pm(ctx, uid, mid, "💉 چه کسی را سیو می‌کنی؟",
+                       _kb_night_seats(targets, g, "cl_doc_", selected=s, confirm_cb="cl_doc_ok"))
+        return
+
+    # ── 🔎 کاراگاه ──
+    if data == "cl_det_ok":
+        if "detective" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s or s not in g.seats or s in (g.striked or set()):
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        rn = _seat_role_norm(g, s)
+        if rn == _R_DON:
+            g.cl_don_inq = int(getattr(g, "cl_don_inq", 0) or 0) + 1
+            positive = g.cl_don_inq >= 2
+        else:
+            positive = rn in (_R_SIMPLE_MAFIA, _R_CL_TERROR)
+        res = "مثبت ☑️" if positive else "منفی ✖️"
+        g.night_sel.pop(uid, None)
+        g.night_done.add("detective")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔎 نتیجهٔ استعلامِ {s}. {g.seats[s][1]}: {res}")
+        _don_note = f" (استعلامِ دن: بارِ {g.cl_don_inq})" if rn == _R_DON else ""
+        await _night_report(ctx, g, f"🔎 کاراگاه → استعلامِ <b>{s}. {escape(g.seats[s][1], quote=False)}</b>: "
+                                    f"{res}{_don_note}")
+        await _maybe_notify_god_done(ctx, g)
+        return
+
+    if data.startswith("cl_det_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        det = _seat_of_uid(g, uid)
+        targets = [x for x in _alive_seats(g) if x != det]
+        await _edit_pm(ctx, uid, mid, "🔎 استعلامِ چه کسی را می‌گیری؟",
+                       _kb_night_seats(targets, g, "cl_det_", selected=s, confirm_cb="cl_det_ok"))
+        return
+
+
+async def _resolve_classic(ctx, chat_id, g):
+    dead, reasons, zereh = set(), {}, []
+    t = g.night_shot_target
+    if t and t in g.seats and t not in (g.striked or set()):
+        out = _shot_outcome(g, t)
+        if out == "kill":
+            dead.add(t)
+            reasons[t] = "شلیک مافیا"
+        elif out == "saved":
+            await _night_report(ctx, g, f"💉 سیوِ پزشک شلیک به {t} را گرفت (فقط تو می‌دانی).")
+        elif out == "rouin":
+            await _night_report(ctx, g, f"🛡 {t} رویین‌تن است — شلیک بی‌اثر شد (فقط تو می‌دانی).")
+        elif out == "zereh":
+            zereh.append(t)
+    _add_night_kick(g, dead, reasons)
+    await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
+    # ⚠️ وضعیت بحرانی — اختلافِ شهرِ زنده با مافیای زنده ≤ ۲
+    try:
+        if g.phase not in ("ended", "idle"):
+            _mf = len(_mafia_seats(g, alive_only=True))
+            _al = len(_alive_seats(g))
+            if _mf > 0 and (_al - _mf) - _mf <= 2:
+                await ctx.bot.send_message(chat_id, "⚠️ <b>وضعیت بحرانی</b>", parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ cl critical:", e)
+
+
+# ─── 🗳 موتورِ رأیِ روز (اولیه دوشماره‌ای / دوباره و نهایی تک‌شماره‌ای) ───
+def _cl_end_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ پایان شمارش", callback_data="cle_end")]])
+
+
+async def _cl_round_msg(ctx, chat_id, g, text):
+    old = getattr(g, "cl_vote_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    m = await ctx.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=_cl_end_kb())
+    g.cl_vote_kb_mid = m.message_id
+    store.save()
+
+
+def _cl_parse_two(text, cands):
+    """دو شماره در یک پیام — «۳ و ۷»، «3 7»، «۳.۷»، «۳و۷»… فقط پیامِ صرفاً عددی رأی است."""
+    s = str(text).replace("🔟", "10").translate(_FA_DIGITS)
+    s = s.replace("و", " ")
+    for ch in ".+=-_()[]،٫‌️⃣,/\\|؛;:*…":
+        s = s.replace(ch, " ")
+    toks = s.split()
+    if len(toks) != 2:
+        return None
+    nums = []
+    for tk in toks:
+        if not tk.isdigit() or len(tk) > 2:
+            return None
+        nums.append(int(tk))
+    if nums[0] == nums[1] or nums[0] not in (cands or ()) or nums[1] not in (cands or ()):
+        return None
+    return (nums[0], nums[1])
+
+
+async def _cl_vote_start(ctx, chat_id, g, mode):
+    g.cl_vote_active = mode
+    g.cl_votes = {}
+    g.cl_vote_unread = set()
+    g.cl_vote_seq = 0
+    if mode == "init":
+        g.cl_defense = []
+        g.cl_runoff_cands = []
+        g.cl_runoff_fixed = []
+        g.cl_runoff_need = 0
+        txt = ("🗳 <b>رأی‌گیریِ اولیه</b> — از سیتِ ۱ به‌ترتیب، هر نفر <b>دو شماره</b> بنویسد "
+               "(مثلاً: «۳ و ۷»). به خودتان هم می‌توانید رأی بدهید.")
+    elif mode == "runoff":
+        txt = (f"⚖️ <b>رأی‌گیریِ دوباره</b> بینِ صندلی‌های {_fa_seq(sorted(g.cl_runoff_cands or []))} — "
+               f"هر نفر فقط <b>یک شماره</b> بنویسد.")
+    else:
+        a, b = (g.cl_defense or [0, 0])[:2]
+        txt = (f"🗳 <b>رأیِ نهایی</b> — از سیتِ ۱، هر نفر فقط <b>یک شماره</b> بنویسد:\n"
+               f"• <b>{a}</b> = {escape(g.seats[a][1], quote=False)}\n"
+               f"• <b>{b}</b> = {escape(g.seats[b][1], quote=False)}")
+    store.save()
+    await _cl_round_msg(ctx, chat_id, g, txt)
+
+
+async def _cl_vote_capture(ctx, g, msg, uid, text) -> bool:
+    mode = getattr(g, "cl_vote_active", None)
+    if not mode:
+        return False
+    vs = _seat_of_uid(g, uid)
+    if vs is None or vs in (g.striked or set()) or uid == g.god_id:
+        return False
+    alive = _alive_seats(g)
+    if mode == "init":
+        v = _cl_parse_two(text, tuple(alive))
+    elif mode == "runoff":
+        v1 = _deng_parse_strict(text, tuple(g.cl_runoff_cands or []))
+        v = (v1,) if v1 is not None else None
+    else:
+        v1 = _deng_parse_strict(text, tuple(g.cl_defense or []))
+        v = (v1,) if v1 is not None else None
+    if v is not None:
+        g.cl_vote_seq = int(getattr(g, "cl_vote_seq", 0) or 0) + 1
+        g.cl_votes[uid] = (list(v), g.cl_vote_seq)
+        g.cl_vote_unread.discard(uid)
+        store.save()
+        if all(g.seats[s][0] in g.cl_votes for s in alive):
+            await _cl_vote_count(ctx, msg.chat.id, g)
+        return True
+    if uid not in (g.cl_votes or {}):
+        _first = uid not in (g.cl_vote_unread or set())
+        g.cl_vote_unread.add(uid)
+        store.save()
+        if _first:
+            hint = ("دو شماره بنویس، مثلاً «۳ و ۷»" if mode == "init"
+                    else "فقط یک شماره از بینِ " + _fa_seq(sorted(
+                        (g.cl_runoff_cands if mode == "runoff" else g.cl_defense) or [])))
+            try:
+                await msg.reply_text(f"⚠️ {vs}. {g.seats[vs][1]} رأیت خوانده نشد — دوباره رأی بده: {hint}.")
+            except Exception:
+                pass
+        return True
+    return False
+
+
+async def _cl_vote_count(ctx, chat_id, g):
+    mode = getattr(g, "cl_vote_active", None)
+    if not mode:
+        return
+    alive = set(_alive_seats(g))
+    counts = {}
+    votes_by_target = {}
+    for u, (tup, seq) in dict(g.cl_votes or {}).items():
+        vsu = _seat_of_uid(g, u)
+        if vsu is None or vsu not in alive:
+            continue
+        for t in (tup or []):
+            if t in alive:
+                counts[t] = counts.get(t, 0) + 1
+                votes_by_target.setdefault(t, set()).add(u)
+    g.cl_vote_active = None
+    g.cl_votes = {}
+    g.cl_vote_unread = set()
+    old = getattr(g, "cl_vote_kb_mid", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=old, reply_markup=None)
+        except Exception:
+            pass
+    g.cl_vote_kb_mid = None
+    store.save()
+    if mode == "init":
+        await _cl_count_init(ctx, chat_id, g, counts, votes_by_target)
+    elif mode == "runoff":
+        await _cl_count_runoff(ctx, chat_id, g, counts)
+    else:
+        await _cl_count_final(ctx, chat_id, g, counts, votes_by_target)
+
+
+async def _cl_count_init(ctx, chat_id, g, counts, votes_by_target):
+    if not counts:
+        await ctx.bot.send_message(chat_id, "🗳 رأیی ثبت نشد — دفاعیه‌ای در کار نیست.")
+        return
+    # 🏅 امتیازِ تشخیصِ رأی اولیه — با همان موتورِ همیشگی
+    try:
+        g.votes_cast = {t: set(v) for t, v in votes_by_target.items()}
+        _score_votes_initial(g)
+    except Exception as e:
+        print("⚠️ cl score init:", e)
+    finally:
+        g.votes_cast = {}
+        store.save()
+    lines = ["🗳 <b>نتیجهٔ رأیِ اولیه:</b>"]
+    for t in sorted(counts, key=lambda x: (-counts[x], x)):
+        lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts[t]} رأی")
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await _cl_pick_defense(ctx, chat_id, g, counts, fixed=[])
+
+
+async def _cl_runoff_start(ctx, chat_id, g, cands, fixed, need):
+    g.cl_runoff_cands = sorted(cands)
+    g.cl_runoff_fixed = list(fixed)
+    g.cl_runoff_need = int(need)
+    store.save()
+    await _cl_vote_start(ctx, chat_id, g, "runoff")
+
+
+async def _cl_set_defense(ctx, chat_id, g, defense):
+    g.cl_defense = sorted(set(defense))[:2]
+    g.cl_runoff_cands = []
+    g.cl_runoff_fixed = []
+    g.cl_runoff_need = 0
+    store.save()
+    nms = " و ".join(f"{t}. {escape(g.seats[t][1], quote=False)}" for t in g.cl_defense)
+    await ctx.bot.send_message(chat_id,
+                               f"🧍 <b>این افراد داخلِ دفاعیه هستند:</b> {nms}\n"
+                               f"(بعد از دفاع، گاد «🗳 رأی نهایی» را بزند)", parse_mode="HTML")
+
+
+async def _cl_pick_defense(ctx, chat_id, g, counts, fixed):
+    """دو صندلیِ دفاع از روی شمارش؛ تساویِ مبهم → رأی‌گیریِ دوبارهٔ تک‌شماره‌ای بینِ همان‌ها."""
+    need = 2 - len(fixed)
+    ranked = [t for t in sorted(counts, key=lambda x: (-counts[x], x))
+              if counts[t] > 0 and t not in fixed]
+    if not ranked:
+        if fixed:
+            await _cl_set_defense(ctx, chat_id, g, fixed)
+        else:
+            await ctx.bot.send_message(chat_id, "🗳 رأیی ثبت نشد — دفاعیه‌ای در کار نیست.")
+        return
+    top = counts[ranked[0]]
+    A = [t for t in ranked if counts[t] == top]
+    if len(A) == need:
+        await _cl_set_defense(ctx, chat_id, g, fixed + A)
+        return
+    if len(A) > need:
+        await ctx.bot.send_message(
+            chat_id, f"⚖️ تساویِ {len(A)} نفره در صدر — رأی‌گیریِ دوباره برای "
+                     f"{'دو صندلیِ' if need == 2 else 'صندلیِ'} دفاع.", parse_mode="HTML")
+        await _cl_runoff_start(ctx, chat_id, g, A, fixed, need)
+        return
+    # len(A) < need → صدرنشین قطعی است؛ صندلیِ دوم از بقیه
+    fixed2 = fixed + A
+    rest = [t for t in ranked if t not in A]
+    if not rest:
+        await _cl_set_defense(ctx, chat_id, g, fixed2)
+        return
+    top2 = counts[rest[0]]
+    B = [t for t in rest if counts[t] == top2]
+    if len(B) == 1:
+        await _cl_set_defense(ctx, chat_id, g, fixed2 + B)
+        return
+    await ctx.bot.send_message(
+        chat_id, f"⚖️ تساوی برای صندلیِ دومِ دفاع بینِ {_fa_seq(sorted(B))} — رأی‌گیریِ دوباره.",
+        parse_mode="HTML")
+    await _cl_runoff_start(ctx, chat_id, g, B, fixed2, 1)
+
+
+async def _cl_count_runoff(ctx, chat_id, g, counts):
+    cands = [t for t in (g.cl_runoff_cands or []) if t in g.seats and t not in (g.striked or set())]
+    fixed = [t for t in (g.cl_runoff_fixed or []) if t in g.seats and t not in (g.striked or set())]
+    need = int(getattr(g, "cl_runoff_need", 1) or 1)
+    counts = {t: counts.get(t, 0) for t in cands}
+    if not any(counts.values()):
+        await ctx.bot.send_message(chat_id, "🗳 رأیی ثبت نشد — دوباره رأی بگیرید.")
+        await _cl_runoff_start(ctx, chat_id, g, cands, fixed, need)
+        return
+    lines = ["🗳 <b>نتیجهٔ رأی‌گیریِ دوباره:</b>"]
+    for t in sorted(counts, key=lambda x: (-counts[x], x)):
+        lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts[t]} رأی")
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await _cl_pick_defense(ctx, chat_id, g, counts, fixed)
+
+
+async def _cl_count_final(ctx, chat_id, g, counts, votes_by_target):
+    pair = [t for t in (g.cl_defense or []) if t in g.seats and t not in (g.striked or set())]
+    counts = {t: counts.get(t, 0) for t in pair}
+    alive = len(_alive_seats(g))
+    thr = _final_vote_threshold(alive, g)
+    lines = ["🗳 <b>نتیجهٔ رأیِ نهایی:</b>"]
+    for t in pair:
+        lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
+    lines.append(f"حدنصابِ خروج با {alive} زنده: <b>{thr}</b> رأی")
+    reached = [t for t in pair if counts.get(t, 0) >= thr]
+    exiter = None
+    if reached:
+        mx = max(counts[t] for t in reached)
+        tops = [t for t in reached if counts[t] == mx]
+        if len(tops) == 1:
+            exiter = tops[0]
+        else:
+            lines.append("⚖️ تساوی — کسی خارج نمی‌شود.")
+    else:
+        lines.append("🕊 کسی به حدنصاب نرسید — کسی خارج نمی‌شود.")
+    await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    _bump_defense_history(g, pair)
+    # 🏅 امتیازِ رأیِ نهایی — با همان موتورِ همیشگی
+    try:
+        g.votes_cast = {t: set(votes_by_target.get(t, set())) for t in pair}
+        g.last_final_votes = {t: sorted({_seat_of_uid(g, u) for u in votes_by_target.get(t, set())}
+                                        - {None}) for t in pair}
+        _score_votes_final(g, pair, exiter, exiter is not None)
+    except Exception as e:
+        print("⚠️ cl score final:", e)
+    finally:
+        g.votes_cast = {}
+    g.cl_defense = []
+    store.save()
+    if exiter is None:
+        return
+    nm = escape(g.seats[exiter][1], quote=False)
+    await ctx.bot.send_message(chat_id, f"🚪 {exiter}. {nm} حد نصاب آورد — وصیت کند.",
+                               parse_mode="HTML")
+    g.striked.add(exiter)
+    store.save()
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _check_auto_end(ctx, chat_id, g)
+    await _d1_guess_start(ctx, g, exiter)
+    # 💣 تروریست: با خروج از رأیِ نهایی اکتش فعال می‌شود
+    if g.phase not in ("ended",) and _seat_role_norm(g, exiter) == _R_CL_TERROR:
+        g.cl_terror_wait = exiter
+        store.save()
+        await ctx.bot.send_message(
+            chat_id,
+            f"💣 شماره <b>{exiter}</b> تروریست است!\n"
+            f"{exiter}. {nm} — یک شماره بنویس؛ آن شخص بدونِ وصیت با تو از بازی خارج می‌شود.",
+            parse_mode="HTML")
+
+
+async def _cl_terror_fire(ctx, chat_id, g, tseat, target):
+    """💥 تروریستِ خارج‌شده شماره نوشت: آن فرد بی‌وصیت می‌رود و شب می‌شود."""
+    g.cl_terror_wait = None
+    g.striked.add(target)
+    store.save()
+    nm = escape(g.seats[target][1], quote=False)
+    await ctx.bot.send_message(chat_id,
+                               f"💥 <b>{target}. {nm}</b> با تروریست از بازی خارج شد — وصیت ندارد.",
+                               parse_mode="HTML")
+    await _night_report(ctx, g, f"💣 تروریست ({tseat}) → {target} را با خود برد")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _check_auto_end(ctx, chat_id, g)
+    if g.phase not in ("ended",):
+        await start_night(ctx, chat_id, g)   # 🌙 «شب می‌شود»
+
+
 def _burn_kb(g):
     tmp = getattr(g, "burn_tmp", []) or []
     rows = []
@@ -7621,6 +8195,12 @@ async def _burn_advance(ctx, chat_id, g):
                 await _hb_open_mafia(ctx, chat_id, g)
             await _hb_check_open_citizens(ctx, chat_id, g)
             await _hb_check_open_avenger(ctx, chat_id, g)
+        elif _is_classic_scenario(g):
+            # 🎩 کلاسیک: هر سه اکت از اولِ شب باز است — سوخته فقط «انجام‌شده» می‌شود
+            #    (پزشک/کاراگاهِ سوخته را نگاشتِ سراسریِ role_keys بالا پوشش داده)
+            if _cl_shooter(g) in burned:
+                g.night_done.add("mafia")
+                store.save()
         elif _is_mythic_scenario(g):
             # ⚔️ میتیک: مافیا (شات/کانسورت) → شهروندان بدونِ اولویت
             done = g.night_done
@@ -16861,11 +17441,25 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _hb_duel_vote_start(ctx, _chat, _g2)
         return
 
+    # 🎩 پایانِ شمارشِ رأیِ کلاسیک — دکمهٔ گاد در گروه
+    if _q and _q.data == "cle_end":
+        _chat = update.effective_chat.id if update.effective_chat else None
+        _g2 = gs(_chat) if _chat else None
+        if _g2 is None or _q.from_user.id != _g2.god_id:
+            await safe_q_answer(_q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        await safe_q_answer(_q)
+        if getattr(_g2, "cl_vote_active", None):
+            await _cl_vote_count(ctx, _chat, _g2)
+        return
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
-                                              "gm_", "sh_", "my_")):
+                                              "gm_", "sh_", "my_", "cl_")):
         _dt = _q.data
-        if _dt.startswith("my_"):
+        if _dt.startswith("cl_"):
+            await handle_classic_callback(update, ctx)
+        elif _dt.startswith("my_"):
             await handle_mythic_callback(update, ctx)
         elif _dt.startswith("night_"):
             await handle_night_callback(update, ctx)
@@ -18095,6 +18689,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             return
 
+        # 🎩 کلاسیک: مستقیم موتورِ شمارشِ «دو شماره‌ای» — بدونِ منوی پل/تک‌تک
+        if _is_classic_scenario(g):
+            await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+            await _cl_vote_start(ctx, chat, g, "init")
+            return
+
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🗳 پل", callback_data="init_vote_poll")],
             [InlineKeyboardButton("🗳 تک تک", callback_data="init_vote_classic")],
@@ -18237,6 +18837,17 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── رأی‌گیری نهایی: انتخاب دفاع با دکمه ─────────────────────────────
     if data == "final_vote" and uid == g.god_id:
+        # 🎩 کلاسیک: رأیِ نهاییِ «تک‌شماره‌ای» بینِ دو نفرِ دفاعِ همین روز
+        if _is_classic_scenario(g):
+            _clp = [t for t in (getattr(g, "cl_defense", []) or [])
+                    if t in g.seats and t not in (g.striked or set())]
+            if len(_clp) != 2:
+                await safe_q_answer(q, "دفاعیه مشخص نیست — اول «رأی اولیه» را بگیر.",
+                                    show_alert=True)
+                return
+            await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+            await _cl_vote_start(ctx, chat, g, "final")
+            return
         g.votes_cast = {}
         g.vote_logs = {}
         g.current_vote_target = None
@@ -18670,6 +19281,18 @@ async def shuffle_and_assign(
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    # 🎩 کلاسیک: شمارنده‌های کلِ بازی + وضعیتِ رأی/تروریست با نقشِ تازه از نو
+    g.cl_doc_self = 0
+    g.cl_don_inq = 0
+    g.cl_vote_active = None
+    g.cl_votes = {}
+    g.cl_vote_unread = set()
+    g.cl_vote_kb_mid = None
+    g.cl_runoff_cands = []
+    g.cl_runoff_fixed = []
+    g.cl_runoff_need = 0
+    g.cl_defense = []
+    g.cl_terror_wait = None
     # 🕵️ کاوربازپرس — با نقش‌های تازه، دعوت‌نامه از نو گرفته می‌شود
     g.cvb_asking = False
     g.cvb_invite_seat = None
@@ -19018,6 +19641,21 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if getattr(g, "kp_deng_active", False):
         if await _kp_deng_capture(ctx, g, msg, uid, text):
             return
+
+    # 🎩 شمارشِ رأیِ کلاسیک (اولیه/دوباره/نهایی)
+    if getattr(g, "cl_vote_active", None):
+        if await _cl_vote_capture(ctx, g, msg, uid, text):
+            return
+
+    # 💣 تروریستِ کلاسیک: بعد از خروج با رأیِ نهایی، شماره می‌نویسد و طرف را با خود می‌برد
+    if (_is_classic_scenario(g) and getattr(g, "cl_terror_wait", None) is not None
+            and not getattr(g, "night_active", False)):
+        _cts = g.cl_terror_wait
+        if _cts in g.seats and uid == g.seats[_cts][0]:
+            _ctv = _deng_parse_strict(text, tuple(_alive_seats(g)))
+            if _ctv is not None:
+                await _cl_terror_fire(ctx, msg.chat.id, g, _cts, _ctv)
+                return
 
     # ⚔️ شمارشِ رأی‌گیریِ شاهنامه (روز ۱)
     if getattr(g, "sh_vote_active", False):
@@ -20864,6 +21502,21 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if getattr(g, "kp_deng_active", False):
         if await _kp_deng_capture(ctx, g, msg, uid, text):
             return
+
+    # 🎩 شمارشِ رأیِ کلاسیک (اولیه/دوباره/نهایی)
+    if getattr(g, "cl_vote_active", None):
+        if await _cl_vote_capture(ctx, g, msg, uid, text):
+            return
+
+    # 💣 تروریستِ کلاسیک: بعد از خروج با رأیِ نهایی، شماره می‌نویسد و طرف را با خود می‌برد
+    if (_is_classic_scenario(g) and getattr(g, "cl_terror_wait", None) is not None
+            and not getattr(g, "night_active", False)):
+        _cts = g.cl_terror_wait
+        if _cts in g.seats and uid == g.seats[_cts][0]:
+            _ctv = _deng_parse_strict(text, tuple(_alive_seats(g)))
+            if _ctv is not None:
+                await _cl_terror_fire(ctx, msg.chat.id, g, _cts, _ctv)
+                return
 
     # ⚔️ شمارشِ رأی‌گیریِ شاهنامه (روز ۱)
     if getattr(g, "sh_vote_active", False):
