@@ -5490,18 +5490,23 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
 
 
 
-async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None):
-
+async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None,
+                        keep: set | None = None):
+    """🧹 پاک‌کردنِ پیام‌های بینِ دو آی‌دی — به‌جز آن‌هایی که در keep آمده‌اند
+    (مثلِ پیامِ «📜 لیست نقش‌های سناریو» که باید سرِ جایش بماند)."""
+    keep = {int(k) for k in (keep or set()) if k}
     try:
-        
+
         if stop_message_id:
             limit = stop_message_id
         else:
-            
+
             limit = from_message_id + 5000
 
         batch = []
         for msg_id in range(from_message_id + 1, limit):
+            if msg_id in keep:
+                continue
             batch.append(msg_id)
             if len(batch) == 100:  # هر 100 تا
                 for mid in batch:
@@ -19075,8 +19080,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "cleanup" and uid == g.god_id:
         if g.last_seating_msg_id:
             stop_id = g.shuffle_prompt_msg_id or None
+            # 📜 پیامِ لیستِ نقش‌های سناریو نباید پاک شود
+            _keep = {getattr(g, "last_roles_msg_id", None)}
             asyncio.create_task(
-                cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id)
+                cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep)
             )
             await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
         else:
