@@ -655,6 +655,11 @@ class GameState:
         self.rerandom_prompt_msg_id = getattr(self, "rerandom_prompt_msg_id", None)
         self.game_start_ts = getattr(self, "game_start_ts", None)   # ⏰ لحظهٔ پخشِ نقش‌ها
         self.rec_title = getattr(self, "rec_title", None)   # 🎥 اسمِ ضبطِ این بازی («ایونت N»)
+        # ⏳ لحظهٔ زدنِ دکمه‌هایی که «منتظرِ نوشتنِ متن» می‌مانند (ساعت/موضوعِ رویداد)
+        self.await_input_ts = getattr(self, "await_input_ts", None)
+        # 🔄 جایگزینی وسطِ بازی: صندلیِ خالی‌شده → (آیدیِ قبلی، نامِ قبلی)
+        self.sub_open = getattr(self, "sub_open", {}) or {}
+        self.sub_pick = getattr(self, "sub_pick", set()) or set()
 
 
 class Store:
@@ -3349,6 +3354,30 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def ctl_settings_keyboard() -> InlineKeyboardMarkup:
+    """⚙️ زیرمنویِ تنظیماتِ حینِ بازی (فقط گاد)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm")],
+        [InlineKeyboardButton("🔄 جایگزینی", callback_data="ctl_sub_open")],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data="ctl_settings_back")],
+    ])
+
+
+def sub_pick_keyboard(g) -> InlineKeyboardMarkup:
+    """🔄 انتخابِ بازیکنِ زنده برای جایگزینی — با تیکِ سبز و تأیید."""
+    picked = getattr(g, "sub_pick", set()) or set()
+    rows = []
+    for s in _alive_seats(g):
+        mark = "✅ " if s in picked else ""
+        rows.append([InlineKeyboardButton(f"{mark}{s}. {g.seats[s][1]}",
+                                          callback_data=f"ctl_sub_pick_{s}")])
+    rows.append([
+        InlineKeyboardButton("✅ تأیید", callback_data="ctl_sub_ok"),
+        InlineKeyboardButton("↩️ بازگشت", callback_data="ctl_settings_back"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 async def _is_god_or_admin(ctx, chat_id: int, uid: int, g: GameState) -> bool:
     if uid == g.god_id:
         return True
@@ -3427,7 +3456,7 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🛒 خریداری", callback_data="purchase_menu"),
-            InlineKeyboardButton("🔁 رندوم مجدد", callback_data="rerandom_roles_confirm"),
+            InlineKeyboardButton("⚙️ تنظیمات", callback_data="ctl_settings"),
         ],
     ])
 
@@ -3650,6 +3679,37 @@ async def set_hint_and_kb(ctx, chat_id: int, g: GameState, hint: str | None, kb:
     store.save()
     await publish_seating(ctx, chat_id, g, mode=mode, custom_kb=kb)
 
+
+def _ui_mode(g) -> str:
+    """🎛 کیبوردِ درست برای فازِ فعلی — قبل از بازی ثبت‌نامی، بعدش کنترلی.
+    ⚠️ هرگز publish_seating را بدونِ mode صدا نزن: پیش‌فرضش REG است و وسطِ
+    بازی، لیست را به حالتِ «قبل از شروع» برمی‌گرداند."""
+    return REG if getattr(g, "phase", "idle") == "idle" else CTRL
+
+
+# ⏳ دکمه‌هایی که منتظرِ «نوشتنِ متن» می‌مانند (ساعت/موضوعِ رویداد) بیش از این
+#    نمی‌مانند — وگرنه گاد یادش می‌رود و بعداً اولین پیامش وسطِ بازی بلعیده می‌شود.
+AWAIT_INPUT_TIMEOUT = 60
+
+
+def _await_input_start(g):
+    g.await_input_ts = datetime.now(timezone.utc).timestamp()
+
+
+def _await_input_alive(g) -> bool:
+    """آیا پنجرهٔ ۶۰ ثانیه‌ایِ ورودی هنوز باز است؟ (منقضی → بسته می‌شود)"""
+    ts = getattr(g, "await_input_ts", None)
+    if ts is None:
+        return False
+    if datetime.now(timezone.utc).timestamp() - float(ts) <= AWAIT_INPUT_TIMEOUT:
+        return True
+    g.await_input_ts = None
+    g.awaiting_event_title = False
+    if getattr(g, "vote_type", None) == "awaiting_time":
+        g.vote_type = None
+    store.save()
+    return False
+
 EVENT_NUMBERS_CACHE = None
 
 def get_event_numbers():
@@ -3816,6 +3876,10 @@ async def publish_seating(
         # انتخاب کیبورد
         if custom_kb is not None:
             kb = custom_kb
+        elif getattr(g, "awaiting_scenario_change", False):
+            # 🪄 وسطِ انتخابِ ظرفیت/سناریو، ثبت‌نامِ بقیه نباید کیبوردِ گاد را بپراند
+            _psz = getattr(g, "pending_size", None)
+            kb = kb_choose_scenarios_for(_psz) if _psz else kb_choose_sizes()
         else:
             if mode == REG:
                 kb = text_seating_keyboard(g)
@@ -6651,6 +6715,10 @@ async def _expire_end_question(ctx, g, token, delay=300):
 async def _check_auto_end(ctx, chat_id, g, after_night=False):
     """🏁 اگر شرطِ پایان برقرار شد، از گاد در پیوی می‌پرسد «بازی تمام شده؟»
     (خودکار نمی‌بندد — چون هانتر/وارث و امثالش را بات نمی‌داند)."""
+    # 🔄 وسطِ جایگزینی، صندلیِ خالی‌شده موقتاً «زنده» شمرده نمی‌شود — سنجشِ پایان
+    #    را تا نشستنِ بازیکنِ تازه عقب می‌اندازیم تا الکی «بازی تمام شد» نپرسد
+    if getattr(g, "sub_open", None):
+        return
     try:
         # 🔗 شاهنامه: با رفتنِ افراسیابِ بسته‌شده، رستم هم می‌رود (قبل از سنجشِ پایان)
         if _is_shahname_scenario(g):
@@ -7788,6 +7856,20 @@ async def _cl_round_msg(ctx, chat_id, g, text):
     store.save()
 
 
+def _cl_is_dislike(text) -> bool:
+    """👎 (یکی یا دوتا، یا «دیسلایک») = امتناع از رأی — فقط در روزِ اول قبول است."""
+    s = str(text or "").strip()
+    if _nz(s) in (_nz("دیسلایک"), _nz("دیس لایک")):
+        return True
+    n = s.count("👎")
+    if n not in (1, 2):
+        return False
+    for ch in s:
+        if ch not in "👎 ‌️\U0001F3FB\U0001F3FC\U0001F3FD\U0001F3FE\U0001F3FF":
+            return False
+    return True
+
+
 def _cl_parse_two(text, cands):
     """دو شماره در یک پیام — «۳ و ۷»، «3 7»، «۳.۷»، «۳و۷»… فقط پیامِ صرفاً عددی رأی است."""
     s = str(text).replace("🔟", "10").translate(_FA_DIGITS)
@@ -7812,21 +7894,27 @@ async def _cl_vote_start(ctx, chat_id, g, mode):
     g.cl_votes = {}
     g.cl_vote_unread = set()
     g.cl_vote_seq = 0
+    # 🗣 شروعِ رأی‌گیری = همان سرِ صحبتِ همان روز (روز ۱ از ۱، روز ۲ از ۱۰، …)
+    _order = _day_speak_order(g)
+    starter = _order[0] if _order else 1
+    _d1_hint = ("\n(روزِ اول: اگر نمی‌خواهی رأی بدهی، 👎 بفرست)"
+                if (getattr(g, "night_number", 0) or 0) == 0 else "")
     if mode == "init":
         g.cl_defense = []
         g.cl_runoff_cands = []
         g.cl_runoff_fixed = []
         g.cl_runoff_need = 0
-        txt = ("🗳 <b>رأی‌گیریِ اولیه</b> — از سیتِ ۱ به‌ترتیب، هر نفر <b>دو شماره</b> بنویسد "
-               "(مثلاً: «۳ و ۷»). به خودتان هم می‌توانید رأی بدهید.")
+        txt = (f"🗳 <b>رأی‌گیریِ اولیه</b> — از سیتِ <b>{starter}</b> به‌ترتیبِ سرِ صحبت، "
+               f"هر نفر <b>دو شماره</b> بنویسد (مثلاً: «۳ و ۷»). "
+               f"به خودتان هم می‌توانید رأی بدهید." + _d1_hint)
     elif mode == "runoff":
         txt = (f"⚖️ <b>رأی‌گیریِ دوباره</b> بینِ صندلی‌های {_fa_seq(sorted(g.cl_runoff_cands or []))} — "
-               f"هر نفر فقط <b>یک شماره</b> بنویسد.")
+               f"هر نفر فقط <b>یک شماره</b> بنویسد." + _d1_hint)
     else:
         a, b = (g.cl_defense or [0, 0])[:2]
-        txt = (f"🗳 <b>رأیِ نهایی</b> — از سیتِ ۱، هر نفر فقط <b>یک شماره</b> بنویسد:\n"
+        txt = (f"🗳 <b>رأیِ نهایی</b> — از سیتِ <b>{starter}</b>، هر نفر فقط <b>یک شماره</b> بنویسد:\n"
                f"• <b>{a}</b> = {escape(g.seats[a][1], quote=False)}\n"
-               f"• <b>{b}</b> = {escape(g.seats[b][1], quote=False)}")
+               f"• <b>{b}</b> = {escape(g.seats[b][1], quote=False)}" + _d1_hint)
     store.save()
     await _cl_round_msg(ctx, chat_id, g, txt)
 
@@ -7855,6 +7943,28 @@ async def _cl_vote_capture(ctx, g, msg, uid, text) -> bool:
         if all(g.seats[s][0] in g.cl_votes for s in alive):
             await _cl_vote_count(ctx, msg.chat.id, g)
         return True
+    # 👎 امتناع از رأی — فقط روزِ اول؛ در «کامل‌شدنِ» رأی‌گیری حساب می‌شود
+    if _cl_is_dislike(text):
+        if (getattr(g, "night_number", 0) or 0) == 0:
+            g.cl_vote_seq = int(getattr(g, "cl_vote_seq", 0) or 0) + 1
+            g.cl_votes[uid] = ([], g.cl_vote_seq)
+            g.cl_vote_unread.discard(uid)
+            store.save()
+            if all(g.seats[s][0] in g.cl_votes for s in alive):
+                await _cl_vote_count(ctx, msg.chat.id, g)
+            return True
+        if uid not in (g.cl_votes or {}):
+            _first = uid not in (g.cl_vote_unread or set())
+            g.cl_vote_unread.add(uid)
+            store.save()
+            if _first:
+                try:
+                    await msg.reply_text(f"⚠️ {vs}. {g.seats[vs][1]} — 👎 فقط روزِ اول قبول است؛ "
+                                         f"از روزِ دوم رأی اجباری است، یک شماره بنویس.")
+                except Exception:
+                    pass
+            return True
+        return False
     if uid not in (g.cl_votes or {}):
         _first = uid not in (g.cl_vote_unread or set())
         g.cl_vote_unread.add(uid)
@@ -7878,9 +7988,13 @@ async def _cl_vote_count(ctx, chat_id, g):
     alive = set(_alive_seats(g))
     counts = {}
     votes_by_target = {}
+    abst = 0
     for u, (tup, seq) in dict(g.cl_votes or {}).items():
         vsu = _seat_of_uid(g, u)
         if vsu is None or vsu not in alive:
+            continue
+        if not tup:
+            abst += 1          # 👎 امتناعِ روزِ اول
             continue
         for t in (tup or []):
             if t in alive:
@@ -7898,14 +8012,14 @@ async def _cl_vote_count(ctx, chat_id, g):
     g.cl_vote_kb_mid = None
     store.save()
     if mode == "init":
-        await _cl_count_init(ctx, chat_id, g, counts, votes_by_target)
+        await _cl_count_init(ctx, chat_id, g, counts, votes_by_target, abst)
     elif mode == "runoff":
         await _cl_count_runoff(ctx, chat_id, g, counts)
     else:
-        await _cl_count_final(ctx, chat_id, g, counts, votes_by_target)
+        await _cl_count_final(ctx, chat_id, g, counts, votes_by_target, abst)
 
 
-async def _cl_count_init(ctx, chat_id, g, counts, votes_by_target):
+async def _cl_count_init(ctx, chat_id, g, counts, votes_by_target, abst=0):
     if not counts:
         await ctx.bot.send_message(chat_id, "🗳 رأیی ثبت نشد — دفاعیه‌ای در کار نیست.")
         return
@@ -7921,6 +8035,8 @@ async def _cl_count_init(ctx, chat_id, g, counts, votes_by_target):
     lines = ["🗳 <b>نتیجهٔ رأیِ اولیه:</b>"]
     for t in sorted(counts, key=lambda x: (-counts[x], x)):
         lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts[t]} رأی")
+    if abst:
+        lines.append(f"👎 امتناع: {abst} نفر")
     await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
     await _cl_pick_defense(ctx, chat_id, g, counts, fixed=[])
 
@@ -8000,7 +8116,7 @@ async def _cl_count_runoff(ctx, chat_id, g, counts):
     await _cl_pick_defense(ctx, chat_id, g, counts, fixed)
 
 
-async def _cl_count_final(ctx, chat_id, g, counts, votes_by_target):
+async def _cl_count_final(ctx, chat_id, g, counts, votes_by_target, abst=0):
     pair = [t for t in (g.cl_defense or []) if t in g.seats and t not in (g.striked or set())]
     counts = {t: counts.get(t, 0) for t in pair}
     alive = len(_alive_seats(g))
@@ -8008,6 +8124,8 @@ async def _cl_count_final(ctx, chat_id, g, counts, votes_by_target):
     lines = ["🗳 <b>نتیجهٔ رأیِ نهایی:</b>"]
     for t in pair:
         lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
+    if abst:
+        lines.append(f"👎 امتناع: {abst} نفر")
     lines.append(f"حدنصابِ خروج با {alive} زنده: <b>{thr}</b> رأی")
     reached = [t for t in pair if counts.get(t, 0) >= thr]
     exiter = None
@@ -17591,7 +17709,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 del g.seats[seat]
                 store.save()
                 await ctx.bot.send_message(chat, "❎ ثبت‌نام شما با موفقیت لغو شد.")
-                await publish_seating(ctx, chat, g)
+                await publish_seating(ctx, chat, g, mode=_ui_mode(g))
                 break
         else:
             await ctx.bot.send_message(chat,"❗ شما در لیست نیستید.")
@@ -17637,6 +17755,74 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ─── ⚙️ تنظیماتِ حینِ بازی: رندوم مجدد | جایگزینی | بازگشت ───
+    if data in ("ctl_settings", "ctl_settings_back", "ctl_sub_open", "ctl_sub_ok") \
+            or data.startswith("ctl_sub_pick_"):
+        if uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+        await safe_q_answer(q)
+
+        if data == "ctl_settings":
+            await set_hint_and_kb(ctx, chat, g, None, ctl_settings_keyboard(), mode=CTRL)
+            return
+
+        if data == "ctl_settings_back":
+            g.sub_pick = set()
+            store.save()
+            await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+            return
+
+        if data == "ctl_sub_open":
+            if not getattr(g, "assigned_roles", None):
+                await safe_q_answer(q, "هنوز نقشی پخش نشده.", show_alert=True)
+                return
+            g.sub_pick = set()
+            store.save()
+            await set_hint_and_kb(ctx, chat, g,
+                                  "🔄 چه کسانی جایگزین شوند؟ انتخاب کن و «تأیید» را بزن.",
+                                  sub_pick_keyboard(g), mode=CTRL)
+            return
+
+        if data.startswith("ctl_sub_pick_"):
+            try:
+                _s = int(data.rsplit("_", 1)[1])
+            except Exception:
+                return
+            if _s not in _alive_seats(g):
+                return
+            picked = set(getattr(g, "sub_pick", set()) or set())
+            picked.symmetric_difference_update({_s})
+            g.sub_pick = picked
+            store.save()
+            await set_hint_and_kb(ctx, chat, g,
+                                  "🔄 چه کسانی جایگزین شوند؟ انتخاب کن و «تأیید» را بزن.",
+                                  sub_pick_keyboard(g), mode=CTRL)
+            return
+
+        # ✅ تأیید: صندلی‌ها خالی می‌شوند و منتظرِ بازیکنِ تازه می‌مانند
+        picked = sorted(s for s in (getattr(g, "sub_pick", set()) or set())
+                        if s in g.seats and s not in (g.striked or set()))
+        g.sub_pick = set()
+        if not picked:
+            await set_hint_and_kb(ctx, chat, g, None, control_keyboard(g), mode=CTRL)
+            return
+        if not isinstance(getattr(g, "sub_open", None), dict):
+            g.sub_open = {}
+        for _s in picked:
+            g.sub_open[_s] = g.seats.pop(_s)
+        g.ui_hint = None
+        store.save()
+        await publish_seating(ctx, chat, g, mode=CTRL)
+        _nums = "، ".join(str(s) for s in picked)
+        await ctx.bot.send_message(
+            chat,
+            f"🔄 صندلیِ <b>{escape(_nums, quote=False)}</b> خالی شد.\n"
+            f"بازیکنِ جدید همان شماره را بنویسد (مثلاً <code>/{picked[0]}</code>) "
+            f"یا روی لیست ریپلای کند و شماره را بفرستد؛ نقشِ همان صندلی برایش ارسال می‌شود.",
+            parse_mode="HTML")
+        return
+
     # ─── صدا زدن همه قبلِ شروع ──────────────────────────────────
     if data == BTN_CALL:
         if uid != g.god_id:
@@ -17658,10 +17844,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             return
         g.vote_type = "awaiting_time"
+        _await_input_start(g)
         store.save()
         await ctx.bot.send_message(
             chat,
-            "🕒 ساعت شروع را بنویس (مثال: 22:30):",
+            "🕒 ساعت شروع را بنویس (مثال: 22:30):\n"
+            "⏳ یک دقیقه فرصت داری؛ بعدش خودبه‌خود لغو می‌شود.",
             reply_markup=ForceReply(selective=True)
         )
         return
@@ -18092,13 +18280,21 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await set_hint_and_kb(ctx, chat, g, "ابتدا ظرفیت را انتخاب کنید:", kb_choose_sizes(), mode=REG if g.phase=="idle" else CTRL)
         return
 
+    # 🪄 دکمه‌های انتخابِ ظرفیت/سناریو — فقط گاد (وگرنه هرکسی سناریو را عوض می‌کرد)
+    if (data == "scchange_back" or data == "scchange_again"
+            or data.startswith("scsize_") or data.startswith("scpick_")):
+        if g.god_id is None or uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط راویِ بازی می‌تواند ظرفیت/سناریو را انتخاب کند.",
+                                show_alert=True)
+            return
+
     # برگشت از انتخاب ظرفیت/سناریو
     if data == "scchange_back":
         g.awaiting_scenario_change = False
         g.pending_size = None
         g.ui_hint = None
         store.save()
-        await publish_seating(ctx, chat, g, mode=REG if g.phase=="idle" else CTRL)
+        await publish_seating(ctx, chat, g, mode=_ui_mode(g))
         return
 
     # تغییر ظرفیت → نمایش لیست سناریوهای همان ظرفیت
@@ -18145,12 +18341,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g.ui_hint = None
         store.save()
 
-        # نمایش لیست با ظرفیت/سناریوی جدید
+        # نمایش لیست با ظرفیت/سناریوی جدید (وسطِ بازی، کیبوردِ کنترلی — نه ثبت‌نامی)
         await set_hint_and_kb(
             ctx, chat, g,
             None,
-            text_seating_keyboard(g),
-            mode=REG if g.phase == "idle" else CTRL
+            text_seating_keyboard(g) if g.phase == "idle" else control_keyboard(g),
+            mode=_ui_mode(g)
         )
         return
 
@@ -18675,12 +18871,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await _is_god_or_admin(ctx, chat, uid, g):
             return
         g.awaiting_event_title = True
+        _await_input_start(g)
         store.save()
         await ctx.bot.send_message(
             chat,
             "📝 موضوع رویداد را بنویسید (مثلاً: تولد).\n"
             "می‌توانید همین پیام را ریپلای کنید یا بدون ریپلای بنویسید.\n"
-            "برای حذف موضوع، بنویسید: حذف"
+            "برای حذف موضوع، بنویسید: حذف\n"
+            "⏳ یک دقیقه فرصت دارید؛ بعدش خودبه‌خود لغو می‌شود."
         )
         return
 
@@ -19281,6 +19479,9 @@ async def shuffle_and_assign(
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    # 🔄 جایگزینیِ نیمه‌کاره با پخشِ نقشِ تازه بی‌معنا می‌شود
+    g.sub_open = {}
+    g.sub_pick = set()
     # 🎩 کلاسیک: شمارنده‌های کلِ بازی + وضعیتِ رأی/تروریست با نقشِ تازه از نو
     g.cl_doc_self = 0
     g.cl_don_inq = 0
@@ -19480,10 +19681,6 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     uid = msg.from_user.id
     g = gs(chat_id)
 
-    # ⛔ فقط در حالت "idle" اجازه ثبت‌نام با /عدد هست
-    if g.phase != "idle":
-        return
-
     if not hasattr(g, 'user_names') or g.user_names is None:
         g.user_names = load_usernames_from_gist() or {}
 
@@ -19491,6 +19688,16 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     try:
         seat_no = int(command_text[1:])
     except:
+        return
+
+    # 🔄 وسطِ بازی فقط روی صندلیِ خالی‌شده برای جایگزینی می‌شود نشست
+    if g.phase != "idle":
+        if seat_no in (getattr(g, "sub_open", {}) or {}):
+            await _sub_seat_fill(ctx, chat_id, g, seat_no, uid)
+        return
+
+    # ⛔ صندلی باید واقعاً در این لیست وجود داشته باشد (در ۱۰نفره، /60 معنا ندارد)
+    if not (1 <= seat_no <= (g.max_seats or 0)):
         return
 
     if seat_no in g.seats:
@@ -19513,8 +19720,123 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
     name = g.user_names.get(uid, "ناشناس")
     g.seats[seat_no] = (uid, name)
     store.save()
-    await publish_seating(ctx, chat_id, g)
+    await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
     await ctx.bot.send_message(chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
+
+
+# ═════════════════════════════════════════════════════════════
+#  🔄 جایگزینی وسطِ بازی (همان کارِ /sub، ولی با دکمه)
+#  گاد از «⚙️ تنظیمات → 🔄 جایگزینی» یک یا چند صندلی را انتخاب می‌کند؛ با تأیید،
+#  اسمشان از لیست برداشته می‌شود و صندلی مثلِ قبل از بازی خالی می‌شود. بازیکنِ
+#  تازه روی همان شماره (/N یا ریپلایِ لیست) می‌نشیند و نقشِ همان صندلی را می‌گیرد.
+# ═════════════════════════════════════════════════════════════
+async def _sub_seat_fill(ctx, chat_id: int, g: GameState, seat_no: int, new_uid: int) -> bool:
+    """نشاندنِ بازیکنِ تازه روی صندلیِ خالی‌شده + فرستادنِ نقش. False = نشد."""
+    if seat_no not in (getattr(g, "sub_open", {}) or {}):
+        return False
+    if blocked_info(new_uid):
+        await ctx.bot.send_message(chat_id, "⛔ این بازیکن از بات محروم است و نمی‌تواند جایگزین شود.")
+        return False
+    _sb = seat_ban_info(new_uid)
+    if _sb:
+        await ctx.bot.send_message(
+            chat_id,
+            f"⛔ این بازیکن به‌خاطر {KICK_BAN_LIMIT} بار کیک، "
+            f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن در لیست ندارد.")
+        return False
+    if any(u == new_uid for u, _n in g.seats.values()):
+        await ctx.bot.send_message(chat_id, "❗ این بازیکن همین حالا در لیست است.")
+        return False
+
+    old_uid, _old_name = (g.sub_open.get(seat_no) or (None, None))
+    new_name = (g.user_names or {}).get(new_uid, "ناشناس")
+    g.seats[seat_no] = (new_uid, new_name)
+    g.sub_open.pop(seat_no, None)
+    store.save()
+    await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
+
+    role = (g.assigned_roles or {}).get(seat_no)
+    # 🔗 اتاق مافیا: اگر صندلی مافیاست → قدیمی بیرون، لینکِ تازه برای جدید
+    try:
+        if getattr(g, "mafia_room_id", None) and seat_no in _mafia_room_seats(g):
+            if old_uid and old_uid in (g.mafia_room_members or set()):
+                await _room_kick(ctx, g, old_uid)
+                g.mafia_room_members.discard(old_uid)
+                await _room_rotate_link(ctx, g)
+            await _room_send_link(ctx, g, new_uid)
+    except Exception as e:
+        print("⚠️ sub room:", e)
+
+    if role:
+        try:
+            stickers = load_stickers()
+            if role in stickers:
+                await ctx.bot.send_sticker(new_uid, stickers[role])
+        except Exception:
+            pass
+        try:
+            await ctx.bot.send_message(new_uid, f"🎭 نقش شما: {role}")
+        except Exception:
+            await ctx.bot.send_message(chat_id, "⚠️ نقش به پیویِ بازیکنِ جدید نرفت (پیوی بسته است).")
+    await ctx.bot.send_message(
+        chat_id, f"✅ <a href='tg://user?id={new_uid}'>{escape(new_name, quote=False)}</a> "
+                 f"جایگزینِ صندلی {seat_no} شد.", parse_mode="HTML")
+    if new_name == "ناشناس":
+        prompt = await ctx.bot.send_message(
+            chat_id,
+            f"✏️ این پیام را ریپلای کنید و نام جدید خود را برای صندلی {seat_no} به فارسی وارد کنید:")
+        _start_name_wait(ctx, chat_id, g, new_uid, seat_no, prompt)
+    return True
+
+
+def _parse_bare_seat(text):
+    """🪑 پیامی که «فقط یک عدد» است → شمارهٔ صندلی (فارسی/عربی/انگلیسی، «۰۸» هم قبول).
+    هر چیزِ دیگر (حتی «۸ نفر») None است تا چتِ عادی ثبت‌نام حساب نشود."""
+    s = str(text or "").strip().replace("🔟", "10").translate(_FA_DIGITS)
+    for ch in "️⃣":                     # ایموجیِ عددی: 8️⃣
+        s = s.replace(ch, "")
+    if not s or len(s) > 2 or not s.isdigit():
+        return None
+    return int(s)
+
+
+async def _seat_take_by_number(ctx, chat_id: int, g: GameState, uid: int, seat_no: int) -> bool:
+    """🪑 نشستن/جابه‌جایی روی صندلی با نوشتنِ شمارهٔ خالی وسطِ گروه (قبل از شروعِ بازی)."""
+    if not (1 <= seat_no <= (g.max_seats or 0)):
+        return False
+    if not isinstance(getattr(g, "user_names", None), dict):
+        g.user_names = load_usernames_from_gist() or {}
+
+    cur_seat = next((s for s, (u, _n) in g.seats.items() if u == uid), None)
+    if cur_seat == seat_no:
+        return True                     # همان‌جا نشسته — بی‌سروصدا
+    if seat_no in g.seats:
+        await ctx.bot.send_message(chat_id, f"❌ صندلی {seat_no} قبلاً پُر شده.")
+        return True
+
+    if cur_seat is None:
+        _sb = seat_ban_info(uid)
+        if _sb:
+            await ctx.bot.send_message(
+                chat_id,
+                f"⛔ <b>{escape(_sb.get('name', 'این بازیکن'), quote=False)}</b> به‌خاطر "
+                f"{KICK_BAN_LIMIT} بار کیک، {seat_ban_days_left(_sb)} روز دیگر "
+                f"حقِ نشستن در لیست ندارد.", parse_mode="HTML")
+            return True
+
+    name = g.user_names.get(uid) or (g.seats[cur_seat][1] if cur_seat else None) or "ناشناس"
+    if cur_seat is not None:
+        del g.seats[cur_seat]
+    g.seats[seat_no] = (uid, name)
+    store.save()
+    await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
+    if cur_seat is not None:
+        await ctx.bot.send_message(
+            chat_id, f"↪️ «{name}» از صندلی {cur_seat} به صندلی {seat_no} منتقل شد.")
+    else:
+        await ctx.bot.send_message(
+            chat_id, f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{name}» انجام شد.")
+    return True
 
 
 async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: str) -> bool:
@@ -19523,9 +19845,12 @@ async def _try_set_event_title(ctx, chat_id: int, uid: int, g: GameState, text: 
         return False
     if uid != g.god_id:
         return False  # فقط گاد می‌تواند موضوع را تغییر دهد
+    if not _await_input_alive(g):
+        return False  # ⏳ یک دقیقه گذشت — پیامِ گاد دیگر «موضوع» حساب نمی‌شود
 
     g.awaiting_event_title = False
-    mode = REG if g.phase == "idle" else CTRL
+    g.await_input_ts = None
+    mode = _ui_mode(g)
 
     if text.strip() in ("حذف", "حذف موضوع", "پاک"):
         g.event_title = None
@@ -19732,12 +20057,12 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─────────────────────────────────────────────────────────────
     # 1) تغییر ساعت شروع (فقط توسط گاد) – با یا بدون ریپلای
     # ─────────────────────────────────────────────────────────────
-    if g.vote_type == "awaiting_time" and uid == g.god_id:
-
+    if g.vote_type == "awaiting_time" and uid == g.god_id and _await_input_alive(g):
         g.event_time = text
         g.vote_type = None
+        g.await_input_ts = None
         store.save()
-        await publish_seating(ctx, chat_id, g)
+        await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
         await ctx.bot.send_message(chat_id, f"✅ ساعت رویداد روی {text} تنظیم شد.")
         return
 
@@ -19756,6 +20081,12 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             if not (1 <= seat_no <= g.max_seats):
                 await ctx.bot.send_message(chat_id, "❌ شمارهٔ صندلی معتبر نیست.")
+                return
+
+            # 🔄 وسطِ بازی فقط صندلیِ خالی‌شده برای جایگزینی باز است
+            if g.phase != "idle":
+                if seat_no in (getattr(g, "sub_open", {}) or {}):
+                    await _sub_seat_fill(ctx, chat_id, g, seat_no, uid)
                 return
 
             if seat_no in g.seats:
@@ -19790,7 +20121,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 del g.seats[existing_seat]
                 g.seats[seat_no] = (uid, final_name)
                 store.save()
-                await publish_seating(ctx, chat_id, g)
+                await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
                 await ctx.bot.send_message(
                     chat_id,
                     f"↪️ «{final_name}» از صندلی {existing_seat} به صندلی {seat_no} منتقل شد."
@@ -19800,7 +20131,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # ثبت‌نام جدید
             g.seats[seat_no] = (uid, final_name)
             store.save()
-            await publish_seating(ctx, chat_id, g)
+            await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
             await ctx.bot.send_message(
                 chat_id,
                 f"✅ ثبت‌نام برای صندلی {seat_no} با نام «{final_name}» انجام شد."
@@ -19813,7 +20144,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 del g.seats[seat]
                 store.save()
                 await ctx.bot.send_message(chat_id, "❎ ثبت‌نام شما با موفقیت لغو شد.")
-                await publish_seating(ctx, chat_id, g)
+                await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
                 break
         else:
             await ctx.bot.send_message(chat_id, "❗ شما در لیست نیستید.")
@@ -20089,7 +20420,7 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ صندلی {seat} با نام '{name}' به لیست اضافه شد.")
 
     # 🖥 به‌روزرسانی لیست صندلی‌ها
-    await publish_seating(ctx, chat, g)
+    await publish_seating(ctx, chat, g, mode=_ui_mode(g))
 
 async def addscenario(update: Update, ctx):
     """/addscenario <name> role1:n1 role2:n2 ..."""
@@ -21665,11 +21996,12 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await msg.reply_text(board, parse_mode="HTML")
         return
 
-    if g.vote_type == "awaiting_time" and uid == g.god_id:
+    if g.vote_type == "awaiting_time" and uid == g.god_id and _await_input_alive(g):
         g.event_time = text
         g.vote_type = None
+        g.await_input_ts = None
         store.save()
-        await publish_seating(ctx, chat_id, g)
+        await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
         await ctx.bot.send_message(chat_id, f"✅ ساعت رویداد روی {text} تنظیم شد.")
         return
 
@@ -21698,7 +22030,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 pass
             del g.last_name_prompt_msg_id[uid]
 
-        await publish_seating(ctx, chat_id, g)
+        await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
         return
 
 
@@ -21734,7 +22066,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 del g.seats[seat]
                 store.save()
                 await ctx.bot.send_message(chat_id, "❎ ثبت‌نام شما با موفقیت لغو شد.")
-                await publish_seating(ctx, chat_id, g)
+                await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
                 break
         else:
             await ctx.bot.send_message(chat_id, "❗ شما در لیست نیستید.")
@@ -21864,7 +22196,18 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await ctx.bot.send_message(chat_id, f"✅ سناریوی «{name}» با موفقیت ذخیره شد.")
             return
 
-
+    # 🪑 ثبت‌نام با نوشتنِ «فقط عدد» وسطِ گروه — بدونِ ریپلای، بدونِ اسلش.
+    #    ⚠️ عمداً آخرینِ همه‌ی شرط‌هاست: هر عددی که مالِ رأی/اکت/سناریوسازی باشد
+    #    بالاتر گرفته و return شده؛ اینجا فقط عددهای «بی‌صاحبِ» زمانِ ثبت‌نام می‌رسند.
+    if (g.phase == "idle"
+            and not getattr(g, "awaiting_shuffle_decision", False)
+            and not getattr(g, "awaiting_event_title", False)
+            and getattr(g, "vote_type", None) != "awaiting_time"
+            and uid not in (getattr(g, "awaiting_name_input", {}) or {})
+            and uid not in (getattr(g, "waiting_name", {}) or {})):
+        _bs = _parse_bare_seat(text)
+        if _bs is not None and await _seat_take_by_number(ctx, chat_id, g, uid, _bs):
+            return
 
 
 
