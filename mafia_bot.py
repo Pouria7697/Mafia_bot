@@ -5800,9 +5800,170 @@ async def _edit_pm(ctx, uid, msg_id, text, kb):
     except Exception:
         pass
 
+# ═════════════════════════════════════════════════════════════
+#  ⏪ «اکت مجدد» — مهلتِ اشتباه، در همهٔ اکت‌های شبِ همهٔ سناریوها
+#  بعد از ثبتِ اکت، به‌جای متنِ نهایی یک پیامِ خنثی + دکمهٔ «🔄 اکت مجدد» می‌آید
+#  و ۷ ثانیه صبر می‌شود:
+#    • نزد → دکمه می‌رود، متنِ واقعی (حتی نتیجهٔ استعلام) نشان داده می‌شود و
+#      تازه بعدش گزارشِ گاد و رساندنِ اثرِ اکت به بقیه انجام می‌شود.
+#    • زد   → همان پرامپتِ قبلی با دکمه‌هایش برمی‌گردد تا دوباره انتخاب کند و
+#      جریانِ این اکت (گزارش/اثر) اصلاً اجرا نمی‌شود.
+# ═════════════════════════════════════════════════════════════
+REDO_WINDOW_SEC = 7
+import contextvars
+_ACT_UID = contextvars.ContextVar("act_uid", default=None)   # صاحبِ اکتِ در دستِ پردازش
+_REDO_WAIT: dict[int, dict] = {}                             # uid → {"evt", "token"}
+
+
+_ACT_OUTBOX: dict[int, list] = {}    # uid → پیام‌هایی که تا پایانِ مهلت صبر می‌کنند
+_ACT_SNAP: dict[int, tuple] = {}     # uid → (بازی، night_done، مقادیرِ سادهٔ قبل از اکت)
+
+# 🚫 فیلدهایی که هرگز برنمی‌گردند — چون بازیکن‌های دیگر هم هم‌زمان دستشان می‌زنند
+_SNAP_SKIP = {"night_pm_msgs", "night_prompt_cache", "night_sel", "night_doc_sel",
+              "seats", "user_names", "last_snapshot", "score_events"}
+
+
+def _act_snapshot(g):
+    """📸 مقادیرِ سادهٔ وضعیت، درست قبل از اجرای اکت (برای برگرداندن در «اکت مجدد»)."""
+    try:
+        return {k: v for k, v in vars(g).items()
+                if k not in _SNAP_SKIP and isinstance(v, (int, float, str, bool, type(None)))}
+    except Exception:
+        return {}
+
+
+def _act_diff(g, snap_done, snap_vals):
+    """🔍 دقیقاً چیزی که «همین اکت» عوض کرد — همان لحظهٔ ثبت حساب می‌شود، نه بعدتر،
+    تا اکتِ بازیکنِ دیگری که وسطِ مهلت قطعی می‌شود قاطی نشود."""
+    added = set(getattr(g, "night_done", set()) or set()) - set(snap_done or set())
+    now = _act_snapshot(g)
+    vals = {k: v for k, v in (snap_vals or {}).items()
+            if k in now and now[k] != v}
+    return added, vals
+
+
+def _act_restore(g, own_added, own_vals):
+    """⏪ پس‌گرفتنِ همان تغییرات — کارِ بقیه دست‌نخورده می‌ماند."""
+    try:
+        if own_added:
+            g.night_done = (getattr(g, "night_done", set()) or set()) - own_added
+        for k, old in (own_vals or {}).items():
+            setattr(g, k, old)
+        store.save()
+    except Exception as e:
+        print("⚠️ act restore:", e)
+
+
+class _ActRedo(Exception):
+    """بازیکن «اکت مجدد» زد — بقیهٔ جریانِ این اکت نباید اجرا شود."""
+
+
+def _act_defer(fn, *a, **k) -> bool:
+    """📦 اگر وسطِ اکتِ یک بازیکن هستیم، این پیام تا بسته‌شدنِ مهلتِ تصحیح صبر کند.
+    (مثلاً اعلامِ شات در اتاقِ مافیا نباید قبل از قطعی‌شدنِ اکت برود)"""
+    u = _ACT_UID.get()
+    if u is None:
+        return False
+    _ACT_OUTBOX.setdefault(u, []).append((fn, a, k))
+    return True
+
+
+async def _act_flush(uid):
+    """📤 فرستادنِ پیام‌های معوقِ این اکت (به همان ترتیبِ اصلی)."""
+    for fn, a, k in _ACT_OUTBOX.pop(uid, []) or []:
+        try:
+            await fn(*a, **k)
+        except Exception as e:
+            print("⚠️ act flush:", e)
+
+
+def _act_drop(uid):
+    """🗑 اکت پس گرفته شد → پیام‌های معوقش اصلاً فرستاده نمی‌شوند."""
+    _ACT_OUTBOX.pop(uid, None)
+
+
+async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
+    """پنجرهٔ ۷ ثانیه‌ایِ تصحیح. True یعنی زد و اکت باید از نو گرفته شود."""
+    token = f"{uid}-{msg_id}-{int(time.time() * 1000) % 1000000}"
+    evt = asyncio.Event()
+    _REDO_WAIT[uid] = {"evt": evt, "token": token}
+    # 📸 عکسِ قبل از اکت را _run_night_act گرفته؛ اگر نبود، همین حالا
+    _sg, snap_done, snap_vals = _ACT_SNAP.get(uid) or (None, None, None)
+    if snap_done is None:
+        snap_done = set(getattr(g, "night_done", set()) or set())
+        snap_vals = _act_snapshot(g)
+    own_added, own_vals = _act_diff(g, snap_done, snap_vals)   # 🔍 سهمِ همین اکت
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 اکت مجدد", callback_data=f"redo_{token}")]])
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=_pm_target(uid), message_id=msg_id,
+            text=f"✅ اکتت ثبت شد.\n⏳ اگر اشتباه زدی، تا {REDO_WINDOW_SEC} ثانیه «اکت مجدد» را بزن.",
+            reply_markup=kb)
+    except Exception:
+        _REDO_WAIT.pop(uid, None)
+        return False
+    pressed = False
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=REDO_WINDOW_SEC)
+        pressed = True
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        pass
+    finally:
+        if (_REDO_WAIT.get(uid) or {}).get("token") == token:
+            _REDO_WAIT.pop(uid, None)
+    if not pressed:
+        return False
+    # ⏪ برگرداندنِ وضعیت و نمایشِ دوبارهٔ همان پرامپت
+    _act_restore(g, own_added, own_vals)
+    await _edit_pm(ctx, uid, msg_id, prompt[0], _kb_load(prompt[1]))
+    return True
+
+
+async def handle_redo_callback(update, ctx):
+    """🔄 دکمهٔ «اکت مجدد» — فقط پنجرهٔ باز را بیدار می‌کند (تطبیق با توکن،
+    تا در «اکتِ دستیِ گاد» هم که پیام در پیویِ گاد است درست کار کند)."""
+    q = update.callback_query
+    await safe_q_answer(q)
+    tok = (q.data or "")[len("redo_"):]
+    for _u, st in list(_REDO_WAIT.items()):
+        if st.get("token") == tok:
+            try:
+                st["evt"].set()
+            except Exception:
+                pass
+            break
+
+
 async def _close_pm(ctx, uid, msg_id, text):
     """ویرایش پیام به متن نهایی و حذف دکمه‌ها (تا نتوانند نظرشان را عوض کنند)."""
     target = _pm_target(uid)
+    # ⏪ مهلتِ «اکت مجدد» — فقط برای صاحبِ همین اکت، و فقط وقتی پرامپتِ دکمه‌داری
+    #    باز بوده (پس بستن‌های خودکار/پیام‌های بی‌دکمه دست‌نخورده می‌مانند)
+    if msg_id and _ACT_UID.get() == uid:
+        _gr, _prompt = None, None
+        try:
+            for _g in store.games.values():
+                if any(u == uid for u, _n in _g.seats.values()):
+                    _gr = _g
+                    _prompt = (_g.night_prompt_cache or {}).get(uid)
+                    break
+        except Exception:
+            _gr = None
+        if (_gr is not None and _prompt and _kb_load(_prompt[1]) is not None
+                and (getattr(_gr, "night_active", False)
+                     or getattr(_gr, "maarefe_active", False))):
+            _redone = await _redo_window(ctx, _gr, uid, msg_id, _prompt)
+            _ACT_UID.set(None)      # مهلت تمام شد → از این به بعد همه‌چیز فوری
+            if _redone:
+                _act_drop(uid)
+                raise _ActRedo()
+            _pending_flush = uid    # بعد از نوشتنِ متنِ نهایی، معوق‌ها می‌روند
+        else:
+            _pending_flush = None
+    else:
+        _pending_flush = None
     try:
         for _g in store.games.values():
             if any(u == uid for u, _n in _g.seats.values()):
@@ -5820,6 +5981,9 @@ async def _close_pm(ctx, uid, msg_id, text):
                                         text=text, reply_markup=None)
     except Exception:
         pass
+    # 📤 اکت قطعی شد → پیام‌هایی که منتظرِ پایانِ مهلت بودند (اتاقِ مافیا) می‌روند
+    if _pending_flush is not None:
+        await _act_flush(_pending_flush)
 
 def _room_who(g, seat) -> str:
     """«۵. اسم» برای پیام‌های اتاقِ مافیا."""
@@ -5830,7 +5994,17 @@ def _room_who(g, seat) -> str:
 
 async def _room_note(ctx, g, text):
     """📣 اعلامِ یک اکتِ مافیا در اتاقِ چتِ تیم — تا فقط خودِ اکت‌زن نداند.
-    اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود."""
+    اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.
+    ⏪ وسطِ یک اکت، تا پایانِ مهلتِ «اکت مجدد» صبر می‌کند (اگر تصحیح شد، اصلاً نمی‌رود)."""
+    rid = getattr(g, "mafia_room_id", None)
+    if not rid:
+        return
+    if _act_defer(_room_note_send, ctx, g, text):
+        return
+    await _room_note_send(ctx, g, text)
+
+
+async def _room_note_send(ctx, g, text):
     rid = getattr(g, "mafia_room_id", None)
     if not rid:
         return
@@ -5843,6 +6017,15 @@ async def _room_note(ctx, g, text):
 async def _room_announce_shot(ctx, g, seat, extra=""):
     """🔫 اعلامِ هدفِ شات در اتاقِ چتِ مافیا — تا بقیهٔ تیم هم بدانند رئیس چه کسی را زد.
     (در همهٔ سناریوها؛ اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.)"""
+    rid = getattr(g, "mafia_room_id", None)
+    if not rid or seat not in (getattr(g, "seats", {}) or {}):
+        return
+    if _act_defer(_room_shot_send, ctx, g, seat, extra):
+        return
+    await _room_shot_send(ctx, g, seat, extra)
+
+
+async def _room_shot_send(ctx, g, seat, extra=""):
     rid = getattr(g, "mafia_room_id", None)
     if not rid or seat not in (getattr(g, "seats", {}) or {}):
         return
@@ -11947,12 +12130,13 @@ async def handle_nemayande_callback(update, ctx):
         hacked = (g.night_hacker_actor == _seat_of_uid(g, uid)
                   and g.night_hacker_target == s)
         if is_mafia:
+            # ⏪ اول مهلتِ «اکت مجدد»، بعد رساندنِ خبر به مافیا
+            await _close_pm(ctx, uid, mid, f"🧭 راهنمایی به {s}. {tname} ثبت شد.")
             try:
                 await ctx.bot.send_message(g.seats[s][0], f"🧭 سیت {_seat_of_uid(g, uid)} راهنماست.")
             except Exception:
                 pass
             g.nato_immune.add(_seat_of_uid(g, uid))
-            await _close_pm(ctx, uid, mid, f"🧭 راهنمایی به {s}. {tname} ثبت شد.")
             await _night_report(ctx, g, f"🧭 راهنما → راهنمایی به مافیا {s}. {escape(tname, quote=False)} (راهنما از ناتویی مصون شد)")
             g.night_done.add("guide")
             store.save()
@@ -17404,6 +17588,70 @@ async def handle_night_kick_callback(update, ctx):
 
 
 # ─────────────────────────────────────────────────────────────
+async def _run_night_act(update, ctx):
+    """🌙 اجرای یک اکتِ شب در پس‌زمینه (به‌خاطرِ مهلتِ «اکت مجدد»).
+    اگر بازیکن تصحیح بزند، _ActRedo بلند می‌شود و ادامهٔ جریانِ اکت اجرا نمی‌شود."""
+    _q = update.callback_query
+    _dt = (_q.data or "") if _q else ""
+    _owner = _q_uid(_q) if _q else None
+    _ACT_UID.set(_owner)
+    # 📸 وضعیت را قبل از دست‌خوردن نگه دار — «اکت مجدد» به همین برمی‌گردد
+    if _owner is not None:
+        try:
+            _g0, _ = _find_active_night_game(_owner, _q)
+            if _g0 is not None:
+                _ACT_SNAP[_owner] = (_g0, set(getattr(_g0, "night_done", set()) or set()),
+                                     _act_snapshot(_g0))
+        except Exception:
+            pass
+    try:
+        if _dt.startswith("cl_"):
+            await handle_classic_callback(update, ctx)
+        elif _dt.startswith("my_"):
+            await handle_mythic_callback(update, ctx)
+        elif _dt.startswith("night_"):
+            await handle_night_callback(update, ctx)
+        elif _dt.startswith("hb_"):
+            await handle_hanibal_callback(update, ctx)
+        elif _dt.startswith("cvb_"):
+            await handle_cover_callback(update, ctx)
+        elif _dt.startswith("bzp_"):
+            await handle_baazpors_callback(update, ctx)
+        elif _dt.startswith("nem_"):
+            await handle_nemayande_callback(update, ctx)
+        elif _dt.startswith("tk_"):
+            await handle_takavar_callback(update, ctx)
+        elif _dt.startswith("kp_"):
+            await handle_kapu_callback(update, ctx)
+        elif _dt.startswith("sh_"):
+            await handle_shahname_callback(update, ctx)
+        else:
+            await handle_gamer_callback(update, ctx)
+    except _ActRedo:
+        return   # ⏪ اکت پس گرفته شد — نه گزارشی، نه اثری
+    except Exception:
+        import traceback
+        print("❌ night act error:\n", traceback.format_exc())
+        return
+    finally:
+        # 🕸 تورِ ایمنی: اگر مسیری پیامِ معوق داشت ولی به _close_pm نرسید، جا نماند
+        _ACT_UID.set(None)
+        if _owner is not None:
+            _ACT_SNAP.pop(_owner, None)
+            if _ACT_OUTBOX.get(_owner):
+                try:
+                    await _act_flush(_owner)
+                except Exception:
+                    pass
+    # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
+    try:
+        _gg, _ = _find_active_night_game(_q_uid(_q), _q)
+        if _gg is not None:
+            await _maybe_notify_god_done(ctx, _gg)
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────
 #  CALL-BACK ROUTER – نسخهٔ کامل با فاصله‌گذاری درست
 # ─────────────────────────────────────────────────────────────
@@ -17571,39 +17819,17 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _cl_vote_count(ctx, _chat, _g2)
         return
 
+    # 🔄 دکمهٔ «اکت مجدد» — فقط پنجرهٔ بازِ تصحیح را بیدار می‌کند
+    if _q and _q.data and _q.data.startswith("redo_"):
+        await handle_redo_callback(update, ctx)
+        return
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
                                               "gm_", "sh_", "my_", "cl_")):
-        _dt = _q.data
-        if _dt.startswith("cl_"):
-            await handle_classic_callback(update, ctx)
-        elif _dt.startswith("my_"):
-            await handle_mythic_callback(update, ctx)
-        elif _dt.startswith("night_"):
-            await handle_night_callback(update, ctx)
-        elif _dt.startswith("hb_"):
-            await handle_hanibal_callback(update, ctx)
-        elif _dt.startswith("cvb_"):
-            await handle_cover_callback(update, ctx)
-        elif _dt.startswith("bzp_"):
-            await handle_baazpors_callback(update, ctx)
-        elif _dt.startswith("nem_"):
-            await handle_nemayande_callback(update, ctx)
-        elif _dt.startswith("tk_"):
-            await handle_takavar_callback(update, ctx)
-        elif _dt.startswith("kp_"):
-            await handle_kapu_callback(update, ctx)
-        elif _dt.startswith("sh_"):
-            await handle_shahname_callback(update, ctx)
-        else:
-            await handle_gamer_callback(update, ctx)
-        # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
-        try:
-            _gg, _ = _find_active_night_game(_q_uid(_q), _q)
-            if _gg is not None:
-                await _maybe_notify_god_done(ctx, _gg)
-        except Exception:
-            pass
+        # ⏪ چون هر اکت یک مهلتِ ۷ ثانیه‌ایِ «اکت مجدد» دارد، پردازش در پس‌زمینه
+        #    می‌رود تا وب‌هوکِ تلگرام منتظر نماند (وگرنه هر اکت ۷ ثانیه لفت می‌داد)
+        asyncio.create_task(_run_night_act(update, ctx))
         return
 
     # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
@@ -19439,6 +19665,10 @@ async def shuffle_and_assign(
     try:
         _ev = int(get_event_numbers().get(str(chat_id), 1))
         g.rec_title = f"ایونت {_ev}".translate(_FA_OUT)
+        # 🎭 اگر برای این لیست موضوعی ثبت شده، روی ضبط هم بیاید: «تولد اکبر-ایونت ۵۵»
+        _evt = (getattr(g, "event_title", None) or "").strip()
+        if _evt:
+            g.rec_title = f"{_evt}-{g.rec_title}"
         voice_god.record_watch(chat_id, g.rec_title, since=g.game_start_ts)
     except Exception as _rw_e:
         print("⚠️ record_watch:", _rw_e)
