@@ -5990,6 +5990,15 @@ async def _close_pm(ctx, uid, msg_id, text):
     if _pending_flush is not None:
         await _act_flush(_pending_flush)
 
+def _side_secret(g) -> bool:
+    """🔒 سناریوهایی که «استعلام وضعیت» ندارند (میتیک، کلاسیک، کلاسیک‌دن):
+    در این‌ها سایدِ کسی که کیک می‌شود هم در گروه خوانده نمی‌شود."""
+    try:
+        return bool(_is_mythic_scenario(g) or _is_classic_scenario(g))
+    except Exception:
+        return False
+
+
 def _room_who(g, seat) -> str:
     """«۵. اسم» برای پیام‌های اتاقِ مافیا."""
     if seat is None or seat not in (getattr(g, "seats", {}) or {}):
@@ -7040,13 +7049,15 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     store.save()
 
     # 👢 اعلامِ عمومیِ کیکِ شب — حالا که روز شده، با ساید
+    #    🔒 در سناریوهای بدونِ استعلامِ وضعیت، فقط «کیک شد» و بس
+    _hide_side = _side_secret(g)
     for s in sorted(dead):
         if "کیک" in str(reasons.get(s, "")):
             try:
-                await ctx.bot.send_message(
-                    chat_id,
-                    f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_sc_side(g, s)}</b>",
-                    parse_mode="HTML")
+                _line = f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد"
+                if not _hide_side:
+                    _line += f" — ساید: <b>{_sc_side(g, s)}</b>"
+                await ctx.bot.send_message(chat_id, _line, parse_mode="HTML")
             except Exception:
                 pass
     if dead:
@@ -19017,8 +19028,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 g.night_burned_uids.add(g.seats[s][0])
             _bd = record_kick(g.seats[s][0], g.seats[s][1])   # 👢 شمارشِ کیک
             try:
+                # 🔒 در سناریوهای بدونِ استعلامِ وضعیت، سایدِ کیک‌شده خوانده نمی‌شود
+                _ktxt = f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد"
+                if not _side_secret(g):
+                    _ktxt += f" — ساید: <b>{_kside}</b>"
                 await ctx.bot.send_message(
-                    chat, f"👢 {s}. {escape(g.seats[s][1], quote=False)} کیک شد — ساید: <b>{_kside}</b>"
+                    chat, _ktxt
                           + (f"\n⛔ به {KICK_BAN_LIMIT} کیک رسید — {KICK_BAN_DAYS} روز "
                              f"حقِ نشستن در هیچ لیستی ندارد." if _bd else ""),
                     parse_mode="HTML")
