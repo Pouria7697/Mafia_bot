@@ -895,6 +895,41 @@ def save_medals_log(data: dict):
         return False
 
 
+_SEASON_CACHE = {"no": None, "ts": 0.0}
+_SEASON_TTL = 900.0     # ⏳ هر ۱۵ دقیقه یک‌بار از گیست خوانده می‌شود
+
+
+def current_season_no() -> int:
+    """🏁 شمارهٔ فصلِ در جریان = تعدادِ فصل‌های بسته‌شده + ۱."""
+    now = datetime.now(timezone.utc).timestamp()
+    if _SEASON_CACHE["no"] is None or (now - float(_SEASON_CACHE["ts"] or 0)) >= _SEASON_TTL:
+        try:
+            mlog = load_medals_log()
+            if mlog is not None:
+                _SEASON_CACHE["no"] = len(mlog.get("seasons") or []) + 1
+                _SEASON_CACHE["ts"] = now
+        except Exception as e:
+            print("⚠️ season no:", e)
+    return int(_SEASON_CACHE["no"] or 1)
+
+
+def season_label() -> str:
+    """«فصل ۳» — با رقمِ فارسی، برای سرتیترِ لیدربردها."""
+    return f"فصل {str(current_season_no()).translate(_FA_OUT)}"
+
+
+def season_n(d, key="games") -> int:
+    """🎮 تعدادِ بازی‌های همین فصل (نه کلِ عمر).
+    امتیازها با پایانِ فصل صفر می‌شوند ولی شمارندهٔ بازی‌ها نه؛ پس میانگینِ فصل
+    باید بر «بازی‌های همین فصل» تقسیم شود، وگرنه هرچه بازیکن قدیمی‌تر باشد
+    میانگینش الکی کمتر می‌شود. (فصل‌های قبل از ثبتِ پایه → همان کلِ بازی‌ها)"""
+    n = int(d.get(key, 0) or 0)
+    b = d.get(f"season0_{key}")
+    if b is None:
+        return n
+    return max(0, n - int(b or 0))
+
+
 def _season_total(d) -> float:
     """همان امتیازِ کلِ «آمار کل»: امتیازهای ثبت‌شده + ۱۵×بازی‌های قدیمی + ۲۵×بردهای قدیمی."""
     lg = max(0, d.get("games", 0) - d.get("score_games", 0))
@@ -958,9 +993,8 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
     if not rows or max(r[2] for r in rows) < SEASON_TARGET:
         return None
 
-    # رتبه‌بندی، همان کلیدِ ترکیبیِ «آمار کل»: مجموع + میانگین
-    rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
-                              it[1].get("wins", 0)), reverse=True)
+    # 🎖 مدال هم دقیقاً مثلِ «آمار کل»: فقط مجموعِ امتیاز (برد برای تساوی)
+    rows.sort(key=lambda it: (it[2], it[1].get("wins", 0)), reverse=True)
     medal_defs = (("gold", "🥇"), ("silver", "🥈"), ("bronze", "🥉"))
     winners = []
     for i, (uid, d, tot) in enumerate(rows[:3]):
@@ -983,6 +1017,9 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
         mlog["seasons"] = seasons
         if not save_medals_log(mlog):
             raise RuntimeError("ذخیرهٔ تاریخچهٔ مدال‌ها ناموفق بود")
+        # 🏁 فصلِ تازه شروع شد → شمارهٔ فصل بلافاصله به‌روز شود
+        _SEASON_CACHE["no"] = len(seasons) + 1
+        _SEASON_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
     except Exception as e:
         print("❌ season medal log error:", e, "— بستنِ فصل به تعویق افتاد")
         for i, (uid, d, _t) in enumerate(rows[:3]):   # مدال‌های داده‌شده را پس بگیر
@@ -995,6 +1032,12 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
     # 🔄 صفر کردنِ همه‌ی امتیازها (شمارنده‌های بازی/برد دست‌نخورده می‌مانند؛
     #    score_games=games یعنی سهمِ «بازی‌های قدیمی» هم از این به بعد صفر است)
     for d in stats.values():
+        # 🗓 پایهٔ فصلِ تازه: تعدادِ بازی‌ها در «آغازِ» فصل، تا میانگینِ فصل درست
+        #    حساب شود — وگرنه امتیازِ فصل تقسیم بر بازی‌های کلِ عمر می‌شد و
+        #    میانگینِ بازیکنانِ قدیمی الکی پایین می‌آمد.
+        for _k in ("games", "wins", "citizen_games", "citizen_wins",
+                   "mafia_games", "mafia_wins"):
+            d[f"season0_{_k}"] = d.get(_k, 0)
         d["score_total"] = 0
         d["score_citizen"] = 0
         d["score_mafia"] = 0
@@ -1229,7 +1272,8 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
 
 # ═══════════ 🎩 امتیازِ گاد + محرومیت ═══════════
 GOD_BANS_FILENAME = "god_bans.json"
-GOD_MIN_VOTES = 3        # حداقلِ رأی برای اینکه میانگین معتبر باشد
+GOD_MIN_VOTES = 3        # حداقلِ رأی برای اینکه میانگین معتبر باشد (و ملاکِ محرومیت)
+GOD_LEADER_MIN_VOTES = 21   # 🎩 ورود به «برترین گادهای فصل»: بیشتر از ۲۰ رأی
 GOD_MIN_RATING = 3.0     # زیرِ این میانگین در یک هفته → محرومیتِ هفتهٔ بعد
 GOD_MAX_ABANDONS = 3     # این تعداد ترکِ بازی در هفته → محرومیتِ هفتهٔ بعد
 
@@ -2182,10 +2226,12 @@ def format_player_stats(p: dict) -> str:
     ig, iw = p.get("indep_games", 0), p.get("indep_wins", 0)
 
     name = escape(p.get("name", "بازیکن"), quote=False)
-    # 🏅 امتیاز کل = ۱۵ × بازی‌های قدیمی + ۲۵ × بردهای قدیمی + امتیازهای ثبت‌شده؛ میانگین = ÷ تمامِ بازی‌ها
+    # 🏅 امتیاز کل = ۱۵ × بازی‌های قدیمی + ۲۵ × بردهای قدیمی + امتیازهای ثبت‌شده
+    #    میانگین = ÷ بازی‌های همین فصل (نه کلِ عمر — امتیاز با فصل صفر می‌شود، بازی‌ها نه)
     _lgames = max(0, games - int(p.get("score_games", 0) or 0))
     _lwins = max(0, wins - int(p.get("score_wins", 0) or 0))
     _st = float(p.get("score_total", 0) or 0) + 15.0 * _lgames + 25.0 * _lwins
+    _sgames = season_n(p, "games")
 
     def _lat(v):
         try:
@@ -2194,14 +2240,16 @@ def format_player_stats(p: dict) -> str:
         except Exception:
             return str(v)
 
-    _avg = (_st / games) if games else 0
+    _avg = (_st / _sgames) if _sgames else 0
     _mb = _medal_badges(p)
     lines = [
         f"📊 <b>آمار {name}</b>" + (f" {_mb}" if _mb else ""),
+        f"<i>{season_label()}</i>",
         "",
-        f"🎮 کل بازی‌ها: <b>{games}</b>",
+        f"🎮 کل بازی‌ها: <b>{games}</b>"
+        + (f" | این فصل: <b>{_sgames}</b>" if _sgames != games else ""),
         f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
-        f"🏅 امتیاز کل: <b>{_lat(_st)}</b> | میانگین: <b>{_lat(_avg)}</b>",
+        f"🏅 امتیاز فصل: <b>{_lat(_st)}</b> | میانگین: <b>{_lat(_avg)}</b>",
     ] + ([f"🎖 مدال‌ها: {_mb}"] if _mb else []) + [
         "",
         f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
@@ -2314,12 +2362,12 @@ def _wk_total_pts(d):
 
 
 def weekly_top_players(delta: dict, top_n: int = 10):
-    """۱۰ بازیکنِ برترِ هفته — دقیقاً همان رتبه‌بندیِ لیدربردِ نمایشی
-    (ترکیبیِ مجموعِ امتیاز + میانگین). خروجی: [(uid, d, امتیاز), …]"""
+    """۱۰ بازیکنِ برترِ هفته — دقیقاً همان رتبه‌بندیِ لیدربردِ نمایشی:
+    فقط مجموعِ امتیازِ هفته (تعدادِ بازی فقط برای تساوی). میانگین دخالت ندارد.
+    خروجی: [(uid, d, امتیاز), …]"""
     rows = [(uid, d, _wk_total_pts(d)) for uid, d in (delta or {}).items()]
     rows = [r for r in rows if r[2] > 0]
-    rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
-                              it[1].get("games", 0)), reverse=True)
+    rows.sort(key=lambda it: (it[2], it[1].get("games", 0)), reverse=True)
     return rows[:top_n]
 
 
@@ -2374,11 +2422,12 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
         lw = max(0, d.get(w_key, 0) - d.get(sw_key, 0))
         return d.get(sc_key, 0) + 15.0 * lg + 25.0 * lw
 
-    def _hyb_rows(src, total_fn, g_key, top_n):
+    def _hyb_rows(src, total_fn, g_key, top_n, season=False):
+        """🏅 رتبه‌بندی فقط با مجموعِ امتیاز — میانگین دخالت ندارد
+        (تعدادِ بازی فقط برای شکستنِ تساوی)."""
         rows = [(uid, d, total_fn(d)) for uid, d in src.items()]
         rows = [r for r in rows if r[2] > 0]
-        rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get(g_key, 1)),
-                                  it[1].get(g_key, 0)), reverse=True)
+        rows.sort(key=lambda it: (it[2], it[1].get(g_key, 0)), reverse=True)
         return rows[:top_n]
 
     w_overall = weekly_top_players(delta, 10)   # 🔗 مشترک با لیستِ منتخب
@@ -2410,8 +2459,8 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
             reverse=True,
         )[:2]
 
-    # ── کل دوران (تجمعی) — همان ترکیبی ──
-    c_overall = _hyb_rows(current, _wk_total, "games", 10)
+    # ── آمارِ کلِ فصل — مجموعِ امتیاز، با میانگینِ فصلی برای تساوی ──
+    c_overall = _hyb_rows(current, _wk_total, "games", 10, season=True)
     if not c_overall:
         c_overall = [(u, d, None) for u, d in _rank_block(current, "wins", "games", 10)]
 
@@ -2463,14 +2512,15 @@ def build_weekly_leaderboard_text(current: dict, snapshot: dict,
         out.append("")
         return out
 
-    lines = ["🏆 <b>برترین‌های هفته مافیا</b> 🏆", ""]
+    _sl = season_label()
+    lines = [f"🏆 <b>برترین‌های هفته مافیا</b> 🏆", f"<i>{_sl}</i>", ""]
     lines += block("🏅 <b>۱۰ بازیکن برتر هفته</b>", w_overall, "wins", "games")
     lines += block("◽️ <b>۳ شهروند برتر هفته</b>", w_citizens, "citizen_wins", "citizen_games")
     lines += block("◾️ <b>۳ مافیای برتر هفته</b>", w_mafias, "mafia_wins", "mafia_games")
     lines += _god_block("🎩 <b>برترین گادهای هفته</b>", w_gods)
 
     lines.append("━━━━━━━━━━━━━")
-    lines += block("👑 <b>۱۰ بازیکن برتر کل دوران</b>", c_overall, "wins", "games")
+    lines += block(f"👑 <b>۱۰ بازیکن برتر {_sl}</b>", c_overall, "wins", "games")
 
     # حذف خط خالی انتهایی
     while lines and lines[-1] == "":
@@ -2491,13 +2541,14 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         return d.get("score_total", 0) + 15.0 * lg + 25.0 * lw
 
     def _ov_val(d):
-        n = d.get("games", 0)
+        n = season_n(d, "games")     # 🗓 فقط بازی‌های همین فصل
         return (_ov_total(d) / n) if n else 0.0
 
-    # رتبه‌بندیِ ترکیبی: مجموع (تجربه) + میانگین (کیفیت — تعیین‌کننده بینِ نزدیک‌ها)
+    # 🏅 رتبه‌بندی فقط بر اساسِ «مجموعِ امتیازِ فصل» — میانگین هیچ نقشی ندارد
+    #    (برد فقط برای شکستنِ تساوی). میانگین صرفاً نمایشی است.
     overall = sorted(
         [(uid, d) for uid, d in current.items() if _ov_total(d) > 0],
-        key=lambda it: (_ov_total(it[1]) + _ov_val(it[1]), it[1].get("wins", 0)),
+        key=lambda it: (_ov_total(it[1]), it[1].get("wins", 0)),
         reverse=True,
     )[:10]
     ov_by_avg = bool(overall)
@@ -2524,9 +2575,8 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         rows = [(uid, d, _side_total(d, sc_key, sg_key, g_key, w_key, sw_key))
                 for uid, d in current.items() if d.get(g_key, 0) >= min_g]
         rows = [r for r in rows if r[2] > 0]
-        # ترکیبی: مجموعِ سایدی + میانگینِ سایدی
-        rows.sort(key=lambda it: (it[2] + it[2] / max(1, it[1].get(g_key, 1)),
-                                  it[1].get(g_key, 0)), reverse=True)
+        # 🏅 فقط مجموعِ امتیازِ سایدی (بردِ همان ساید فقط برای تساوی)
+        rows.sort(key=lambda it: (it[2], it[1].get(w_key, 0)), reverse=True)
         return rows[:3]
 
     citizens = _avg_rows("score_citizen", "score_citizen_games",
@@ -2538,21 +2588,16 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         citizens = [(u, d, None) for u, d in _rank_block(current, "citizen_wins", "citizen_games", 3)]
     if not mafias:
         mafias = [(u, d, None) for u, d in _rank_block(current, "mafia_wins", "mafia_games", 3)]
-    # 🎩 برترین گادهای کل دوران — میانگینِ امتیاز (حداقل چند رأی لازم است)
+    # 🎩 برترین گادهای فصل — میانگینِ امتیاز، فقط با بیش از ۲۰ رأی
+    #    (کمتر از آن، میانگین با چند رأیِ پراکنده الکی ۵.۰ می‌شد)
     gods = sorted(
         [(uid, d) for uid, d in current.items()
-         if int(d.get("god_rating_count", 0) or 0) >= GOD_MIN_VOTES],
+         if int(d.get("god_rating_count", 0) or 0) >= GOD_LEADER_MIN_VOTES],
         key=lambda it: (float(it[1].get("god_rating_sum", 0) or 0)
                         / max(1, int(it[1].get("god_rating_count", 1) or 1)),
                         int(it[1].get("god_rating_count", 0) or 0)),
         reverse=True,
     )[:3]
-    if not gods:
-        gods = sorted(
-            [(uid, d) for uid, d in current.items() if d.get("god_games", 0) > 0],
-            key=lambda it: it[1].get("god_games", 0),
-            reverse=True,
-        )[:2]
 
     if not (overall or citizens or mafias or gods):
         return None
@@ -2585,9 +2630,10 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         except Exception:
             return str(v)
 
-    lines = ["👑 <b>برترین‌های کل دوران مافیا</b> 👑", ""]
+    _sl = season_label()
+    lines = [f"👑 <b>برترین‌های {_sl} مافیا</b> 👑", ""]
 
-    out10 = ["🏅 <b>۱۰ بازیکن برتر کل</b>"]
+    out10 = [f"🏅 <b>۱۰ بازیکن برتر {_sl}</b>"]
     for i, (_uid, d) in enumerate(overall):
         nm = f"<a href='tg://user?id={_uid}'>{escape(d.get('name', 'بازیکن'), quote=False)}</a>"
         _mb = _medal_badges(d)
@@ -2612,9 +2658,10 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
             if _mb:
                 nm += f" {_mb}"
             w, n = d.get(w_key, 0), d.get(g_key, 0)
+            _sn = season_n(d, g_key)        # 🗓 میانگین بر بازی‌های همین فصل
             if val is not None and n:
                 sb.append(f"{_medal(i)} {nm} — {_fmt_lat(val)} امتیاز | "
-                          f"میانگین {_fmt_lat(val / n)} | {w} برد{pct(w, n)}")
+                          f"میانگین {_fmt_lat(val / max(1, _sn))} | {w} برد{pct(w, n)}")
             else:
                 sb.append(f"{_medal(i)} {nm} — {w} برد{pct(w, n)}")
         if not rows:
@@ -2622,9 +2669,9 @@ def build_alltime_leaderboard_text(current: dict) -> str | None:
         sb.append("")
         return sb
 
-    lines += side_block("◽️ <b>۳ شهروند برتر کل</b>", citizens, "citizen_games", "citizen_wins")
-    lines += side_block("◾️ <b>۳ مافیای برتر کل</b>", mafias, "mafia_games", "mafia_wins")
-    lines += _god_block("🎩 <b>برترین گادهای کل دوران</b>", gods)
+    lines += side_block(f"◽️ <b>۳ شهروند برتر {_sl}</b>", citizens, "citizen_games", "citizen_wins")
+    lines += side_block(f"◾️ <b>۳ مافیای برتر {_sl}</b>", mafias, "mafia_games", "mafia_wins")
+    lines += _god_block(f"🎩 <b>برترین گادهای {_sl}</b>", gods)
 
     while lines and lines[-1] == "":
         lines.pop()
@@ -22893,10 +22940,9 @@ async def season_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f = float(v)
         return str(int(f)) if f.is_integer() else f"{f:.1f}"
 
-    # همان کلیدِ رتبه‌بندیِ «آمار کل» و مدال‌ها: مجموع + میانگین
+    # همان کلیدِ رتبه‌بندیِ «آمار کل» و مدال‌ها: فقط مجموعِ امتیاز (برد برای تساوی)
     rows = sorted(((u, d, _season_total(d)) for u, d in stats.items()),
-                  key=lambda it: (it[2] + it[2] / max(1, it[1].get("games", 1)),
-                                  it[1].get("wins", 0)), reverse=True)[:5]
+                  key=lambda it: (it[2], it[1].get("wins", 0)), reverse=True)[:5]
     head = [f"🏁 <b>وضعیت فصل</b> — سقف: <b>{int(SEASON_TARGET)}</b>", ""]
     for i, (_u, d, t) in enumerate(rows, 1):
         mb = _medal_badges(d)
