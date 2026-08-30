@@ -427,6 +427,8 @@ class GameState:
         self.baz_duel_votes = getattr(self, "baz_duel_votes", {}) or {}
         self.baz_duel_pair = getattr(self, "baz_duel_pair", []) or []
         self.baz_duel_unread = getattr(self, "baz_duel_unread", set()) or set()
+        # 🪢 [صندلیِ هانتر، صندلیِ بسته‌شده] — منتظرِ بله/خیرِ گاد در پیوی
+        self.bzp_hunter_pending = getattr(self, "bzp_hunter_pending", None)
         # ── 🎩 کلاسیک / کلاسیک‌دن ──
         self.cl_doc_self = getattr(self, "cl_doc_self", 0)            # 💉 سیوِ خودِ پزشک (سقف ۲ در بازی)
         self.cl_don_inq = getattr(self, "cl_don_inq", 0)              # 🔎 دفعاتِ استعلامِ دن (بار دوم مثبت)
@@ -3505,6 +3507,11 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and not getattr(g, "hb_duel_used", False)):
         rows.append([InlineKeyboardButton("🏛 معمار", callback_data="ctl_memar")])
 
+    # 💣 دکمه‌ی الیوت (گیمر) — همیشه هست، چون تووفیس شب‌های فرد بمبِ تازه می‌گذارد.
+    #    ⚠️ دیدنی بودنش به وجودِ بمب وابسته نیست، وگرنه از بود‌ونبودش لو می‌رفت.
+    if _is_gamer_scenario(g) and getattr(g, "maarefe_done", False):
+        rows.append([InlineKeyboardButton("💣 الیوت", callback_data="ctl_eliot")])
+
     # ⚔️ دکمه‌ی یک‌بارمصرفِ شاهنامه — بعد از معارفه، فقط روز ۱
     if (_is_shahname_scenario(g) and getattr(g, "maarefe_done", False)
             and getattr(g, "night_number", 0) == 0
@@ -3565,6 +3572,21 @@ def warn_button_markup_plusminus(g: GameState) -> InlineKeyboardMarkup:
 
 
 
+def _clean_sheet_possible(g):
+    """🧼 (کلین‌شیتِ شهر ممکن؟، کلین‌شیتِ مافیا ممکن؟) — دقیقاً همان قاعدهٔ _win_condition:
+    کلین‌شیتِ مافیا یعنی هیچ مافیایی کشته نشده؛ کلین‌شیتِ شهر یعنی هیچ شهروندی خارج نشده.
+    (پس مثلاً با ۳ نفرِ باقی‌مانده، هیچ‌کدام دیگر ممکن نیست.)"""
+    try:
+        if not getattr(g, "assigned_roles", None):
+            return True, True      # هنوز نقشی پخش نشده — چیزی را محدود نکن
+        struck = {s for s in (getattr(g, "striked", None) or set()) if s in (g.seats or {})}
+        city_clean = not any(_sc_side(g, s) != "مافیا" for s in struck)
+        mafia_clean = not any(_sc_side(g, s) == "مافیا" for s in struck)
+        return city_clean, mafia_clean
+    except Exception:
+        return True, True
+
+
 def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
     # 🌀 کی‌آسِ خودکار: فقط دو گزینه — بات خودش می‌داند چه کسانی کی‌آس‌اند (زنده‌ها)
     if getattr(g, "chaos_auto", False):
@@ -3576,11 +3598,20 @@ def kb_endgame_root(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🏙 شهر", callback_data="winner_city")],
         [InlineKeyboardButton("😈 مافیا", callback_data="winner_mafia")],
-        [InlineKeyboardButton("🏙 کلین‌شیت شهر", callback_data="clean_city")],
-        [InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")],
-        [InlineKeyboardButton("🏙 شهر (کی‌آس)", callback_data="winner_city_chaos")],
-        [InlineKeyboardButton("😈 مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
     ]
+    # 🧼 کلین‌شیت فقط وقتی «واقعاً ممکن» است دکمه دارد:
+    #    شهر → هیچ شهروندی خارج نشده | مافیا → هیچ مافیایی کشته نشده
+    _cc, _mc = _clean_sheet_possible(g)
+    if _cc:
+        rows.append([InlineKeyboardButton("🏙 کلین‌شیت شهر", callback_data="clean_city")])
+    if _mc:
+        rows.append([InlineKeyboardButton("😈 کلین‌شیت مافیا", callback_data="clean_mafia")])
+    # ⚔️ میتیک کی‌آس ندارد → گزینه‌هایش هم نمی‌آید
+    if not _is_mythic_scenario(g):
+        rows += [
+            [InlineKeyboardButton("🏙 شهر (کی‌آس)", callback_data="winner_city_chaos")],
+            [InlineKeyboardButton("😈 مافیا (کی‌آس)", callback_data="winner_mafia_chaos")],
+        ]
 
     indep_roles = load_indep_roles()
     if g.scenario and g.scenario.name in indep_roles and indep_roles[g.scenario.name]:
@@ -3752,6 +3783,36 @@ async def _retry(coro):
     except RetryAfter as e:
         await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.1)
         return await coro
+
+
+def scenario_roles_text(g) -> str | None:
+    """📜 متنِ «لیست نقش‌های سناریو» — مشترکِ لیستِ خودکار و /list.
+    None اگر سناریویی انتخاب نشده باشد."""
+    if not getattr(g, "scenario", None):
+        return None
+    mafia_roles = {_nz(x) for x in load_mafia_roles()}
+    indep_for_this = {_nz(x) for x in (load_indep_roles() or {}).get(g.scenario.name, [])}
+    mafia_lines = ["<b>نقش‌های مافیا:</b>"]
+    citizen_lines = ["<b>نقش‌های شهروند:</b>"]
+    indep_lines = ["<b>نقش‌های مستقل:</b>"]
+
+    for role, count in g.scenario.roles.items():
+        for _ in range(count):
+            if _nz(role) in mafia_roles:
+                mafia_lines.append(f"♠️ {role}")
+            elif _nz(role) in indep_for_this:
+                indep_lines.append(f"♦️ {role}")
+            else:
+                citizen_lines.append(f"♥️ {role}")
+
+    lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
+    lines.extend(mafia_lines)
+    lines.append("")
+    lines.extend(citizen_lines)
+    if len(indep_lines) > 1:      # یعنی حداقل یک نقش مستقل هست
+        lines.append("")
+        lines.extend(indep_lines)
+    return "\n".join(lines)
 
 
 # ─────── تابع اصلاح‌ شده ───────────────────────────────────
@@ -4004,31 +4065,7 @@ async def publish_seating(
         # لیست نقش‌ها
         if g.scenario and mode == REG:
             if getattr(g, "last_roles_scenario_name", None) != g.scenario.name:
-                mafia_roles = {_nz(x) for x in load_mafia_roles()}
-                indep_roles = load_indep_roles()
-                indep_for_this = {_nz(x) for x in indep_roles.get(g.scenario.name, [])}
-                mafia_lines = ["<b>نقش‌های مافیا:</b>"]
-                citizen_lines = ["<b>نقش‌های شهروند:</b>"]
-                indep_lines = ["<b>نقش‌های مستقل:</b>"]
-
-                for role, count in g.scenario.roles.items():
-                    for _ in range(count):
-                        if _nz(role) in mafia_roles:
-                            mafia_lines.append(f"♠️ {role}")
-                        elif _nz(role) in indep_for_this:
-                            indep_lines.append(f"♦️ {role}")
-                        else:
-                            citizen_lines.append(f"♥️ {role}")
-
-                role_lines = ["📜 <b>لیست نقش‌های سناریو:</b>\n"]
-                role_lines.extend(mafia_lines)
-                role_lines.append("")
-                role_lines.extend(citizen_lines)
-                if len(indep_lines) > 1:  # یعنی حداقل یک نقش مستقل هست
-                    role_lines.append("")
-                    role_lines.extend(indep_lines)
-
-                role_text = "\n".join(role_lines)
+                role_text = scenario_roles_text(g)
 
                 try:
                     if getattr(g, "last_roles_msg_id", None):
@@ -4418,6 +4455,10 @@ def _score_compute(g):
     ev = getattr(g, "score_events", {}) or {}
     warns = getattr(g, "warnings", {}) or {}
     kicked = getattr(g, "score_kicked", set()) or set()
+    # 🏅 در سناریوهای بدونِ استعلامِ وضعیت (میتیک/کلاسیک/کلاسیک‌دن) کیک امتیاز را صفر
+    #    نمی‌کند — نشانِ «✖️کیک» در لیست سرِ جایش می‌ماند، فقط نمره نمی‌سوزد
+    if _side_secret(g):
+        kicked = set()
     impossible = getattr(g, "score_act_impossible", set()) or set()
     for seat in sorted(g.seats or {}):
         side = _sc_side_final(g, seat)   # 🌀 اسمیگلِ خیانت‌کرده → مافیا
@@ -4777,6 +4818,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
     if not protected:
         g.striked.add(exiter)
         store.save()
+        await _room_drop_dead(ctx, g)   # 🚪 خروجی‌شدهٔ مافیا، همان لحظه از اتاق بیرون
         try:
             await publish_seating(ctx, chat_id, g, mode=CTRL)
         except Exception:
@@ -5773,7 +5815,8 @@ async def _safe_pm(ctx, uid, text, kb=None):
 
 
 async def _report_unreachable(ctx, chat_id, g):
-    """بازیکن‌هایی که بات را استارت نکرده‌اند (نمی‌شود دکمه فرستاد) را به گروه گزارش می‌دهد."""
+    """بازیکن‌هایی که بات را استارت نکرده‌اند (نمی‌شود دکمه فرستاد).
+    📩 گزارش فقط به پیویِ گاد می‌رود، نه وسطِ گروه."""
     unreachable = []
     for s in _alive_seats(g):
         uid, name = g.seats[s]
@@ -5784,11 +5827,9 @@ async def _report_unreachable(ctx, chat_id, g):
     if unreachable:
         txt = ("⚠️ <b>این بازیکن‌ها بات را استارت نکرده‌اند</b> و دکمهٔ اکت دریافت نمی‌کنند:\n"
                + "\n".join(unreachable)
-               + "\n\nاز آن‌ها بخواهید بات را در پیوی باز کنند و /start بزنند، بعد دوباره /شب.")
-        try:
-            await ctx.bot.send_message(chat_id, txt, parse_mode="HTML")
-        except Exception:
-            pass
+               + "\n\nاز آن‌ها بخواه بات را در پیوی باز کنند و /start بزنند؛ "
+                 "به‌محضِ استارت، نقش (و لینکِ اتاق) خودکار برایشان می‌رود.")
+        await _night_report(ctx, g, txt)
     return unreachable
 
 async def _edit_pm(ctx, uid, msg_id, text, kb):
@@ -6218,6 +6259,15 @@ async def start_night(ctx, chat_id, g):
     if getattr(g, "maarefe_active", False):
         await ctx.bot.send_message(
             chat_id, "🎭 الان شبِ معارفه است و اکت‌گیری ندارد — اول «☀️ روز» را بزن تا معارفه تمام شود.")
+        return
+    # 🪢 تا تکلیفِ هانتر روشن نشده، شب شروع نمی‌شود — یادآوری فقط در پیویِ گاد
+    #    (در گروه چیزی نوشته نشود، وگرنه نقشِ خروجی لو می‌رود)
+    if getattr(g, "bzp_hunter_pending", None):
+        try:
+            await ctx.bot.send_message(
+                g.god_id, "⏸ اول تکلیفِ هانتر را همین‌جا مشخص کن (بله/خیر)، بعد شب.")
+        except Exception:
+            pass
         return
 
     _score_day_rollover(g)   # 🏅 ریستِ پرچم‌های روزِ امتیازی
@@ -6962,7 +7012,9 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
                 store.save()
 
         # 🌀 پایانِ شب با ۳ نفرِ باقی‌مانده (۲ شهر + ۱ مافیا) → حالتِ کی‌آس
+        #    ⚔️ میتیک کی‌آس ندارد: با ۳ نفر هم مثلِ همیشه برد شهر یا مافیا اعلام می‌شود
         if (after_night and not cond and len(_alive_seats(g)) == 3
+                and not _is_mythic_scenario(g)
                 and getattr(g, "assigned_roles", None)
                 and g.phase not in ("idle", "ended", "awaiting_winner")
                 and not getattr(g, "chaos_auto", False)):
@@ -7430,7 +7482,8 @@ async def _do_day(ctx, chat_id, g):
 
 
 async def _do_room_open(ctx, chat_id, g):
-    """🔓 بازکردن چت مافیا (+ در گیمر: سؤالِ بمب از الیوت) — مشترک بین «/باز» و دکمه."""
+    """🔓 بازکردن چت مافیا — مشترک بین «/باز» و دکمه.
+    💣 سؤالِ بمبِ گیمر دیگر اینجا نیست؛ دکمهٔ «💣 الیوت» در پنلِ گاد کارش را می‌کند."""
     opened = False
     if getattr(g, "mafia_room_id", None):
         await _room_set_locked(ctx, g, False)
@@ -7439,17 +7492,6 @@ async def _do_room_open(ctx, chat_id, g):
         opened = True
     else:
         await ctx.bot.send_message(chat_id, "ℹ️ اتاق مافیایی برای این بازی فعال نیست.")
-    # 💣 گیمر: اگر بمبی فعال است، از الیوت بپرس می‌خواهد کاری کند؟
-    if _is_gamer_scenario(g) and getattr(g, "gm_bomb_seat", None):
-        el = _find_seat_by_role(g, _R_ELLIOT)
-        seat = g.gm_bomb_seat
-        if el and seat in g.seats:
-            tname = g.seats[seat][1]
-            m = await _safe_pm(ctx, g.seats[el][0],
-                               f"💣 جلوی {seat}. {tname} بمب وجود دارد!\nآیا می‌خواهی کاری کنی؟",
-                               _gm_yesno_kb("gm_bz_yes", "gm_bz_no"))
-            if m:
-                await ctx.bot.send_message(chat_id, "💣 سؤالِ بمب به پیوی الیوت رفت.")
 
     # 🧑‍⚖️ بازپرسی دیگر به «باز» وابسته نیست — دکمه‌ی اختصاصیِ «بازپرسی» در پنل
 
@@ -7519,9 +7561,7 @@ def _room_open_pending(g):
     """⏸ چیزی منتظرِ دکمهٔ «باز» است؟ برچسبش را برگردان (وگرنه None).
     آینه‌ی همان شرط‌های داخلِ _do_room_open."""
     try:
-        if _is_gamer_scenario(g) and getattr(g, "gm_bomb_seat", None):
-            if _find_seat_by_role(g, _R_ELLIOT) and g.gm_bomb_seat in g.seats:
-                return "سؤالِ بمب از الیوت"
+        # 💣 گیمر دیگر اینجا نیست — سؤالِ بمب دکمهٔ اختصاصیِ «💣 الیوت» دارد
         if (_is_kapu_scenario(g) and getattr(g, "assigned_roles", None)
                 and not getattr(g, "kp_trust", None)):
             _kres = getattr(g, "kp_deng_result", None)
@@ -10206,6 +10246,7 @@ def _hb_day_exit(ctx, chat_id, g, exiter):
                 f"{bond}. {bn} بدونِ وصیت از بازی خارج شد.",
                 parse_mode="HTML")
             await _night_report(ctx, g, f"🧬 هانیبال در روز رفت → بافتش ({bond}. {bn}) هم خارج شد.")
+            await _room_drop_dead(ctx, g)   # 🚪 اگر عضوِ اتاق بود، بیرون برود
             try:
                 await publish_seating(ctx, chat_id, g, mode=CTRL)
             except Exception:
@@ -10709,9 +10750,9 @@ async def handle_hanibal_callback(update, ctx):
         g.night_sel.pop(uid, None)
         store.save()
         await _night_report(ctx, g, f"🏛 معمار → کارت جلوی <b>{_room_who(g, g.hb_card_seat)}</b>")
-        starts = [x for x in _alive_seats(g) if x != mm]   # ⚖️ خودش شروع‌کننده نمی‌شود
-        await _edit_pm(ctx, uid, mid, "🗳 رأی‌گیریِ دوئل از چه کسی شروع شود؟ (خودت نه)",
-                       _kb_night_seats(starts, g, "hb_mms_", confirm_cb=None))
+        # 🗳 شروع‌کنندهٔ رأی می‌تواند خودِ معمار هم باشد (فقط کارت را جلوی خودش نمی‌گذارد)
+        await _edit_pm(ctx, uid, mid, "🗳 رأی‌گیریِ دوئل از چه کسی شروع شود؟",
+                       _kb_night_seats(_alive_seats(g), g, "hb_mms_", confirm_cb=None))
         return
 
     if data.startswith("hb_mmt_"):
@@ -10837,42 +10878,94 @@ def _bzp_hunter_drag_target(g, hunter_seat):
 
 
 def _bzp_hunter_day_exit(ctx, chat_id, g, hunter_seat):
-    """🪢 خروجِ روزِ هانتر (رأی نهایی / بازپرسی): اگر درست بسته بود، بعد از ۹۰ ثانیه
-    اعلام می‌شود و بسته‌شده هم خط می‌خورد. (شبِ هانتر جداگانه در _resolve_baazpors است)"""
+    """🪢 خروجِ روزِ هانتر (رأی نهایی / بازپرسی): اگر درست بسته بود، همان لحظه از گاد
+    در پیوی اجازه گرفته می‌شود — «بله» یعنی می‌برد، «خیر» یعنی هیچ اتفاقی نمی‌افتد.
+    تا وقتی جواب ندهد، «شب» کار نمی‌کند. (شبِ هانتر جداگانه در _resolve_baazpors است)"""
     ht = _bzp_hunter_drag_target(g, hunter_seat)
     if ht is None:
         return
+    g.bzp_hunter_pending = [hunter_seat, ht]
+    store.save()
+
+    async def _ask():
+        try:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ بله، ببرد", callback_data="hdrag_yes"),
+                InlineKeyboardButton("🚫 خیر", callback_data="hdrag_no"),
+            ]])
+            m = await _safe_pm(
+                ctx, g.god_id,
+                f"🪢 <b>هانتر</b> ({hunter_seat}. {g.seats[hunter_seat][1]}) خارج شد و "
+                f"شبِ قبل به {ht}. {g.seats[ht][1]} (مافیا) بسته بود — "
+                f"می‌تواند او را با خودش ببرد.\nاجازه می‌دهی؟", kb)
+            if m is None:
+                # پیویِ گاد بسته است → معطلِ بی‌پایان نماند
+                g.bzp_hunter_pending = None
+                store.save()
+                await ctx.bot.send_message(
+                    chat_id, "⚠️ نتوانستم به پیویِ گاد پیام بدهم؛ تصمیمِ هانتر با خودت است.")
+        except Exception as e:
+            print("⚠️ hunter ask:", e)
+
+    asyncio.create_task(_ask())
+
+
+async def _bzp_hunter_apply(ctx, g, allow: bool):
+    """🪢 پاسخِ گاد به سؤالِ هانتر. «خیر» = هیچ واکنشی، فقط سکوت."""
+    pend = list(getattr(g, "bzp_hunter_pending", None) or [])
+    g.bzp_hunter_pending = None
+    store.save()
+    if len(pend) != 2:
+        return
+    hunter_seat, ht = pend
+    if not allow:
+        await _night_report(ctx, g, f"🪢 اجازهٔ بردنِ {ht} توسطِ هانتر داده نشد (فقط تو می‌دانی).")
+        return
+    chat_id = _game_chat_id(g)
+    if chat_id is None or g.phase in ("idle", "ended"):
+        return
+    if hunter_seat not in (g.striked or set()):
+        return                      # هانتر برگردانده شده
+    if ht not in g.seats or ht in (g.striked or set()):
+        return                      # بسته‌شده خودش قبلاً رفته
     hn = escape(g.seats[hunter_seat][1], quote=False)
     tn = escape(g.seats[ht][1], quote=False)
+    g.striked.add(ht)
+    store.save()
+    await ctx.bot.send_message(
+        chat_id,
+        f"🪢 {hunter_seat}. {hn} <b>هانتر</b> بود و {ht}. {tn} را با خودش برد — "
+        f"هر دو از لیست خط خوردند.",
+        parse_mode="HTML")
+    await _night_report(ctx, g, f"🪢 هانتر ({hunter_seat}. {hn}) در روز خارج شد → "
+                                f"{ht}. {tn} را با خود برد.")
+    await _room_drop_dead(ctx, g)   # 🚪 اگر مافیا بود، از اتاق بیرون برود
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+    await _check_auto_end(ctx, chat_id, g)   # 🏁
 
-    async def _later():
-        try:
-            await asyncio.sleep(HUNTER_DRAG_DELAY)
-            if g.phase in ("idle", "ended"):
-                return
-            # ⚠️ در این ۹۰ ثانیه ممکن است اوضاع عوض شده باشد — دوباره چک
-            if hunter_seat not in (g.striked or set()):
-                return          # هانتر برگردانده شده
-            if ht not in g.seats or ht in (g.striked or set()):
-                return          # بسته‌شده خودش قبلاً رفته
-            g.striked.add(ht)
-            store.save()
-            await ctx.bot.send_message(
-                chat_id,
-                f"🪢 {hunter_seat}. {hn} <b>هانتر</b> بود و {ht}. {tn} را با خودش برد — "
-                f"هر دو از لیست خط خوردند.",
-                parse_mode="HTML")
-            await _night_report(ctx, g, f"🪢 هانتر ({hunter_seat}. {hn}) در روز خارج شد → "
-                                        f"{ht}. {tn} را با خود برد.")
-            try:
-                await publish_seating(ctx, chat_id, g, mode=CTRL)
-            except Exception:
-                pass
-            await _check_auto_end(ctx, chat_id, g)   # 🏁
-        except Exception as e:
-            print("⚠️ hunter day drag:", e)
 
-    asyncio.create_task(_later())
+async def handle_hunter_drag_callback(update, ctx):
+    """🪢 دکمه‌های بله/خیرِ هانتر — فقط در پیویِ گادِ همان بازی."""
+    q = update.callback_query
+    uid = q.from_user.id
+    g = next((gg for gg in store.games.values()
+              if gg.god_id == uid and getattr(gg, "bzp_hunter_pending", None)), None)
+    if g is None:
+        await safe_q_answer(q, "سؤالِ بازی برای تصمیم نیست.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    _yes = (q.data == "hdrag_yes")
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=uid, message_id=q.message.message_id,
+            text=("🪢 اجازه دادی — هانتر بسته‌اش را با خود برد."
+                  if _yes else "🚫 اجازه ندادی — هانتر تنها رفت."))
+    except Exception:
+        pass
+    await _bzp_hunter_apply(ctx, g, _yes)
 
 
 async def _bzp_broadcast_special(ctx, g, kind):
@@ -17840,6 +17933,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_redo_callback(update, ctx)
         return
 
+    # 🪢 اجازهٔ بردنِ بستهٔ هانتر (پیویِ گاد)
+    if _q and _q.data in ("hdrag_yes", "hdrag_no"):
+        await handle_hunter_drag_callback(update, ctx)
+        return
+
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
                                               "gm_", "sh_", "my_", "cl_")):
@@ -18315,9 +18413,36 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
                 "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
-                "ctl_terror", "ctl_yaghi", "ctl_memar"):
+                "ctl_terror", "ctl_yaghi", "ctl_memar", "ctl_eliot"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
+            return
+
+        # 💣 الیوتِ گیمر — اگر بمبی نیست، فقط خودِ گاد پاپ‌آپ می‌بیند (چیزی لو نمی‌رود)
+        if data == "ctl_eliot":
+            if not _is_gamer_scenario(g):
+                await safe_q_answer(q, "فقط سناریوی گیمر.", show_alert=True)
+                return
+            if getattr(g, "night_active", False) or getattr(g, "maarefe_active", False):
+                await safe_q_answer(q, "سؤالِ بمب فقط در روز.", show_alert=True)
+                return
+            _bs = getattr(g, "gm_bomb_seat", None)
+            _el = _find_seat_by_role(g, _R_ELLIOT)
+            if not _bs or _bs not in g.seats:
+                await safe_q_answer(q, "بمبِ فعالی نیست.", show_alert=True)
+                return
+            if not _el:
+                await safe_q_answer(q, "الیوت در بازی نیست.", show_alert=True)
+                return
+            await safe_q_answer(q)
+            _m = await _safe_pm(ctx, g.seats[_el][0],
+                                f"💣 جلوی {_bs}. {g.seats[_bs][1]} بمب وجود دارد!\n"
+                                f"آیا می‌خواهی کاری کنی؟",
+                                _gm_yesno_kb("gm_bz_yes", "gm_bz_no"))
+            if _m:
+                await ctx.bot.send_message(chat, "💣 سؤالِ بمب به پیوی الیوت رفت.")
+            else:
+                await safe_q_answer(q, "پیویِ الیوت بسته است.", show_alert=True)
             return
 
         # 🏛 معمارِ هانیبال — اگر کارتی نیست، فقط گاد می‌فهمد
@@ -18497,6 +18622,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         elif data == "ctl_night":
+            # 🪢 تکلیفِ هانتر روشن نشده → فقط پاپ‌آپِ خودِ گاد (در گروه چیزی نه)
+            if getattr(g, "bzp_hunter_pending", None):
+                await safe_q_answer(q, "⏸ تکلیفِ هانتر را در پیویت مشخص کن.", show_alert=True)
+                return
             if not await _night_blocked_for_open(ctx, chat, g):
                 await start_night(ctx, chat, g)
         elif data == "ctl_day":
@@ -19731,6 +19860,7 @@ async def shuffle_and_assign(
     g.baz_duel_active = False
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
+    g.bzp_hunter_pending = None      # 🪢 سؤالِ معلقِ هانتر با نقشِ تازه بی‌معناست
     # 🔄 جایگزینیِ نیمه‌کاره با پخشِ نقشِ تازه بی‌معنا می‌شود
     g.sub_open = {}
     g.sub_pick = set()
@@ -20613,15 +20743,9 @@ async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("این دستور فقط در گروه‌ها قابل استفاده است.")
         return
 
-    # بررسی اینکه کاربر ادمین هست یا نه
-    try:
-        admins = await ctx.bot.get_chat_administrators(chat.id)
-        admin_ids = [admin.user.id for admin in admins]
-        if user.id not in admin_ids:
-            await update.message.reply_text("فقط ادمین‌ها می‌تونن این دستور رو اجرا کنن.")
-            return
-    except:
-        await update.message.reply_text("خطا در بررسی ادمین‌ها.")
+    # ⛔ فقط مدیرانِ اصلیِ بات — نه ادمینِ گروه، نه گاد، نه هیچ‌کس دیگر
+    if not _is_super_admin(user.id):
+        await update.message.reply_text("⛔ فقط مدیرانِ اصلیِ بات می‌توانند بازی را ریست کنند.")
         return
 
     # اجرای ریست بازی
@@ -20980,6 +21104,37 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ حالا گاد جدید بازیه {new_name}.")
 
+    # 🎛 تعویضِ گاد وسطِ شب: پنلِ دکمه‌های شب از پیویِ گادِ قدیم برداشته و
+    #    برای گادِ جدید ساخته می‌شود (وگرنه کنترلِ شب دستِ گادِ رفته می‌ماند)
+    if getattr(g, "night_active", False):
+        _oldmid = getattr(g, "night_god_panel_mid", None)
+        if _oldmid and old_god_id:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=old_god_id, message_id=_oldmid,
+                    text="👑 گادِ بازی عوض شد — دکمه‌های شب به گادِ جدید منتقل شد.")
+            except Exception:
+                try:
+                    await ctx.bot.edit_message_reply_markup(
+                        chat_id=old_god_id, message_id=_oldmid, reply_markup=None)
+                except Exception:
+                    pass
+        g.night_god_panel_mid = None
+        g.god_acting_as = None      # 🎛 اکتِ دستیِ نیمه‌کارهٔ گادِ قبلی باطل می‌شود
+        g.god_act_tmp = None
+        try:
+            _kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔥 سوزاندن اکت", callback_data="nburn_open"),
+                 InlineKeyboardButton("👢 کیک شب", callback_data="nkick_open")],
+                [InlineKeyboardButton("🎛 اکت دستی", callback_data="gact_open")],
+            ])
+            _pm = await ctx.bot.send_message(
+                target.id, f"🌙 شب {g.night_number} — پنلِ گاد", reply_markup=_kb)
+            g.night_god_panel_mid = _pm.message_id
+        except Exception:
+            await update.message.reply_text("⚠️ پنلِ شب به پیویِ گادِ جدید نرفت (پیوی بسته است).")
+        store.save()
+
     mode = CTRL if g.phase != "idle" else REG
     await publish_seating(ctx, chat, g, mode=mode)
 
@@ -21037,6 +21192,55 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception:
         pass
+    # 📬 اگر وسطِ بازی تازه استارت کرده، هرچه از دستش رفته همین حالا برایش می‌رود
+    try:
+        await _deliver_pending_on_start(ctx, update.effective_user.id)
+    except Exception as e:
+        print("⚠️ start catch-up:", e)
+
+
+async def _deliver_pending_on_start(ctx, uid):
+    """📬 بازیکنی که بات را دیر استارت کرده: نقش (+استیکر) و لینکِ اتاقِ مافیا
+    به‌محضِ استارت برایش فرستاده می‌شود — چیزی که قبلاً به‌خاطر بستهبودنِ پیوی نرسیده بود."""
+    for cid, g in list(store.games.items()):
+        if getattr(g, "phase", "idle") in ("idle", "ended"):
+            continue
+        if not getattr(g, "assigned_roles", None):
+            continue
+        seat = _seat_of_uid(g, uid)
+        if seat is None or seat in (g.striked or set()):
+            continue
+        role = (g.assigned_roles or {}).get(seat)
+        if not role:
+            continue
+        try:
+            stickers = load_stickers()
+            if role in stickers:
+                await ctx.bot.send_sticker(uid, stickers[role])
+        except Exception:
+            pass
+        try:
+            await ctx.bot.send_message(uid, f"🎭 نقش شما: {role}")
+        except Exception:
+            continue      # پیوی هنوز باز نیست — بی‌خیالِ همین بازی
+        # 🔗 اگر عضوِ تیمِ مافیاست، لینکِ اتاق هم برود
+        try:
+            if getattr(g, "mafia_room_id", None) and seat in _mafia_room_seats(g):
+                await _room_send_link(ctx, g, uid)
+        except Exception as e:
+            print("⚠️ start catch-up room link:", e)
+        await _night_report(ctx, g, f"📬 {seat}. {escape(g.seats[seat][1], quote=False)} "
+                                    f"بات را استارت کرد — نقشش (و لینکِ اتاق) خودکار ارسال شد.")
+        # 🌙 اگر وسطِ شب پرامپتِ بی‌جواب داشته، همان را هم دوباره بفرست
+        try:
+            _pc = (getattr(g, "night_prompt_cache", {}) or {}).get(uid)
+            if _pc and getattr(g, "night_active", False):
+                _m = await _safe_pm(ctx, uid, _pc[0], _kb_load(_pc[1]))
+                if _m:
+                    g.night_pm_msgs[uid] = _m.message_id
+                    store.save()
+        except Exception as e:
+            print("⚠️ start catch-up prompt:", e)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -21646,6 +21850,32 @@ async def _room_sync_on_night(ctx, g):
                 pass
         await _night_report(ctx, g, "⚠️ هنوز واردِ اتاق مافیا نشده‌اند: " + "، ".join(names)
                             + "\n(لینک دوباره برایشان ارسال شد)")
+
+
+async def _room_drop_dead(ctx, g):
+    """🚪 هر عضوِ اتاقِ مافیا که خط خورده، همان لحظه بیرون می‌رود.
+    (وگرنه تا شبِ بعد — که _room_sync_on_night اجرا شود — داخل می‌ماند؛ و اگر
+    خط‌خوردنش بعد از شروعِ شب باشد، اصلاً بیرون نمی‌رفت.)"""
+    if not getattr(g, "mafia_room_id", None):
+        return
+    removed = False
+    for uid in list(g.mafia_room_members or set()):
+        if uid == g.god_id:
+            continue
+        seat = _seat_of_uid(g, uid)
+        if seat is None or seat in (g.striked or set()):
+            try:
+                await _room_kick(ctx, g, uid)
+            except Exception:
+                pass
+            g.mafia_room_members.discard(uid)
+            removed = True
+    if removed:
+        try:
+            await _room_rotate_link(ctx, g)   # 🔗 با لینکِ قدیمی برنگردد
+        except Exception:
+            pass
+        store.save()
 
 
 async def _room_cleanup(ctx, g):
@@ -23140,6 +23370,24 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ✅ به‌روزرسانی آیدی پیام فعال
     g.last_seating_msg_id = msg.message_id
     store.save()
+
+    # 📜 لیست نقش‌های سناریو، درست زیرِ لیستِ بازیکنان
+    try:
+        _rt = scenario_roles_text(g)
+        if _rt:
+            # 🧹 نسخهٔ قبلیِ لیستِ نقش‌ها را بردار تا دوتایی نماند
+            _oldr = getattr(g, "last_roles_msg_id", None)
+            if _oldr:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat.id, message_id=_oldr)
+                except Exception:
+                    pass
+            _rmsg = await ctx.bot.send_message(chat.id, _rt, parse_mode="HTML")
+            g.last_roles_msg_id = _rmsg.message_id
+            g.last_roles_scenario_name = g.scenario.name
+            store.save()
+    except Exception as e:
+        print(f"⚠️ ارسال لیست نقش‌ها در /list: {e}")
 
     # 📌 پین کردن پیام (اختیاری ولی پیشنهاد می‌شود)
     try:
