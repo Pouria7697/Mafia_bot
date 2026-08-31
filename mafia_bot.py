@@ -6132,12 +6132,24 @@ def _room_who(g, seat) -> str:
     return f"{seat}. {escape(g.seats[seat][1], quote=False)}"
 
 
-async def _room_note(ctx, g, text):
+def _room_outsider(g, seat) -> bool:
+    """🚫 مافیایی که عضوِ اتاق نیست (گروگان‌گیر، تروریستِ میتیک، مترسکِ لینک‌نشده، …).
+    اکتِ او هرگز نباید در اتاقِ مافیا اعلام شود."""
+    if seat is None:
+        return False
+    try:
+        return seat not in set(_mafia_room_seats(g))
+    except Exception:
+        return False
+
+
+async def _room_note(ctx, g, text, actor=None):
     """📣 اعلامِ یک اکتِ مافیا در اتاقِ چتِ تیم — تا فقط خودِ اکت‌زن نداند.
     اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.
+    🚫 اگر actor داده شود و او عضوِ اتاق نباشد، اصلاً اعلام نمی‌شود.
     ⏪ وسطِ یک اکت، تا پایانِ مهلتِ «اکت مجدد» صبر می‌کند (اگر تصحیح شد، اصلاً نمی‌رود)."""
     rid = getattr(g, "mafia_room_id", None)
-    if not rid:
+    if not rid or _room_outsider(g, actor):
         return
     if _act_defer(_room_note_send, ctx, g, text):
         return
@@ -6154,11 +6166,12 @@ async def _room_note_send(ctx, g, text):
         print("⚠️ room note:", e)
 
 
-async def _room_announce_shot(ctx, g, seat, extra=""):
+async def _room_announce_shot(ctx, g, seat, extra="", actor=None):
     """🔫 اعلامِ هدفِ شات در اتاقِ چتِ مافیا — تا بقیهٔ تیم هم بدانند رئیس چه کسی را زد.
-    (در همهٔ سناریوها؛ اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.)"""
+    (در همهٔ سناریوها؛ اگر اتاقی تعریف نشده باشد بی‌صدا رد می‌شود.)
+    🚫 اگر شلیک‌کننده عضوِ اتاق نباشد، چیزی اعلام نمی‌شود."""
     rid = getattr(g, "mafia_room_id", None)
-    if not rid or seat not in (getattr(g, "seats", {}) or {}):
+    if not rid or seat not in (getattr(g, "seats", {}) or {}) or _room_outsider(g, actor):
         return
     if _act_defer(_room_shot_send, ctx, g, seat, extra):
         return
@@ -9717,7 +9730,7 @@ async def handle_night_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -10724,7 +10737,8 @@ async def handle_hanibal_callback(update, ctx):
         store.save()
         await _close_pm(ctx, uid, mid, f"🌑 سایه روی {s}. {g.seats[s][1]} ثبت شد.")
         await _night_report(ctx, g, f"🌑 سایه → روی <b>{_room_who(g, s)}</b>")
-        await _room_note(ctx, g, f"🌑 سایه روی <b>{_room_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🌑 سایه روی <b>{_room_who(g, s)}</b>",
+                         actor=_seat_of_uid(g, uid))
         await _hb_open_mafia(ctx, chat_id, g)
         return
 
@@ -10799,7 +10813,7 @@ async def handle_hanibal_callback(update, ctx):
         g.night_sel.pop(uid, None)
         g.night_done.add("mafia")
         store.save()
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {g.seats[s][1]}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(g.seats[s][1], quote=False)}</b>")
         await _hb_check_open_citizens(ctx, chat_id, g)
@@ -11490,7 +11504,7 @@ async def handle_baazpors_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -12228,7 +12242,7 @@ async def handle_nemayande_callback(update, ctx):
             return
         g.night_shot_target = s
         g.night_don_act = "shot"
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         store.save()
         if g.defuse_used:
             await _nem_finalize_mafia(ctx, chat_id, g, uid, mid, defuse=False)
@@ -13386,7 +13400,9 @@ async def handle_takavar_callback(update, ctx):
             return
         g.night_hostage_seat = s
         g.hostage_last_target = s
-        await _room_note(ctx, g, f"🔒 گروگان: <b>{_room_who(g, s)}</b>")
+        # 🚫 گروگان‌گیر عضوِ اتاقِ مافیا نیست → اکتش هم آنجا اعلام نمی‌شود
+        await _room_note(ctx, g, f"🔒 گروگان: <b>{_room_who(g, s)}</b>",
+                         actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"🔒 گرو گرفتی: {s}. {tname}")
         await _night_report(ctx, g, f"🔒 گروگانگیر → گرو گرفت: <b>{s}. {escape(tname, quote=False)}</b>")
@@ -13469,7 +13485,7 @@ async def handle_takavar_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -13976,7 +13992,7 @@ async def handle_kapu_callback(update, ctx):
             return
         g.night_shot_target = s
         g.night_don_act = "shot"
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔫 شلیک مافیا → <b>{s}. {escape(tname, quote=False)}</b>")
@@ -14134,7 +14150,8 @@ async def handle_kapu_callback(update, ctx):
         g.night_witch_target = s
         g.witch_last_target = s
         g.witch_last_night = g.night_number
-        await _room_note(ctx, g, f"🔮 جادو روی <b>{_room_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🔮 جادو روی <b>{_room_who(g, s)}</b>",
+                         actor=_seat_of_uid(g, uid))
         _tu, tname = g.seats[s]
         await _close_pm(ctx, uid, mid, f"🔮 جادو ثبت شد: {s}. {tname}")
         await _night_report(ctx, g, f"🔮 جادوگر → جادو روی <b>{s}. {escape(tname, quote=False)}</b>")
@@ -15629,7 +15646,7 @@ async def handle_gamer_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = s
-        await _room_announce_shot(ctx, g, s)
+        await _room_announce_shot(ctx, g, s, actor=_seat_of_uid(g, uid))
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {_tn}")
@@ -15787,7 +15804,8 @@ async def handle_gamer_callback(update, ctx):
             return
         g.gm_dexter_target = s
         g.gm_dexter_used = True     # 🔒 سوخت — دیگر تا آخرِ بازی باز نمی‌شود
-        await _room_note(ctx, g, f"🔪 قتلِ دکستر روی <b>{_room_who(g, s)}</b> (غیرقابلِ نجات)")
+        await _room_note(ctx, g, f"🔪 قتلِ دکستر روی <b>{_room_who(g, s)}</b> (غیرقابلِ نجات)",
+                         actor=_seat_of_uid(g, uid))
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"🔪 ثبت شد: {s}. {_tn}")
@@ -16562,7 +16580,7 @@ async def handle_mythic_callback(update, ctx):
         g.night_sel.pop(uid, None)
         _tn = g.seats[s][1]
         _w = "بسته" if g.my_shot_will == "closed" else "باز"
-        await _room_announce_shot(ctx, g, s, f" — وصیت {_w}")
+        await _room_announce_shot(ctx, g, s, f" — وصیت {_w}", actor=_seat_of_uid(g, uid))
         await _close_pm(ctx, uid, mid, f"✅ شلیک ثبت شد: {s}. {_tn} (وصیت {_w})")
         await _night_report(ctx, g,
                             f"🔫 شلیک مافیا → <b>{s}. {escape(_tn, quote=False)}</b> (وصیت {_w})")
@@ -16603,7 +16621,8 @@ async def handle_mythic_callback(update, ctx):
             return
         g.my_consort_target = s
         g.night_sel.pop(uid, None)
-        await _room_note(ctx, g, f"🎭 کانسورتی روی <b>{_room_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🎭 کانسورتی روی <b>{_room_who(g, s)}</b>",
+                         actor=_seat_of_uid(g, uid))
         _tn = g.seats[s][1]
         await _close_pm(ctx, uid, mid, f"🎭 کانسورت ثبت شد: {s}. {_tn}")
         await _night_report(ctx, g, f"🎭 کانسورت → <b>{s}. {escape(_tn, quote=False)}</b>")
@@ -17404,7 +17423,7 @@ async def handle_shahname_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         g.night_shot_target = t
-        await _room_announce_shot(ctx, g, t)
+        await _room_announce_shot(ctx, g, t, actor=_seat_of_uid(g, uid))
         g.night_done.add("mafia")
         g.night_sel.pop(uid, None)
         store.save()
