@@ -35,8 +35,11 @@ WORKER_PATH = os.path.join(_HERE, "voice_worker.py")
 PCM_BYTES_PER_SEC = 48000 * 2          # s16le, mono
 
 # جمله‌های موجود (کلید → فایل)
-PHRASES = ("time_up", "day", "night", "temp_night", "temp_night_end",
+PHRASES = ("time_up", "time_up_again", "day", "night", "temp_night", "temp_night_end",
            "yakuza", "nato", "jalad", "maarefe", "mine_on")
+
+# 🔁 جمله‌هایی که اگر فایلشان نبود، جای دیگری را می‌خوانند
+_FALLBACK = {"time_up_again": "time_up"}
 
 # 🗳 «رأی‌گیری برای صندلیِ N» — کلیدِ vote_N
 #    سفارشیِ کامل (vote_N) → وگرنه پیشوند (vote_prefix، سفارشی یا پیش‌فرض) + شمارهٔ پیش‌فرض (num_N)
@@ -127,7 +130,14 @@ def phrase_path(key: str):
         return _vote_path(n) if 1 <= n <= VOTE_SEAT_MAX else None
     if has_custom(key):
         return custom_path(key)
-    return _default_path(key)
+    p = _default_path(key)
+    if p:
+        return p
+    # 🔁 مثلاً «تکرار تایم» ساخته نشده → همان «تایم تمام شد» گفته می‌شود
+    alt = _FALLBACK.get(key)
+    if alt:
+        return custom_path(alt) if has_custom(alt) else _default_path(alt)
+    return None
 
 
 def save_custom(key: str, raw: bytes) -> str:

@@ -573,6 +573,26 @@ class GameState:
         self.gm_dexter_target = getattr(self, "gm_dexter_target", None)
         self.gm_smeagol_turned = getattr(self, "gm_smeagol_turned", False)
         self.gm_smeagol_choice = getattr(self, "gm_smeagol_choice", None)   # "die" | "mafia"
+        # ── 🎃 مترسک (گیمر ۱۷) ──
+        self.gm_scare_target = getattr(self, "gm_scare_target", None)    # سمِ امشب
+        self.gm_poisoned = getattr(self, "gm_poisoned", None)            # رأیِ نهاییِ فردایش سوخته
+        self.gm_scare_linked = getattr(self, "gm_scare_linked", False)   # با شاتِ شبِ اول لینک شد
+        # ── 💎 تانوس (گیمر ۱۷) ──
+        self.gm_th_stones = getattr(self, "gm_th_stones", []) or []      # سنگ‌های در دست
+        self.gm_th_used_night = getattr(self, "gm_th_used_night", 0)     # آخرین شبی که سنگ زد
+        self.gm_th_pick = getattr(self, "gm_th_pick", None)              # سنگِ در حالِ انتخاب
+        self.gm_th_mind_role = getattr(self, "gm_th_mind_role", None)    # نقشِ دزدیده‌شده
+        self.gm_th_kill = getattr(self, "gm_th_kill", None)              # 💠 قدرت
+        self.gm_th_shot = getattr(self, "gm_th_shot", None)              # 💠 ذهن: شاتِ کپی‌شده
+        self.gm_th_hardkill = getattr(self, "gm_th_hardkill", None)      # 💠 ذهن: قتلِ دکستری
+        self.gm_th_save = getattr(self, "gm_th_save", None)              # 💠 ذهن: سیو
+        self.gm_th_immortal = getattr(self, "gm_th_immortal", None)      # 💠 ذهن: نامیراییِ لوگان
+        self.gm_th_truth = getattr(self, "gm_th_truth", None)            # 💠 حقیقت (فردا)
+        self.gm_th_soul_day = getattr(self, "gm_th_soul_day", 0)         # 💠 روح تا این روز
+        self.gm_th_space = getattr(self, "gm_th_space", None)            # "night" | "day"
+        self.gm_th_time = getattr(self, "gm_th_time", False)             # 💠 زمان (فردا)
+        self.gm_th_novote = getattr(self, "gm_th_novote", False)         # 💠 فضا: روزِ بی‌رأی
+        self.gm_th_won = getattr(self, "gm_th_won", False)
         # ── حالت شبِ خودکار (سناریو میتیک) ──
         self.my_expected = getattr(self, "my_expected", set()) or set()
         self.my_decider_seat = getattr(self, "my_decider_seat", None)
@@ -4196,6 +4216,11 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
         voter_seat = next((s for s, (u, _) in g.seats.items() if u == uid), None)
         if not voter_seat or voter_seat in (g.striked or set()):
             return False
+        # 🎃 سمِ مترسک: رأیِ نهاییِ امروزِ این نفر خوانده می‌شود ولی شمرده نمی‌شود
+        #    (بی‌سروصدا — نه در گروه چیزی گفته می‌شود نه به خودش)
+        if (getattr(g, "vote_stage", None) == "final"
+                and getattr(g, "gm_poisoned", None) == voter_seat):
+            return True
         # 🗳 میتیک: رأی به خود مجاز است و شمرده می‌شود؛ بقیهٔ سناریوها نه
         if voter_seat == win_target and not _is_mythic_scenario(g):
             return False
@@ -4845,6 +4870,16 @@ async def _finalize_final_vote(ctx, chat_id, g):
     # ⚠️ پیامِ یکسان برای همه — هیچ ساید/نقشی لو نمی‌رود
     await ctx.bot.send_message(chat_id, f"🚪 {exiter}. {nm} حد نصاب آورد — وصیت کند.",
                                parse_mode="HTML")
+
+    # 💠 سنگِ روحِ تانوس: ۲۴ ساعت نه اجماع می‌شود نه شات
+    if (_is_gamer17(g) and _seat_role_norm(g, exiter) == _R_GM_THANOS
+            and int(getattr(g, "gm_th_soul_day", 0) or 0) >= int(g.night_number or 0)):
+        await ctx.bot.send_message(
+            chat_id, f"🕊 {exiter}. {escape(g.seats[exiter][1], quote=False)} "
+                     f"حد نصاب آورد ولی از بازی خارج نشد.", parse_mode="HTML")
+        await _night_report(ctx, g, "💠 سنگِ روح — تانوس با رأی خارج نشد (فقط تو می‌دانی).")
+        _score_votes_final(g, targets, None, False)
+        return
 
     # 🛡 زره‌پوش (مذاکره) و نگهبانِ شیلددار (تکاور) خط نمی‌خورند —
     #    تصمیم (افتادنِ شیلد یا خروج) با خودِ گاد است
@@ -5696,7 +5731,8 @@ def _mafia_role_set(g):
     if _is_gamer_scenario(g):
         # 🔪 دکستر عضوِ واقعیِ تیمِ مافیاست (در ۱۲نفره). اسمیگل حتی بعدِ خیانت
         #    اینجا نمی‌آید — «مافیای خاموش» است و در شمارش شهروند حساب می‌شود.
-        return (_R_DONC, _R_TWOFACE, _R_MORIARTY, _R_DEXTER)
+        #    🎃 مترسک (۱۷نفره) عضوِ واقعیِ تیم است، فقط لینکِ اتاق نمی‌گیرد.
+        return (_R_DONC, _R_TWOFACE, _R_MORIARTY, _R_DEXTER, _R_GM_SCARECROW)
     if _is_shahname_scenario(g):
         return _sh_dark_role_norms(g)
     if _is_mythic_scenario(g):
@@ -5730,10 +5766,12 @@ def _dead_nonneg_mafia_exists(g) -> bool:
     return False
 
 def _doctor_targets(g, doc_seat):
+    # 🎮 گیمر ۱۷: مثلِ بقیهٔ اکت‌های محدود، سیوِ خودی هم یکی بیشتر می‌شود
+    _cap = _gm_lim(g, 2) if _is_gamer_scenario(g) else 2
     out = []
     for s in _alive_seats(g):
-        if s == doc_seat and (g.doctor_self_saves or 0) >= 2:
-            continue  # سقف سیو خودی = ۲ بار
+        if s == doc_seat and (g.doctor_self_saves or 0) >= _cap:
+            continue  # سقف سیو خودی
         out.append(s)
     return out
 
@@ -6236,7 +6274,14 @@ def _night_all_done(g) -> bool:
             return False
         if "citizens_opened" not in d:
             return False
-        return (getattr(g, "gm_expected", set()) or set()) <= d
+        need = set(getattr(g, "gm_expected", set()) or set())
+        if _is_gamer17(g):
+            # 💎🎃 تانوس و مترسک هم باید اکتشان را داده باشند
+            if _gm_thanos_seat(g) is not None:
+                need.add("thanos")
+            if _find_seat_by_role(g, _R_GM_SCARECROW) is not None:
+                need.add("scare")
+        return need <= d
 
     if _is_shahname_scenario(g):
         return ({"kaveh", "shadow", "mafia", "afrasiab", "simorgh",
@@ -6433,6 +6478,16 @@ async def start_night(ctx, chat_id, g):
     g.gm_robin_steal_from = None
     g.gm_dexter_target = None      # ⚠️ gm_dexter_used ریست نمی‌شود — کلِ بازی یک‌بار
     g.gm_smeagol_choice = None
+    # per-night گیمر ۱۷ (سنگ‌های در دست و لینکِ مترسک کلِ بازی می‌مانند)
+    g.gm_scare_target = None
+    g.gm_th_pick = None
+    g.gm_th_mind_role = None
+    g.gm_th_kill = None
+    g.gm_th_shot = None
+    g.gm_th_hardkill = None
+    g.gm_th_save = None
+    g.gm_th_immortal = None
+    g.gm_th_novote = False         # 💠 روزِ بدونِ رأی با شبِ تازه تمام می‌شود
     # per-night میتیک (سقفِ تیرِ اسنایپر، سیوِ خودی‌ها و وصیتِ بستهٔ مصرف‌شده می‌مانند)
     g.my_expected = set()
     g.my_decider_seat = None
@@ -6530,9 +6585,13 @@ async def start_night(ctx, chat_id, g):
             store.save()
             await _cl_open_all(ctx, chat_id, g)
         else:
-            g.night_stage = "robin"
+            # 💎 تانوس اول از همه؛ اگر نبود مستقیم رابین‌هود
+            g.night_stage = "thanos" if _is_gamer17(g) else "robin"
             store.save()
-            await _gm_open_robin(ctx, chat_id, g)
+            if _is_gamer17(g):
+                await _gm_open_thanos(ctx, chat_id, g)
+            else:
+                await _gm_open_robin(ctx, chat_id, g)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -7244,20 +7303,48 @@ async def _resolve_gamer(ctx, chat_id, g):
     smeagol = _find_seat_by_role(g, _R_SMEAGOL)
     robbed_ok = g.gm_gift_accepted   # سرقتِ پذیرفته‌شده
     turned = []                      # 🌀 اسمیگلی که امشب به مافیا پیوست
+    linked_scare = False             # 🎃 مترسکی که با شاتِ شبِ اول لینک شد
+
+    scare = _find_seat_by_role(g, _R_GM_SCARECROW)
+    thanos = _gm_thanos_seat(g)
+    sc_t = getattr(g, "gm_scare_target", None)      # 🎃 هدفِ سمِ امشب
+    # 🎃 سم روی دن‌کارلئونه → شاتِ مافیا اصلاً نمی‌نشیند (شاتِ دکستر بی‌اثر نمی‌شود)
+    if sc_t is not None and don is not None and sc_t == don:
+        if g.night_shot_target:
+            await _night_report(ctx, g, "🎃 سمِ مترسک روی دن‌کارلئونه — شاتِ مافیا امشب نشست نکرد.")
+        g.night_shot_target = None
+    # 🎃 سم روی لوگان → فقط نامیراییِ شبش می‌رود (رأیش نمی‌سوزد)
+    sc_logan = (sc_t is not None and logan is not None and sc_t == logan)
+
+    def _th_safe(seat):
+        """💎 نامیراییِ تانوس: شب‌های زوج + ۲۴ ساعتِ سنگِ روح."""
+        if thanos is None or seat != thanos:
+            return False
+        if int(g.night_number or 0) % 2 == 0:
+            return True
+        return int(getattr(g, "gm_th_soul_day", 0) or 0) >= int(g.night_number or 0)
 
     # 🔫 شلیک مافیا — لوگان (یا گیرنده‌ی قدرتش) نامیرا؛ سیو کستیل
     st = g.night_shot_target
     if st and st in g.seats:
         immortal = False
-        if logan is not None and st == logan and not (robbed_ok and g.gm_robbed_seat == logan):
-            immortal = True   # لوگان نامیرای شب (مگر امشب دزدیده شده باشد)
+        if (logan is not None and st == logan and not sc_logan
+                and not (robbed_ok and g.gm_robbed_seat == logan)):
+            immortal = True   # لوگان نامیرای شب (مگر دزدیده یا مسمومِ مترسک شده باشد)
         if robbed_ok and g.gm_robbed_seat == logan and st == g.gm_gift_to:
             immortal = True   # گیرنده‌ی هدیه، نامیرایی لوگان را دارد
         if don is not None and st == don and not (robbed_ok and g.gm_robbed_seat == don):
             immortal = True   # دن نامیرای شب است (مگر امشب دزدیده شده باشد)
+        if st == getattr(g, "gm_th_immortal", None):
+            immortal = True   # 💠 نامیراییِ لوگان که تانوس با سنگِ ذهن اجرا کرده
+        if _th_safe(st):
+            immortal = True   # 💎 تانوس (شبِ زوج یا سنگِ روح)
         if not immortal and not _is_saved(g, st):
             if smeagol is not None and st == smeagol and not g.gm_smeagol_turned:
                 turned.append(st)     # 🌀 اسمیگل با شاتِ مافیا نمی‌میرد — مافیا می‌شود
+            elif (scare is not None and st == scare and int(g.night_number or 0) == 1
+                  and not getattr(g, "gm_scare_linked", False)):
+                linked_scare = True   # 🎃 شاتِ شبِ اول روی مترسک → لینک، نه مرگ
             else:
                 dead.add(st); reasons[st] = "شلیک مافیا"
 
@@ -7297,14 +7384,53 @@ async def _resolve_gamer(ctx, chat_id, g):
         g.gm_bomb_fuses = {}
         store.save()
 
+    # 💠 شاتِ کپی‌شدهٔ تانوس (سنگِ ذهن) — با همان قواعدِ شاتِ عادی
+    ths = getattr(g, "gm_th_shot", None)
+    if ths and ths in g.seats and ths not in dead:
+        _imm = (_th_safe(ths)
+                or (logan is not None and ths == logan and not sc_logan)
+                or (don is not None and ths == don)
+                or ths == getattr(g, "gm_th_immortal", None))
+        if not _imm and not _is_saved(g, ths):
+            dead.add(ths); reasons[ths] = "شلیکِ تانوس (سنگِ ذهن)"
+    # 💠 قتلِ غیرقابلِ‌نجات (کپیِ دکستر)
+    thh = getattr(g, "gm_th_hardkill", None)
+    if thh and thh in g.seats and thh not in dead and not _th_safe(thh):
+        dead.add(thh); reasons[thh] = "قتلِ تانوس (سنگِ ذهن)"
+    # 💠 سنگِ قدرت — بی‌استثنا
+    thk = getattr(g, "gm_th_kill", None)
+    if thk and thk in g.seats:
+        dead.add(thk); reasons[thk] = "سنگِ قدرتِ تانوس"
+
+    # 💎 نامیراییِ تانوس: هیچ مرگی امشب رویش نمی‌نشیند
+    if thanos is not None and thanos in dead and _th_safe(thanos):
+        dead.discard(thanos)
+        reasons.pop(thanos, None)
+        await _night_report(ctx, g, "💎 تانوس امشب نامیرا بود — اکتِ رویش بی‌اثر شد.")
+
     _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+    # 🎃 سمِ مترسک → رأیِ نهاییِ فردای این نفر شمرده نمی‌شود (کاملاً بی‌صدا)
+    g.gm_poisoned = None
+    if (sc_t is not None and sc_t in g.seats and sc_t not in (g.striked or set())
+            and not sc_logan and not (don is not None and sc_t == don)):
+        g.gm_poisoned = sc_t
+        await _night_report(ctx, g, f"🎃 رأیِ نهاییِ فردای <b>{sc_t}</b> شمرده نمی‌شود "
+                                    f"(سمِ مترسک — در گروه اعلام نمی‌شود).")
+    elif sc_logan:
+        await _night_report(ctx, g, "🎃 سمِ مترسک روی لوگان — فقط نامیراییِ شبش گرفته شد.")
+    store.save()
 
     # 🌀 پیوستنِ اسمیگل — بی‌صدا: نه در گروه، نه به تیمِ مافیا، نه لینکِ اتاق
     for s in dict.fromkeys(turned):
         if s in (g.striked or set()):
             continue          # اگر با اکتِ دیگری (مثلاً دکستر) همان شب مُرد، پیوستنی در کار نیست
         await _gm_smeagol_join(ctx, g, s)
+
+    # 🎃 مترسکِ شبِ اول که شات خورد → لینکِ دوطرفه
+    if linked_scare and scare is not None and scare not in (g.striked or set()):
+        await _gm_scare_link(ctx, g, scare)
 
 
 async def _resolve_kapu(ctx, chat_id, g):
@@ -7523,9 +7649,69 @@ async def _do_day(ctx, chat_id, g):
     else:
         await end_night(ctx, chat_id, g)
 
+    # 💎 اثرهای روزِ تانوس (حقیقت / فضا / زمان) — قبل از سرِ صحبت
+    if _started_day and _is_gamer17(g):
+        if await _gm_thanos_day(ctx, chat_id, g):
+            return          # 🌙 سنگِ فضا: دو شبِ پشتِ هم → روزی در کار نیست
+
     # 🗣 اعلامِ سرِ صحبتِ امروز (بعد از خط‌خوردنِ کشته‌های شب)
     if _started_day:
         await _announce_speak_order(ctx, chat_id, g)
+
+
+async def _gm_thanos_day(ctx, chat_id, g) -> bool:
+    """💎 اثرهای روزِ تانوس. True یعنی «امروز روزی نیست» (سنگِ فضا → شبِ دوباره)."""
+    # 💠 حقیقت: نقشش اعلام و بعد خارج می‌شود
+    t = getattr(g, "gm_th_truth", None)
+    g.gm_th_truth = None
+    if t and t in g.seats and t not in (g.striked or set()):
+        _role = (g.assigned_roles or {}).get(t, "—")
+        await ctx.bot.send_message(
+            chat_id,
+            f"💠 <b>سنگِ حقیقت</b> — {t}. {escape(g.seats[t][1], quote=False)} "
+            f"نقشش را اعلام می‌کند: <b>{escape(_role, quote=False)}</b>",
+            parse_mode="HTML")
+        g.striked.add(t)
+        store.save()
+        await ctx.bot.send_message(
+            chat_id, f"⚰️ {t}. {escape(g.seats[t][1], quote=False)} بعد از اعلامِ نقشش "
+                     f"از بازی خارج شد.", parse_mode="HTML")
+        await _night_report(ctx, g, f"💠 حقیقت → نقشِ {t} اعلام و خارج شد.")
+        await _room_drop_dead(ctx, g)
+        try:
+            await publish_seating(ctx, chat_id, g, mode=CTRL)
+        except Exception:
+            pass
+        await _check_auto_end(ctx, chat_id, g)
+
+    # 💠 فضا
+    sp = getattr(g, "gm_th_space", None)
+    g.gm_th_space = None
+    store.save()
+    if sp == "night":
+        await ctx.bot.send_message(
+            chat_id, "🌙 <b>به دستورِ تانوس دو شبِ پشتِ هم داریم</b> — روزی در کار نیست.",
+            parse_mode="HTML")
+        await _night_report(ctx, g, "💠 فضا → شبِ دوباره (بدونِ روز)")
+        await start_night(ctx, chat_id, g)
+        return True
+    if sp == "day":
+        g.gm_th_novote = True
+        store.save()
+        await ctx.bot.send_message(
+            chat_id, "☀️ <b>به دستورِ تانوس دو روزِ پشتِ هم داریم</b> — امروز رأی‌گیری نداریم.",
+            parse_mode="HTML")
+        await _night_report(ctx, g, "💠 فضا → روزِ بدونِ رأی‌گیری")
+
+    # 💠 زمان
+    if getattr(g, "gm_th_time", False):
+        g.gm_th_time = False
+        store.save()
+        await ctx.bot.send_message(
+            chat_id, "⏳ <b>به دستورِ تانوس امروز مستقیم به رأی‌گیری می‌رویم.</b>",
+            parse_mode="HTML")
+        await _night_report(ctx, g, "💠 زمان → روزِ مستقیم به رأی‌گیری")
+    return False
 
 
 async def _do_room_open(ctx, chat_id, g):
@@ -8644,11 +8830,15 @@ async def _burn_advance(ctx, chat_id, g):
             for _rn, _key in ((_R_ROBIN, "robin"), (_R_HOLMES, "holmes"), (_R_TWOFACE, "bomb"),
                               (_R_MORIARTY, "moriarty"), (_R_DEXTER, "dexter"),
                               (_R_CASTIEL, "doctor"), (_R_ELLIOT, "eliot"),
-                              (_R_JAMES, "james"), (_R_RICK, "rick")):
+                              (_R_JAMES, "james"), (_R_RICK, "rick"),
+                              (_R_GM_THANOS, "thanos"), (_R_GM_SCARECROW, "scare")):
                 if _actor_burned(_rn):
                     done.add(_key)
                     if _key == "bomb":
                         done.add("tfchoice")
+            # 💎 تانوسِ سوخته → زنجیره از رابین‌هود ادامه پیدا کند
+            if "thanos" in done and "robin" not in done:
+                await _gm_open_robin(ctx, chat_id, g)
             # 🔫 شات: دستِ گیرندهٔ هدیه، وگرنه دن → موریارتی → تووفیس → دکستر
             if "shot" not in done:
                 _don = _find_seat_by_role(g, _R_DONC)
@@ -14479,6 +14669,249 @@ def _gm_own_act_skipped(g, seat) -> bool:
     return bool(g.gm_gift_accepted and g.gm_gift_to == seat and g.gm_robbed_seat != seat)
 
 
+# ═════════════════════════════════════════════════════════════
+#  🎮 گیمر ۱۷ — همان نقش‌های ۱۲نفره + ۳ هابیت + مترسک + تانوس
+#  • همهٔ اکت‌های محدود یکی بیشتر می‌شوند (به‌جز شاتِ دکستر که ۲ می‌ماند)
+#  • هابیت شهروندِ ساده است و اکتی ندارد
+# ═════════════════════════════════════════════════════════════
+_R_GM_HOBBIT    = _nz("هابیت")
+_R_GM_SCARECROW = _nz("مترسک")
+_R_GM_THANOS    = _nz("تانوس")
+
+
+def _is_gamer17(g) -> bool:
+    """🎮 نسخهٔ ۱۷نفرهٔ گیمر (از روی اسمِ سناریو یا ظرفیت)."""
+    if not _is_gamer_scenario(g):
+        return False
+    try:
+        nm = _nz(getattr(g.scenario, "name", "") or "")
+        if "17" in nm or "۱۷" in nm:
+            return True
+        return int(getattr(g, "max_seats", 0) or 0) == 17
+    except Exception:
+        return False
+
+
+def _gm_lim(g, base: int) -> int:
+    """🔢 سقفِ یک اکتِ محدود — در ۱۷نفره یکی بیشتر."""
+    return base + 1 if _is_gamer17(g) else base
+
+
+# ─── 🎃 مترسک — یارِ خاموشِ مافیا ────────────────────────────
+async def _gm_open_scare(ctx, chat_id, g):
+    """🎃 سمِ شبانهٔ مترسک — همراهِ بلوکِ شهروندها باز می‌شود (اولویتی ندارد)."""
+    sc = _find_seat_by_role(g, _R_GM_SCARECROW)
+    if not sc or _gm_own_act_skipped(g, sc):
+        g.night_done.add("scare")
+        store.save()
+        return
+    actor = _gm_actor_for(g, sc)
+    targets = [s for s in _alive_seats(g) if s != sc]
+    await _gm_prompt(ctx, g, actor, "scare", "🎃 به چه کسی سم تزریق می‌کنی؟",
+                     _kb_night_seats(targets, g, "gm_sc_", confirm_cb="gm_sc_ok"))
+
+
+async def _gm_scare_link(ctx, g, seat):
+    """🔗 مترسکِ شبِ اول که شات خورد: از این به بعد دوطرفه با مافیا لینک است."""
+    g.gm_scare_linked = True
+    store.save()
+    mates = [f"{m}. {g.seats[m][1]} — {(g.assigned_roles or {}).get(m, '—')}"
+             for m in sorted(_mafia_seats(g))
+             if m != seat and m in g.seats and m not in (g.striked or set())]
+    try:
+        await ctx.bot.send_message(
+            g.seats[seat][0],
+            "🔗 شاتِ شبِ اول تو را نکشت — از این لحظه با تیمِ مافیا لینک شدی.\n\n"
+            "😈 یارانت:\n" + ("\n".join(mates) if mates else "—"))
+    except Exception:
+        pass
+    for m in _mafia_seats(g, alive_only=True):
+        if m == seat:
+            continue
+        try:
+            await ctx.bot.send_message(
+                g.seats[m][0],
+                f"🔗 <b>{seat}. {escape(g.seats[seat][1], quote=False)}</b> مترسکِ تیمِ شماست "
+                f"و از امشب با شما لینک شد.", parse_mode="HTML")
+        except Exception:
+            pass
+    try:
+        if getattr(g, "mafia_room_id", None):
+            await _room_send_link(ctx, g, g.seats[seat][0])
+    except Exception as e:
+        print("⚠️ scare link room:", e)
+    await _night_report(ctx, g, f"🎃 مترسک ({seat}) با شاتِ شبِ اول لینک شد (دوطرفه).")
+
+
+# ─── 💎 تانوس — مستقل ───────────────────────────────────────
+_TH_STONES = {
+    "power":  ("💠 قدرت", "هر کسی را انتخاب کنی بی‌استثنا از بازی خارج می‌شود."),
+    "mind":   ("💠 ذهن", "نقشِ یک نفر را می‌فهمی و ابلیتی‌اش را روی فردِ دیگری اجرا می‌کنی."),
+    "space":  ("💠 فضا", "دو روز یا دو شب پشتِ هم."),
+    "soul":   ("💠 روح", "۲۴ ساعت نامیرا (نه اجماع، نه شات)."),
+    "truth":  ("💠 حقیقت", "یک نفر فردا نقشش اعلام می‌شود و بعد از بازی خارج می‌شود."),
+    "time":   ("💠 زمان", "روزِ بعد مستقیم به رأی‌گیری می‌رود."),
+}
+_TH_GIFTS = {2: ("power", "mind"), 4: ("space", "soul"), 6: ("truth", "time")}
+THANOS_WIN_NIGHT = 6
+
+
+def _gm_thanos_seat(g):
+    return _find_seat_by_role(g, _R_GM_THANOS)
+
+
+def _th_stone_kb(g):
+    rows = [[InlineKeyboardButton(_TH_STONES[k][0], callback_data=f"gm_th_s_{k}")]
+            for k in (g.gm_th_stones or []) if k in _TH_STONES]
+    rows.append([InlineKeyboardButton("⏭ امشب هیچ‌کدام", callback_data="gm_th_skip")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _gm_open_thanos(ctx, chat_id, g):
+    """💎 تانوس اول از همه اکت می‌دهد — قبل از رابین‌هود."""
+    if "thanos" in (g.night_done or set()):
+        return
+    th = _gm_thanos_seat(g)
+    if not th:
+        g.night_done.add("thanos")
+        store.save()
+        await _gm_open_robin(ctx, chat_id, g)
+        return
+
+    # 🏆 شبِ ششم و هنوز زنده → بردِ مستقل
+    if int(g.night_number or 0) >= THANOS_WIN_NIGHT and not g.gm_th_won:
+        g.gm_th_won = True
+        store.save()
+        try:
+            await ctx.bot.send_message(
+                g.god_id,
+                f"🏆 <b>تانوس</b> ({th}. {escape(g.seats[th][1], quote=False)}) تا شبِ "
+                f"{THANOS_WIN_NIGHT} زنده ماند — <b>بردِ مستقل</b>.\n"
+                f"<i>هر وقت خواستی «اتمام بازی» را بزن و «مستقل» را انتخاب کن.</i>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        await _night_report(ctx, g, "🏆 تانوس به شبِ ششم رسید — بردِ مستقل.")
+
+    # 🎁 هدیهٔ شب‌های زوج
+    gift = _TH_GIFTS.get(int(g.night_number or 0))
+    if gift:
+        _new = [k for k in gift if k not in (g.gm_th_stones or [])]
+        if _new:
+            g.gm_th_stones = list(g.gm_th_stones or []) + _new
+            store.save()
+            try:
+                await ctx.bot.send_message(
+                    g.seats[th][0],
+                    "🎁 دو سنگِ تازه گرفتی:\n"
+                    + "\n".join(f"{_TH_STONES[k][0]} — {_TH_STONES[k][1]}" for k in _new))
+            except Exception:
+                pass
+            await _night_report(ctx, g, "💎 تانوس دو سنگِ تازه گرفت: "
+                                        + "، ".join(_TH_STONES[k][0] for k in _new))
+
+    if not (g.gm_th_stones or []):
+        g.night_done.add("thanos")
+        store.save()
+        await _gm_open_robin(ctx, chat_id, g)
+        return
+    await _gm_prompt(ctx, g, th, "thanos",
+                     f"💎 شب {g.night_number} — کدام سنگ را می‌زنی؟", _th_stone_kb(g))
+
+
+async def _th_after(ctx, chat_id, g):
+    """💎 پایانِ اکتِ تانوس → نوبتِ رابین‌هود."""
+    g.night_done.add("thanos")
+    store.save()
+    await _gm_open_robin(ctx, chat_id, g)
+
+
+def _th_use(g, key):
+    g.gm_th_stones = [k for k in (g.gm_th_stones or []) if k != key]
+    g.gm_th_used_night = int(g.night_number or 0)
+    g.gm_th_pick = None
+    store.save()
+
+
+# 💠 ذهن: نقش → (کلیدِ اثر، متنِ سؤال). None یعنی اکتی ندارد و سنگ می‌سوزد.
+def _th_mind_effect(rn):
+    if rn in (_R_DONC, _R_RICK):
+        return ("shot", "🔫 شلیک به چه کسی؟")
+    if rn == _R_DEXTER:
+        return ("hardkill", "🔪 قتلِ غیرقابلِ‌نجات روی چه کسی؟")
+    if rn == _R_CASTIEL:
+        return ("save", "💉 چه کسی را سیو می‌دهی؟")
+    if rn == _R_LOGAN:
+        return ("immortal", "🛡 چه کسی امشب نامیرا شود؟")
+    if rn == _R_TWOFACE:
+        return ("bomb", "💣 بمب جلوی چه کسی؟")
+    if rn == _R_ELLIOT:
+        return ("protect", "🛡 چه کسی از بمب محافظت شود؟")
+    if rn == _R_GM_SCARECROW:
+        return ("poison", "🎃 به چه کسی سم تزریق می‌کنی؟")
+    if rn == _R_HOLMES:
+        return ("guess_don", "🕵️ حدس بزن دن‌کارلئونه کیست:")
+    if rn == _R_MORIARTY:
+        return ("guess_holmes", "🎭 حدس بزن مسترهلمز کیست:")
+    if rn == _R_ROBIN:
+        return ("rob", "🏹 اکتِ چه کسی را امشب بسوزانی؟")
+    if rn == _R_JAMES:
+        return ("dice", "🎲 با چه کسی تاس می‌اندازی؟")
+    return None
+
+
+async def _gm_th_mind_apply(ctx, chat_id, g, uid, mid, eff, s):
+    """💠 اجرای ابلیتیِ دزدیده‌شده روی هدف — نتیجه را خودِ تانوس می‌بیند."""
+    nm = escape(g.seats[s][1], quote=False)
+    txt = ""
+    if eff == "shot":
+        g.gm_th_shot = s
+        txt = f"🔫 شلیک به {s}. {g.seats[s][1]} ثبت شد."
+    elif eff == "hardkill":
+        g.gm_th_hardkill = s
+        txt = f"🔪 قتلِ غیرقابلِ‌نجات روی {s}. {g.seats[s][1]} ثبت شد."
+    elif eff == "save":
+        g.gm_th_save = s
+        g.night_doc_saved = list(set((g.night_doc_saved or []) + [s]))
+        txt = f"💉 سیوِ {s}. {g.seats[s][1]} ثبت شد."
+    elif eff == "immortal":
+        g.gm_th_immortal = s
+        txt = f"🛡 {s}. {g.seats[s][1]} امشب نامیراست."
+    elif eff == "bomb":
+        # 💣 تانوس چاشنی‌ها را نمی‌چیند (کارِ تووفیس است) → تصادفی بسته می‌شود
+        _types = list(_GM_FUSE_TYPES)
+        random.shuffle(_types)
+        g.gm_bomb_seat = s
+        g.gm_bomb_fuses = {c: t for c, t in zip(_GM_FUSE_COLORS, _types)}
+        txt = f"💣 بمب جلوی {s}. {g.seats[s][1]} گذاشته شد (چاشنی‌ها تصادفی)."
+    elif eff == "protect":
+        g.gm_eliot_protect = s
+        txt = f"🛡 {s}. {g.seats[s][1]} از بمب محافظت شد."
+    elif eff == "poison":
+        g.gm_scare_target = s
+        txt = f"🎃 سم به {s}. {g.seats[s][1]} تزریق شد."
+    elif eff == "rob":
+        _burn_seat_acts(g, s, force=True)
+        g.night_burned.add(s)
+        try:
+            g.night_burned_uids.add(g.seats[s][0])
+        except Exception:
+            pass
+        txt = f"🏹 اکتِ {s}. {g.seats[s][1]} امشب سوزانده شد."
+    elif eff == "guess_don":
+        ok = _seat_role_norm(g, s) == _R_DONC
+        txt = f"🕵️ {s}. {g.seats[s][1]} دن‌کارلئونه است؟ " + ("✅ بله" if ok else "❌ خیر")
+    elif eff == "guess_holmes":
+        ok = _seat_role_norm(g, s) == _R_HOLMES
+        txt = f"🎭 {s}. {g.seats[s][1]} مسترهلمز است؟ " + ("✅ بله" if ok else "❌ خیر")
+    elif eff == "dice":
+        _v = random.randint(1, 6)
+        txt = f"🎲 تاس با {s}. {g.seats[s][1]} → عدد <b>{_v}</b>"
+    store.save()
+    await _close_pm(ctx, uid, mid, f"💠 ذهن — {txt}")
+    await _night_report(ctx, g, f"💠 تانوس (ذهن) → {eff} روی <b>{s}. {nm}</b>")
+
+
 def _gm_rick_unlocked(g) -> bool:
     """ریک بعد از خروجِ ۲ شهروند آزاد می‌شود (شهروند = غیرمافیا، بر اساس نقش)."""
     mafia = _mafia_seats(g)
@@ -14506,29 +14939,24 @@ def _gm_dexter_targets(g):
 
 
 async def _gm_smeagol_join(ctx, g, seat):
-    """🌀 پیوستنِ اسمیگل به تیمِ مافیا — کاملاً خاموش:
-    نه لینکِ اتاق می‌گیرد، نه تیمِ مافیا خبردار می‌شود، نه در شمارشِ ساید مافیا حساب می‌شود.
-    فقط خودش تیم را می‌شناسد و در لیستِ پایانی «مافیا» نمایش داده می‌شود."""
+    """🌀 پیوستنِ اسمیگل به تیمِ مافیا — کاملاً خاموش و دوطرفه ناشناس:
+    نه لینکِ اتاق می‌گیرد، نه تیمِ مافیا خبردار می‌شود، نه خودش یارانش را می‌شناسد،
+    و نه در شمارشِ ساید مافیا حساب می‌شود. فقط در لیستِ پایانی «مافیا» دیده می‌شود."""
     g.gm_smeagol_turned = True
     store.save()
-    mates = []
-    for m in sorted(_mafia_seats(g)):
-        if m == seat or m not in g.seats:
-            continue
-        tag = " (خارج‌شده)" if m in (g.striked or set()) else ""
-        mates.append(f"{m}. {g.seats[m][1]} — {(g.assigned_roles or {}).get(m, '—')}{tag}")
     try:
         await ctx.bot.send_message(
             g.seats[seat][0],
-            "🖤 از این لحظه به تیمِ مافیا خیانت‌شده‌ای و عضوِ آن‌ها هستی.\n\n"
-            "😈 تیمِ مافیا:\n" + ("\n".join(mates) if mates else "—")
-            + "\n\n⚠️ آن‌ها از پیوستنِ تو خبر ندارند و لینکِ اتاقِ مافیا هم به تو داده نمی‌شود.")
+            "🖤 از این لحظه به تیمِ مافیا خیانت کرده‌ای و عضوِ آن‌ها هستی.\n\n"
+            "⚠️ تو یارانت را نمی‌شناسی و آن‌ها هم از پیوستنِ تو خبر ندارند؛ "
+            "لینکِ اتاقِ مافیا هم به تو داده نمی‌شود.")
     except Exception:
         pass
     await _night_report(
         ctx, g,
         f"🌀 اسمیگل ({seat}. {escape(g.seats[seat][1], quote=False)}) به تیمِ مافیا پیوست — "
-        "«مافیای خاموش» (در شمارش، شهروند؛ فقط در لیستِ پایانی مافیا).")
+        "«مافیای خاموش» (نه یارانش را می‌شناسد نه آن‌ها او را؛ در شمارش شهروند، "
+        "فقط در لیستِ پایانی مافیا).")
 
 
 def _gm_citizen_role_names(g):
@@ -14587,7 +15015,7 @@ def _gm_yesno_kb(yes_cb, no_cb):
 # ── مرحله ۱: رابین‌هود ─────────────────────────────────────────
 async def _gm_open_robin(ctx, chat_id, g):
     rb = _find_seat_by_role(g, _R_ROBIN)
-    if not rb or g.gm_robin_uses >= 2:
+    if not rb or g.gm_robin_uses >= _gm_lim(g, 2):
         g.night_done.add("robin")
         store.save()
         if _dead_priority_delay(g, _R_ROBIN):
@@ -14597,14 +15025,14 @@ async def _gm_open_robin(ctx, chat_id, g):
             await _gm_open_holmes(ctx, chat_id, g)
         return
     await _gm_prompt(ctx, g, rb, "robin",
-                     f"🏹 شب {g.night_number} — می‌خواهی راهزنی کنی؟ (باقی‌مانده: {2 - g.gm_robin_uses})",
+                     f"🏹 شب {g.night_number} — می‌خواهی راهزنی کنی؟ (باقی‌مانده: {_gm_lim(g, 2) - g.gm_robin_uses})",
                      _gm_yesno_kb("gm_rb_yes", "gm_rb_no"))
 
 
 # ── مرحله ۲: مسترهلمز ─────────────────────────────────────────
 async def _gm_open_holmes(ctx, chat_id, g):
     hs = _find_seat_by_role(g, _R_HOLMES)
-    if not hs or g.gm_holmes_uses >= 3 or _gm_own_act_skipped(g, hs):
+    if not hs or g.gm_holmes_uses >= _gm_lim(g, 3) or _gm_own_act_skipped(g, hs):
         g.night_done.add("holmes")
         store.save()
         if _dead_priority_delay(g, _R_HOLMES):
@@ -14615,7 +15043,7 @@ async def _gm_open_holmes(ctx, chat_id, g):
         return
     actor = _gm_actor_for(g, hs)
     await _gm_prompt(ctx, g, actor, "holmes",
-                     f"🕵️ می‌خواهی حدس بزنی دن‌کارلئونه کیست؟ (باقی‌مانده: {3 - g.gm_holmes_uses})",
+                     f"🕵️ می‌خواهی حدس بزنی دن‌کارلئونه کیست؟ (باقی‌مانده: {_gm_lim(g, 3) - g.gm_holmes_uses})",
                      _gm_yesno_kb("gm_hm_yes", "gm_hm_no"))
 
 
@@ -14686,10 +15114,10 @@ async def _gm_open_mafia(ctx, chat_id, g):
         g.night_done.add("bomb")
 
     # 🎭 موریارتی — اختیاری، ۳ حدس در کل بازی
-    if mo and g.gm_moriarty_uses < 3 and not _gm_own_act_skipped(g, mo):
+    if mo and g.gm_moriarty_uses < _gm_lim(g, 3) and not _gm_own_act_skipped(g, mo):
         actor = _gm_actor_for(g, mo)
         await _gm_prompt(ctx, g, actor, "moriarty",
-                         f"🎭 می‌خواهی حدس بزنی مسترهلمز کیست؟ (باقی‌مانده: {3 - g.gm_moriarty_uses})",
+                         f"🎭 می‌خواهی حدس بزنی مسترهلمز کیست؟ (باقی‌مانده: {_gm_lim(g, 3) - g.gm_moriarty_uses})",
                          _gm_yesno_kb("gm_mo_yes", "gm_mo_no"))
     else:
         g.night_done.add("moriarty")
@@ -14737,10 +15165,10 @@ async def _gm_check_open_citizens(ctx, chat_id, g):
 
     # 🎲 جیمزهالیدی — اختیاری، ۲ بار در کل بازی
     jm = _find_seat_by_role(g, _R_JAMES)
-    if jm and g.gm_james_uses < 2 and not _gm_own_act_skipped(g, jm):
+    if jm and g.gm_james_uses < _gm_lim(g, 2) and not _gm_own_act_skipped(g, jm):
         actor = _gm_actor_for(g, jm)
         await _gm_prompt(ctx, g, actor, "james",
-                         f"🎲 می‌خواهی بازی کنی؟ (باقی‌مانده: {2 - g.gm_james_uses})",
+                         f"🎲 می‌خواهی بازی کنی؟ (باقی‌مانده: {_gm_lim(g, 2) - g.gm_james_uses})",
                          _gm_yesno_kb("gm_jm_yes", "gm_jm_no"))
 
     # 🔫 ریک‌گرایمز — بعد از خروج ۲ شهروند، هر شب یک شات
@@ -14749,6 +15177,10 @@ async def _gm_check_open_citizens(ctx, chat_id, g):
         actor = _gm_actor_for(g, rk)
         await _gm_prompt(ctx, g, actor, "rick", "🔫 می‌خواهی شات بزنی؟",
                          _gm_yesno_kb("gm_rk_yes", "gm_rk_no"))
+
+    # 🎃 مترسک — اولویتی ندارد و همین‌جا با شهروندها باز می‌شود
+    if _is_gamer17(g):
+        await _gm_open_scare(ctx, chat_id, g)
     store.save()
 
 
@@ -14873,6 +15305,173 @@ async def handle_gamer_callback(update, ctx):
         return
     await safe_q_answer(q)
     mid = q.message.message_id if q.message else None
+
+    # ── 🎃 مترسک ──
+    if data == "gm_sc_ok":
+        if "scare" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.gm_scare_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("scare")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🎃 سم به {s}. {g.seats[s][1]} تزریق شد.")
+        await _night_report(ctx, g, f"🎃 مترسک → سم روی <b>{s}. "
+                                    f"{escape(g.seats[s][1], quote=False)}</b>")
+        return
+
+    if data.startswith("gm_sc_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        sc = _seat_of_uid(g, uid)
+        await _edit_pm(ctx, uid, mid, "🎃 به چه کسی سم تزریق می‌کنی؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != sc],
+                                       g, "gm_sc_", selected=s, confirm_cb="gm_sc_ok"))
+        return
+
+    # ── 💎 تانوس ──
+    if data == "gm_th_skip":
+        await _close_pm(ctx, uid, mid, "💎 امشب سنگی نزدی.")
+        await _night_report(ctx, g, "💎 تانوس → سنگی نزد")
+        await _th_after(ctx, chat_id, g)
+        return
+
+    if data.startswith("gm_th_s_"):
+        key = data[len("gm_th_s_"):]
+        if key not in (g.gm_th_stones or []):
+            await safe_q_answer(q, "این سنگ را نداری.", show_alert=True)
+            return
+        g.gm_th_pick = key
+        store.save()
+        th = _seat_of_uid(g, uid)
+        if key == "space":
+            await _edit_pm(ctx, uid, mid, "💠 فضا — برای روز می‌خواهی یا شب؟",
+                           InlineKeyboardMarkup([
+                               [InlineKeyboardButton("🌙 دو شبِ پشتِ هم", callback_data="gm_th_sp_n")],
+                               [InlineKeyboardButton("☀️ دو روزِ پشتِ هم", callback_data="gm_th_sp_d")],
+                           ]))
+            return
+        if key == "soul":
+            _th_use(g, "soul")
+            g.gm_th_soul_day = int(g.night_number or 0) + 1
+            store.save()
+            await _close_pm(ctx, uid, mid, "💠 روح — تا ۲۴ ساعت نامیرایی.")
+            await _night_report(ctx, g, "💠 تانوس → سنگِ روح (۲۴ ساعت نامیرا)")
+            await _th_after(ctx, chat_id, g)
+            return
+        if key == "time":
+            _th_use(g, "time")
+            g.gm_th_time = True
+            store.save()
+            await _close_pm(ctx, uid, mid, "💠 زمان — فردا مستقیم به رأی‌گیری می‌رود.")
+            await _night_report(ctx, g, "💠 تانوس → سنگِ زمان (فردا مستقیم رأی‌گیری)")
+            await _th_after(ctx, chat_id, g)
+            return
+        _prompts = {"power": "💠 قدرت — چه کسی از بازی خارج شود؟",
+                    "truth": "💠 حقیقت — نقشِ چه کسی فردا اعلام شود؟",
+                    "mind": "💠 ذهن — نقشِ چه کسی را می‌خوانی؟"}
+        await _edit_pm(ctx, uid, mid, _prompts[key],
+                       _kb_night_seats([x for x in _alive_seats(g) if x != th],
+                                       g, "gm_thp_", confirm_cb="gm_thp_ok"))
+        return
+
+    if data in ("gm_th_sp_n", "gm_th_sp_d"):
+        _th_use(g, "space")
+        g.gm_th_space = "night" if data == "gm_th_sp_n" else "day"
+        store.save()
+        _lbl = "دو شبِ پشتِ هم" if g.gm_th_space == "night" else "دو روزِ پشتِ هم"
+        await _close_pm(ctx, uid, mid, f"💠 فضا — {_lbl}.")
+        await _night_report(ctx, g, f"💠 تانوس → سنگِ فضا ({_lbl})")
+        await _th_after(ctx, chat_id, g)
+        return
+
+    if data.startswith("gm_thp_") and data != "gm_thp_ok":
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        th = _seat_of_uid(g, uid)
+        _prompts = {"power": "💠 قدرت — چه کسی از بازی خارج شود؟",
+                    "truth": "💠 حقیقت — نقشِ چه کسی فردا اعلام شود؟",
+                    "mind": "💠 ذهن — نقشِ چه کسی را می‌خوانی؟"}
+        await _edit_pm(ctx, uid, mid, _prompts.get(g.gm_th_pick, "💎 انتخاب کن:"),
+                       _kb_night_seats([x for x in _alive_seats(g) if x != th],
+                                       g, "gm_thp_", selected=s, confirm_cb="gm_thp_ok"))
+        return
+
+    if data == "gm_thp_ok":
+        s = g.night_sel.get(uid)
+        key = g.gm_th_pick
+        if not s or key not in ("power", "truth", "mind"):
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_sel.pop(uid, None)
+        _nm = escape(g.seats[s][1], quote=False)
+        if key == "power":
+            _th_use(g, "power")
+            g.gm_th_kill = s
+            store.save()
+            await _close_pm(ctx, uid, mid, f"💠 قدرت روی {s}. {g.seats[s][1]} — بی‌استثنا خارج می‌شود.")
+            await _night_report(ctx, g, f"💠 تانوس → سنگِ قدرت روی <b>{s}. {_nm}</b>")
+            await _th_after(ctx, chat_id, g)
+            return
+        if key == "truth":
+            _th_use(g, "truth")
+            g.gm_th_truth = s
+            store.save()
+            await _close_pm(ctx, uid, mid,
+                            f"💠 حقیقت روی {s}. {g.seats[s][1]} — فردا نقشش اعلام و خارج می‌شود.")
+            await _night_report(ctx, g, f"💠 تانوس → سنگِ حقیقت روی <b>{s}. {_nm}</b>")
+            await _th_after(ctx, chat_id, g)
+            return
+        # 💠 ذهن: نقش را می‌فهمد، بعد ابلیتی را روی نفرِ دیگری اجرا می‌کند
+        _th_use(g, "mind")
+        rn = _seat_role_norm(g, s)
+        role_txt = (g.assigned_roles or {}).get(s, "—")
+        eff = _th_mind_effect(rn)
+        if eff is None:
+            g.gm_th_mind_role = None
+            store.save()
+            await _close_pm(ctx, uid, mid,
+                            f"💠 ذهن — نقشِ {s}. {g.seats[s][1]}: <b>{role_txt}</b>\n"
+                            f"این نقش اکتی ندارد؛ سنگ سوخت.")
+            await _night_report(ctx, g, f"💠 تانوس → ذهنِ <b>{s}. {_nm}</b> ({role_txt}) — "
+                                        f"بی‌اکت، سنگ سوخت")
+            await _th_after(ctx, chat_id, g)
+            return
+        g.gm_th_mind_role = eff[0]
+        store.save()
+        th = _seat_of_uid(g, uid)
+        await _edit_pm(ctx, uid, mid,
+                       f"💠 ذهن — نقشِ {s}. {g.seats[s][1]}: {role_txt}\n{eff[1]}",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != th],
+                                       g, "gm_thm_", confirm_cb="gm_thm_ok"))
+        return
+
+    if data.startswith("gm_thm_") and data != "gm_thm_ok":
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        th = _seat_of_uid(g, uid)
+        await _edit_pm(ctx, uid, mid, "💠 ذهن — هدف را انتخاب کن:",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != th],
+                                       g, "gm_thm_", selected=s, confirm_cb="gm_thm_ok"))
+        return
+
+    if data == "gm_thm_ok":
+        s = g.night_sel.get(uid)
+        eff = g.gm_th_mind_role
+        if not s or not eff:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_sel.pop(uid, None)
+        g.gm_th_mind_role = None
+        await _gm_th_mind_apply(ctx, chat_id, g, uid, mid, eff, s)
+        await _th_after(ctx, chat_id, g)
+        return
 
     # ── رابین‌هود ──
     if data == "gm_rb_no":
@@ -15004,8 +15603,8 @@ async def handle_gamer_callback(update, ctx):
                 await ctx.bot.send_message(uid, "👎")
             except Exception:
                 pass
-            await _night_report(ctx, g, f"🕵️ هلمز → حدس: {s}. {escape(_tn, quote=False)} ❌ ({g.gm_holmes_uses}/3)")
-            if g.gm_holmes_uses >= 3:
+            await _night_report(ctx, g, f"🕵️ هلمز → حدس: {s}. {escape(_tn, quote=False)} ❌ ({g.gm_holmes_uses}/{_gm_lim(g, 3)})")
+            if g.gm_holmes_uses >= _gm_lim(g, 3):
                 g.gm_holmes_despair = actor
                 await _night_report(ctx, g, "⚰️ سومین حدسِ غلطِ هلمز — از غصه می‌میرد (قطعی).")
         g.night_done.add("holmes")
@@ -15141,8 +15740,8 @@ async def handle_gamer_callback(update, ctx):
             await _night_report(ctx, g, f"🎭 موریارتی → حدس: {s}. {escape(_tn, quote=False)} ✅ (هلمز می‌میرد)")
         else:
             g.gm_moriarty_uses += 1
-            await _night_report(ctx, g, f"🎭 موریارتی → حدس: {s}. {escape(_tn, quote=False)} ❌ ({g.gm_moriarty_uses}/3)")
-            if g.gm_moriarty_uses >= 3:
+            await _night_report(ctx, g, f"🎭 موریارتی → حدس: {s}. {escape(_tn, quote=False)} ❌ ({g.gm_moriarty_uses}/{_gm_lim(g, 3)})")
+            if g.gm_moriarty_uses >= _gm_lim(g, 3):
                 g.gm_moriarty_despair = True
                 await _night_report(ctx, g, "⚰️ سومین حدسِ غلطِ موریارتی — می‌میرد (قطعی).")
         g.night_done.add("moriarty")
@@ -19310,6 +19909,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "init_vote":
         if uid != g.god_id:
             return
+        # 💠 سنگِ فضا (دو روزِ پشتِ هم): امروز رأی‌گیری ندارد
+        if getattr(g, "gm_th_novote", False):
+            await safe_q_answer(q, "💠 به دستورِ تانوس امروز رأی‌گیری نداریم.", show_alert=True)
+            return
 
         # 🎩 کلاسیک: مستقیم موتورِ شمارشِ «دو شماره‌ای» — بدونِ منوی پل/تک‌تک
         if _is_classic_scenario(g):
@@ -19908,6 +20511,25 @@ async def shuffle_and_assign(
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
     g.bzp_hunter_pending = None      # 🪢 سؤالِ معلقِ هانتر با نقشِ تازه بی‌معناست
+    # 🎃💎 گیمر ۱۷ — با نقشِ تازه همه‌چیزِ مترسک و تانوس از نو
+    g.gm_scare_target = None
+    g.gm_poisoned = None
+    g.gm_scare_linked = False
+    g.gm_th_stones = []
+    g.gm_th_used_night = 0
+    g.gm_th_pick = None
+    g.gm_th_mind_role = None
+    g.gm_th_kill = None
+    g.gm_th_shot = None
+    g.gm_th_hardkill = None
+    g.gm_th_save = None
+    g.gm_th_immortal = None
+    g.gm_th_truth = None
+    g.gm_th_soul_day = 0
+    g.gm_th_space = None
+    g.gm_th_time = False
+    g.gm_th_novote = False
+    g.gm_th_won = False
     # 🔄 جایگزینیِ نیمه‌کاره با پخشِ نقشِ تازه بی‌معنا می‌شود
     g.sub_open = {}
     g.sub_pick = set()
@@ -20125,6 +20747,12 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
             await _sub_seat_fill(ctx, chat_id, g, seat_no, uid)
         return
 
+    # 📤 لیستِ فورواردشده از گروهِ دیگر: اینجا اصلاً بازی‌ای ساخته نشده
+    if not (g.max_seats or 0):
+        await ctx.bot.send_message(
+            chat_id, "⚠️ این لیست برای گروهِ دیگری است — در این گروه بازی‌ای باز نیست.")
+        return
+
     # ⛔ صندلی باید واقعاً در این لیست وجود داشته باشد (در ۱۰نفره، /60 معنا ندارد)
     if not (1 <= seat_no <= (g.max_seats or 0)):
         return
@@ -20227,6 +20855,18 @@ def _parse_bare_seat(text):
     if not s or len(s) > 2 or not s.isdigit():
         return None
     return int(s)
+
+
+_LIST_MARKERS = ("📂", "شماره رویداد", "راوی:", "بازیکنان:")
+
+
+def _looks_like_seating_list(msg) -> bool:
+    """📋 آیا این پیام «لیستِ بازیکنان» است؟ (برای تشخیصِ لیستِ فورواردشده از گروهِ دیگر)"""
+    try:
+        t = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+        return sum(1 for m in _LIST_MARKERS if m in t) >= 2
+    except Exception:
+        return False
 
 
 async def _seat_take_by_number(ctx, chat_id: int, g: GameState, uid: int, seat_no: int) -> bool:
@@ -20500,6 +21140,18 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #    - اگر قبلاً نشسته بود، جابه‌جا می‌شود
     #    - اگر اسم ذخیره نباشد، «ناشناس»
     # ─────────────────────────────────────────────────────────────
+    # 📤 لیستی که از گروهِ دیگری فوروارد شده: ریپلای روی آن ثبت‌نام نیست
+    if msg.reply_to_message and _parse_bare_seat(text) is not None:
+        _rep = msg.reply_to_message
+        _is_cur = (g.last_seating_msg_id and _rep.message_id == g.last_seating_msg_id)
+        if not _is_cur and _looks_like_seating_list(_rep):
+            await ctx.bot.send_message(
+                chat_id,
+                "⚠️ این لیست برای گروه/بازیِ دیگری است.\n"
+                "برای ثبت‌نام روی <b>لیستِ همین گروه</b> ریپلای کن یا شمارهٔ صندلی را بنویس.",
+                parse_mode="HTML")
+            return
+
     if (
         msg.reply_to_message
         and g.last_seating_msg_id
@@ -21033,10 +21685,10 @@ async def handle_timer_callback(update, ctx):
     if uid != g.god_id:
         await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
         return
-    # 🔁 تکرار: فقط «تایم تمام شد» را دوباره در وویس‌چت می‌گوید؛ دکمه‌ها می‌مانند
+    # 🔁 تکرار: جملهٔ مخصوصِ تکرار را می‌گوید (اگر نبود، همان «تایم تمام شد»)
     if q.data == "tmr_repeat":
         if voice_god.ready():
-            voice_god.say(chat, "time_up")
+            voice_god.say(chat, "time_up_again")
             await safe_q_answer(q, "🔁 دوباره گفته شد.")
         else:
             await safe_q_answer(q, "🎙 گادِ صوتی الان وصل نیست.", show_alert=True)
@@ -21645,6 +22297,9 @@ def _mafia_room_seats(g):
     if _is_mythic_scenario(g):
         # 💣 تروریست نه لینک می‌گیرد نه یارانش را می‌شناسد
         seats = [s for s in seats if not _my_role_is(g, s, _R_MY_TERROR)]
+    if _is_gamer_scenario(g) and not getattr(g, "gm_scare_linked", False):
+        # 🎃 مترسک تا وقتی لینک نشده، نه لینک می‌گیرد نه یارانش را می‌شناسد
+        seats = [s for s in seats if _seat_role_norm(g, s) != _R_GM_SCARECROW]
     return seats
 
 
@@ -23454,6 +24109,7 @@ async def cmd_lists(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 VOICE_CUSTOM_FILENAME = "voice_custom.json"
 VOICE_PHRASE_LABELS = {
     "time_up":        "تایم تمام شد",
+    "time_up_again":  "تکرار تایم",
     "day":            "روز شد",
     "night":          "شب شد",
     "temp_night":     "شب موقت",
