@@ -22,6 +22,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters, TypeHandler, ApplicationHandlerStop
 )
 from collections import defaultdict
+from types import SimpleNamespace
 
 # 🎙 گادِ صوتی — اگر ماژول یا تنظیماتش نباشد، یک بدلِ بی‌اثر جایش می‌نشیند
 try:
@@ -593,6 +594,12 @@ class GameState:
         self.gm_th_time = getattr(self, "gm_th_time", False)             # 💠 زمان (فردا)
         self.gm_th_novote = getattr(self, "gm_th_novote", False)         # 💠 فضا: روزِ بی‌رأی
         self.gm_th_won = getattr(self, "gm_th_won", False)
+        # ── 🦷 دنتیست ──
+        self.dn_wrong = getattr(self, "dn_wrong", 0)          # استعلام‌های غلط (۲→میرا، ۳→مرگ)
+        self.dn_mortal = getattr(self, "dn_mortal", False)    # دیگر نامیرا نیست
+        self.dn_selfkill = getattr(self, "dn_selfkill", False)  # سومین غلط → همان شب می‌میرد
+        self.dn_out = getattr(self, "dn_out", False)          # از بازی رفته → استعلامِ وضعیت عوض می‌شود
+        self.dn_sniper_hit = getattr(self, "dn_sniper_hit", False)  # اسنایپر مافیا زد → تبریکِ فردا
         # ── حالت شبِ خودکار (سناریو میتیک) ──
         self.my_expected = getattr(self, "my_expected", set()) or set()
         self.my_decider_seat = getattr(self, "my_decider_seat", None)
@@ -1292,6 +1299,8 @@ def update_player_stats(g: GameState, mafia_roles, indep_for_this, scores=None,
 
 # ═══════════ 🎩 امتیازِ گاد + محرومیت ═══════════
 GOD_BANS_FILENAME = "god_bans.json"
+MIN_SCORED_SEATS = 10    # 🏅 لیستِ کمتر از این تعداد اصلاً امتیاز نمی‌گیرد
+CRITICAL_ANNOUNCE_DELAY = 75   # ⏳ ثانیه تا اعلامِ «وضعیت بحرانی» (بعد از وصیتِ کشتهٔ شب)
 GOD_MIN_VOTES = 3        # حداقلِ رأی برای اینکه میانگین معتبر باشد (و ملاکِ محرومیت)
 GOD_LEADER_MIN_VOTES = 21   # 🎩 ورود به «برترین گادهای فصل»: بیشتر از ۲۰ رأی
 GOD_MIN_RATING = 3.0     # زیرِ این میانگین در یک هفته → محرومیتِ هفتهٔ بعد
@@ -1373,6 +1382,18 @@ def seat_ban_days_left(rec) -> int:
 
 # ─── ⛔ محرومیتِ کاملِ بات (فقط مدیرِ اصلی، بدون تاریخِ انقضا) ──────────────
 _BLOCK_PHRASES = ("محروم", "محروم کن", "محرومش کن")
+
+
+def _cmd_arg(text: str, phrases) -> str | None:
+    """اگر متن با یکی از این عبارت‌ها شروع شود، «بقیه‌اش» را برمی‌گرداند (شاید خالی).
+    None یعنی اصلاً این دستور نیست. مثال: «محروم @ali» → «@ali»"""
+    t = " ".join(str(text or "").split())
+    for p in phrases:
+        if _nz(t) == _nz(p):
+            return ""
+        if t.startswith(p + " "):
+            return t[len(p):].strip()
+    return None
 
 
 def _is_block_text(text: str) -> bool:
@@ -1606,13 +1627,57 @@ async def _can_unban(ctx, chat_id, uid) -> bool:
         return False
 
 
-async def _god_unban_from_reply(ctx, msg, by_uid=None):
-    """«رفع محرومیت» با ریپلای روی پیامِ فرد (مدیر اصلی یا ادمینِ گروه)."""
-    rep = msg.reply_to_message
-    if not rep or not rep.from_user:
-        await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «رفع محرومیت».")
+# 🔖 یوزرنیم → (آیدی، اسم) و آیدی → اسم — از روی هر آپدیتی که بات می‌بیند پر می‌شوند
+_UNAME_CACHE: dict[str, tuple] = {}
+_UNAME_CACHE_BY_ID: dict[int, str] = {}
+
+
+async def _resolve_target(ctx, msg, arg=""):
+    """🎯 هدفِ «محروم / رفع محرومیت» را پیدا می‌کند:
+    ریپلای → همان شخص | «@نام» → از نمایهٔ یوزرنیم‌ها یا خودِ تلگرام | عدد → آیدی.
+    خروجی: (آیدی، اسم) یا (None, پیامِ خطا)."""
+    rep = getattr(msg, "reply_to_message", None)
+    if rep is not None and getattr(rep, "from_user", None):
+        u = rep.from_user
+        return u.id, (u.full_name or str(u.id))
+
+    a = (arg or "").strip()
+    if not a:
+        return None, ("⚠️ یا روی پیامِ همان شخص ریپلای کن، یا بعدش "
+                      "<code>@یوزرنیم</code> یا آیدیِ عددی‌اش را بنویس.")
+
+    # 🔢 آیدیِ عددی
+    _d = a.translate(_FA_DIGITS)
+    if _d.isdigit():
+        _uid = int(_d)
+        _nm = (_UNAME_CACHE_BY_ID.get(_uid)
+               or (load_usernames_from_gist() or {}).get(_uid)
+               or str(_uid))
+        return _uid, _nm
+
+    # 🔖 یوزرنیم
+    uname = a.lstrip("@").lower()
+    hit = _UNAME_CACHE.get(uname)
+    if hit:
+        return hit[0], hit[1]
+    try:
+        ch = await ctx.bot.get_chat("@" + uname)
+        if getattr(ch, "id", None):
+            _nm = getattr(ch, "full_name", None) or getattr(ch, "title", None) or a
+            return ch.id, _nm
+    except Exception:
+        pass
+    return None, (f"⚠️ <code>@{escape(uname, quote=False)}</code> را پیدا نکردم. "
+                  f"روی پیامش ریپلای کن یا آیدیِ عددی‌اش را بده.")
+
+
+async def _god_unban_from_reply(ctx, msg, by_uid=None, arg=""):
+    """«رفع محرومیت» با ریپلای، @یوزرنیم یا آیدی (مدیر اصلی یا ادمینِ گروه)."""
+    tid, tname = await _resolve_target(ctx, msg, arg)
+    if tid is None:
+        await msg.reply_text(tname, parse_mode="HTML")
         return
-    target = rep.from_user
+    target = SimpleNamespace(id=tid, full_name=tname)
     # ⛔ ادمینِ گروه نمی‌تواند محرومیتِ خودش را بردارد (مدیرِ اصلی می‌تواند)
     if by_uid is not None and not _is_super_admin(by_uid) and target.id == by_uid:
         await msg.reply_text("⛔ محرومیتِ خودت را نمی‌توانی برداری.")
@@ -1631,13 +1696,16 @@ async def _god_unban_from_reply(ctx, msg, by_uid=None):
         pass
 
 
-async def _block_from_reply(ctx, msg):
-    """⛔ «محروم» با ریپلای — فقط مدیرِ اصلیِ بات."""
-    rep = msg.reply_to_message
-    if not rep or not rep.from_user:
-        await msg.reply_text("⚠️ روی پیامِ همان شخص ریپلای کن و بنویس «محروم».")
+async def _block_from_reply(ctx, msg, arg=""):
+    """⛔ «محروم» با ریپلای، @یوزرنیم یا آیدیِ عددی — فقط مدیرانِ اصلیِ بات."""
+    tid, tname = await _resolve_target(ctx, msg, arg)
+    if tid is None:
+        await msg.reply_text(tname, parse_mode="HTML")
         return
-    target = rep.from_user
+    _rep = getattr(msg, "reply_to_message", None)
+    target = SimpleNamespace(
+        id=tid, full_name=tname,
+        is_bot=bool(getattr(getattr(_rep, "from_user", None), "is_bot", False)))
     if _is_super_admin(target.id):
         await msg.reply_text("ℹ️ مدیرانِ اصلیِ بات را نمی‌شود محروم کرد.")
         return
@@ -1666,6 +1734,13 @@ async def blocked_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     if u is None:
         return
+    # 🔖 نمایهٔ یوزرنیم → آیدی، تا «محروم @اسم» بدونِ ریپلای هم کار کند
+    try:
+        if u.username:
+            _UNAME_CACHE[u.username.lower()] = (u.id, u.full_name)
+        _UNAME_CACHE_BY_ID[u.id] = u.full_name
+    except Exception:
+        pass
     # ⚠️ اینجا هرگز منتظرِ شبکه نمی‌مانیم: این تابع جلوی «هر» آپدیت است و
     #    webhook_handler تا تمام‌شدنِ پردازش به تلگرام جواب نمی‌دهد — یک انتظارِ
     #    کوچک اینجا یعنی لگ روی تک‌تکِ دکمه‌ها.
@@ -4245,7 +4320,8 @@ def _try_capture_vote(g, msg, uid, text) -> bool:
 
 def _final_vote_threshold(alive_count: int, g=None) -> int:
     """حدنصابِ ورود به دفاعیه بر اساس تعداد زنده‌ها:
-    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | بیشتر → ثلثِ زنده‌ها +۱ (۱۲ → ۵)
+    ۴-۵ نفر → ۲ | ۶-۷ نفر → ۳ | ۸-۱۰ نفر → ۴ | ۱۱-۱۲ نفر → ۵ |
+    بیشتر → ثلثِ زنده‌ها +۱
     ⚔️ میتیک قانونِ خودش را دارد: نصفِ زنده‌ها، و اگر فرد بود نصف+۱ (۹ → ۵، ۱۰ → ۵)."""
     if g is not None and _is_mythic_scenario(g):
         return (alive_count + 1) // 2
@@ -4255,6 +4331,8 @@ def _final_vote_threshold(alive_count: int, g=None) -> int:
         return 3
     if alive_count <= 10:
         return 4
+    if alive_count <= 12:
+        return 5          # ۱۱ و ۱۲ نفرِ زنده → ۵ رأی
     return alive_count // 3 + 1
 
 
@@ -5471,14 +5549,29 @@ async def announce_winner(ctx, update, g: GameState):
         print(f"⚠️ save_event_numbers failed for chat {key}")
 
     # 🏅 محاسبه‌ی امتیازِ این بازی (بعد از تعیینِ برنده، قبل از ثبتِ آمار)
-    try:
-        game_scores = _score_compute(g)
-    except Exception as e:
-        print("⚠️ score compute error:", e)
+    #    ⛔ لیستِ زیرِ ۱۰ نفر اصلاً امتیاز ندارد — بازی/برد ثبت می‌شود ولی امتیاز صفر
+    if len(g.seats or {}) < MIN_SCORED_SEATS:
         game_scores = {}
+        # 🧾 در آمار «صفر» ثبت می‌شود، نه «ثبت‌نشده» — وگرنه بازیِ قدیمی حساب
+        #    می‌شد و پایهٔ ۱۵+۲۵ امتیاز می‌گرفت
+        stats_scores = {s: {"total": 0.0} for s in (g.seats or {})}
+        try:
+            await ctx.bot.send_message(
+                chat.id,
+                f"ℹ️ این لیست زیرِ {MIN_SCORED_SEATS} نفر بود — برای این بازی امتیازی ثبت نشد "
+                f"(بازی و برد ثبت شد).")
+        except Exception:
+            pass
+    else:
+        try:
+            game_scores = _score_compute(g)
+        except Exception as e:
+            print("⚠️ score compute error:", e)
+            game_scores = {}
+        stats_scores = game_scores
 
     # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل + چکِ پایانِ فصل)
-    season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=game_scores,
+    season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=stats_scores,
                                      group_title=group_title, date_str=date_str,
                                      chat_id=chat.id, event_num=event_num)
 
@@ -5711,7 +5804,19 @@ def _seat_of_uid(g, uid):
             return s
     return None
 
+def _role_of(g, role_norm):
+    """🦷 در دنتیست، نقش‌های موتورِ تکاور نامِ دیگری دارند (گادفادر→رئیس‌مافیا و…).
+    این تابع نامِ واقعیِ همان نقش را در سناریوی جاری برمی‌گرداند."""
+    try:
+        if _DN_ALIAS and _is_dentist_scenario(g):
+            return _DN_ALIAS.get(role_norm, role_norm)
+    except Exception:
+        pass
+    return role_norm
+
+
 def _find_seat_by_role(g, role_norm, alive_only=True):
+    role_norm = _role_of(g, role_norm)
     seats = _alive_seats(g) if alive_only else sorted(g.seats)
     for s in seats:
         if _seat_role_norm(g, s) == role_norm:
@@ -5724,6 +5829,8 @@ def _mafia_role_set(g):
         return (_R_GODFATHER, _R_NATO, _R_SHIAD, _R_SIMPLE_MAFIA)
     if _is_nemayande_scenario(g):
         return (_R_DON, _R_HACKER, _R_YAGHI)
+    if _is_dentist_scenario(g):
+        return (_R_DN_BOSS, _R_DN_CHURCH, _R_DN_DEXTER)
     if _is_takavar_scenario(g):
         return (_R_GODFATHER, _R_HOSTAGE, _R_NATO)
     if _is_kapu_scenario(g):
@@ -5759,7 +5866,14 @@ def _mafia_seats(g, alive_only=False):
     return out
 
 def _dead_nonneg_mafia_exists(g) -> bool:
-    """آیا یک مافیای غیرِ مذاکره‌کننده مرده است؟ (شرط فعال‌شدن مذاکره)"""
+    """آیا یک مافیای غیرِ مذاکره‌کننده مرده است؟ (شرط فعال‌شدن مذاکره)
+    🦷 دنتیست: رفتنِ رئیس‌مافیا یا دکستر → چرچیل حقِ مذاکره پیدا می‌کند."""
+    if _is_dentist_scenario(g):
+        for s in g.seats:
+            if (s in (g.striked or set())
+                    and _seat_role_norm(g, s) in (_R_DN_BOSS, _R_DN_DEXTER)):
+                return True
+        return False
     for s in g.seats:
         if s in (g.striked or set()) and _seat_role_norm(g, s) in (_R_GODFATHER, _R_SIMPLE_MAFIA):
             return True
@@ -6208,7 +6322,17 @@ def _night_all_done(g) -> bool:
         return _find_seat_by_role(g, r) is not None
 
     if _is_takavar_scenario(g):
-        return "gunman" in d
+        if "gunman" not in d:
+            return False
+        if _is_dentist_scenario(g):
+            # 🦷 اسنایپر و دنتیست هم باید اکتشان را داده باشند
+            need = set()
+            if _find_sniper(g) is not None and not g.sniper_used:
+                need.add("sniper")
+            if _find_seat_by_role(g, _R_DN_DENTIST) is not None:
+                need.add("dentist")
+            return need <= d
+        return True
 
     if _is_classic_scenario(g):
         if "mafia" not in d:
@@ -7001,6 +7125,27 @@ def _win_condition(g):
     alive = set(_alive_seats(g))
     if not alive:
         return None
+
+    # 🦷 دنتیست قانونِ خودش را دارد
+    if _is_dentist_scenario(g):
+        _dn = _find_seat_by_role(g, _R_DN_DENTIST, alive_only=False)
+        dent_alive = (_dn is not None and _dn in alive)
+        maf = {s for s in alive if _sc_side(g, s) == "مافیا"}
+        city = alive - maf - ({_dn} if dent_alive else set())
+        if not maf:
+            if dent_alive:
+                return ("مستقل", False,
+                        "همهٔ مافیاها خارج شدند و دنتیست هنوز در بازی است.")
+            return ("شهر", False, "همهٔ مافیاها و دنتیست از بازی خارج شده‌اند.")
+        if dent_alive and len(alive) <= 3:
+            return ("مستقل", False,
+                    "بازی به سه نفر رسید و دنتیست یکی از آن‌هاست.")
+        if not dent_alive and len(maf) >= len(city):
+            return ("مافیا", False,
+                    f"دنتیست خارج شده و تعدادِ مافیا ({len(maf)}) با شهروندها "
+                    f"({len(city)}) برابر شده.")
+        return None
+
     # ♦️ سناریوی مستقل‌دار → بات اصلاً دخالت نمی‌کند
     if any(_sc_side(g, s) == "مستقل" for s in alive):
         return None
@@ -7505,8 +7650,41 @@ async def _resolve_takavar(ctx, chat_id, g):
     if nt and nt in g.seats and g.night_nato_correct:
         dead.add(nt); reasons[nt] = "ناتویی درست"
 
+    # 🦷 دنتیست: نامیرایی، اسنایپر، و مرگِ سومین استعلامِ غلط
+    if _is_dentist_scenario(g):
+        _dn = _find_seat_by_role(g, _R_DN_DENTIST, alive_only=False)
+        if _dn is not None and _dn in dead and not getattr(g, "dn_mortal", False):
+            dead.discard(_dn)
+            reasons.pop(_dn, None)
+            await _night_report(ctx, g, "🦷 دنتیست نامیرا بود — اکتِ رویش بی‌اثر شد.")
+        _sn_before = set(dead)
+        _resolve_sniper(g, dead, reasons)
+        # 🎉 اگر تیرِ اسنایپر کسی را برد (مافیا یا دنتیستِ میرا)، فردا تبریک گفته
+        #    می‌شود — با همان یک جملهٔ ثابت، تا معلوم نشود چه کسی را زده
+        _snt = g.night_sniper_target
+        if (_snt and _snt in (dead - _sn_before)
+                and _snt != _find_sniper(g, alive_only=False)):
+            g.dn_sniper_hit = True
+        if getattr(g, "dn_selfkill", False) and _dn is not None and _dn in g.seats:
+            dead.add(_dn)
+            reasons[_dn] = "سه استعلامِ غلطِ دنتیست"
+            g.dn_selfkill = False
+        store.save()
+
     _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+    # 🦷 دنتیست از بازی رفت → استعلامِ وضعیت از این به بعد «نقش‌های خارج‌شده» را می‌دهد
+    if _is_dentist_scenario(g):
+        _dn = _find_seat_by_role(g, _R_DN_DENTIST, alive_only=False)
+        if _dn is not None and _dn in (g.striked or set()) and not getattr(g, "dn_out", False):
+            g.dn_out = True
+            store.save()
+        if getattr(g, "dn_sniper_hit", False):
+            g.dn_sniper_hit = False
+            store.save()
+            await ctx.bot.send_message(
+                chat_id, "🎉 تبریک بابتِ داشتنِ همچین تک‌تیراندازِ خوبی!")
 
     # 🔫 برگشت تفنگ جنگی اگر دارنده‌اش کشته شد
     if g.war_gun_holder and g.war_gun_holder in (g.striked or set()):
@@ -7531,16 +7709,25 @@ async def _resolve_mozakere(ctx, chat_id, g):
 
 
 def _resolve_sniper(g, dead, reasons):
-    """قانون تک‌تیرانداز/اسنایپر: مافیای غیرگادفادر می‌میرد (مگر سیو)؛ اگر شهروند بزند خودِ اسنایپر."""
+    """قانون تک‌تیرانداز/اسنایپر: مافیای غیرگادفادر می‌میرد (مگر سیو)؛ اگر شهروند بزند خودِ اسنایپر.
+    🦷 دنتیست: رئیس‌مافیا زره دارد و دنتیستِ مستقل هم نامیراست — هیچ‌کدام کسی را بیرون نمی‌برند."""
     sn_t = g.night_sniper_target
     if not (sn_t and sn_t in g.seats):
         return
     sniper_seat = _find_sniper(g, alive_only=False)
-    if sn_t in _mafia_seats(g) and _seat_role_norm(g, sn_t) != _R_GODFATHER:
+    _boss = _role_of(g, _R_GODFATHER)
+    _rn = _seat_role_norm(g, sn_t)
+    if _is_dentist_scenario(g) and _rn == _R_DN_DENTIST:
+        # 🦷 تا نامیراست هیچ اتفاقی نمی‌افتد؛ اگر میرا شده باشد، خارج می‌شود
+        #    (اسنایپر هم چیزی‌اش نمی‌شود — دنتیست شهروند نیست)
+        if getattr(g, "dn_mortal", False) and not _is_saved(g, sn_t):
+            dead.add(sn_t); reasons[sn_t] = "شلیک اسنایپر"
+        return
+    if sn_t in _mafia_seats(g) and _rn != _boss:
         if not _is_saved(g, sn_t):
             dead.add(sn_t); reasons[sn_t] = "شلیک اسنایپر"
-    elif _seat_role_norm(g, sn_t) == _R_GODFATHER:
-        pass  # اسنایپر نمی‌تواند گادفادر را بکشد
+    elif _rn == _boss:
+        pass  # اسنایپر نمی‌تواند گادفادر/رئیس‌مافیا را بکشد
     else:
         if sniper_seat:
             dead.add(sniper_seat); reasons[sniper_seat] = "اسنایپر به شهروند شلیک کرد"
@@ -8314,14 +8501,29 @@ async def _resolve_classic(ctx, chat_id, g):
     _add_night_kick(g, dead, reasons)
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
     # ⚠️ وضعیت بحرانی — اختلافِ شهرِ زنده با مافیای زنده ≤ ۲
+    #    ⏳ بعد از وصیتِ کشتهٔ شب فرستاده می‌شود، نه هم‌زمان با اعلامِ مرگ
     try:
         if g.phase not in ("ended", "idle"):
             _mf = len(_mafia_seats(g, alive_only=True))
             _al = len(_alive_seats(g))
             if _mf > 0 and (_al - _mf) - _mf <= 2:
-                await ctx.bot.send_message(chat_id, "⚠️ <b>وضعیت بحرانی</b>", parse_mode="HTML")
+                asyncio.create_task(_cl_critical_later(ctx, chat_id, g))
     except Exception as e:
         print("⚠️ cl critical:", e)
+
+
+async def _cl_critical_later(ctx, chat_id, g, delay=None):
+    """⏳ «وضعیت بحرانی» بعد از تمام‌شدنِ وصیتِ کشتهٔ شب."""
+    try:
+        await asyncio.sleep(CRITICAL_ANNOUNCE_DELAY if delay is None else delay)
+        if g.phase in ("ended", "idle") or getattr(g, "night_active", False):
+            return          # بازی تمام شد یا شبِ تازه شروع شده — دیگر معنا ندارد
+        _mf = len(_mafia_seats(g, alive_only=True))
+        _al = len(_alive_seats(g))
+        if _mf > 0 and (_al - _mf) - _mf <= 2:
+            await ctx.bot.send_message(chat_id, "⚠️ <b>وضعیت بحرانی</b>", parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ cl critical later:", e)
 
 
 # ─── 🗳 موتورِ رأیِ روز (اولیه دوشماره‌ای / دوباره و نهایی تک‌شماره‌ای) ───
@@ -9778,7 +9980,11 @@ async def handle_night_callback(update, ctx):
         g.night_done.add("mafia")
         store.save()
         await _broadcast_negotiation_night(ctx, g)
-        await _night_open_citizens(ctx, chat_id, g)
+        # 🦷 دنتیست همان موتورِ تکاور را دارد → بلوکِ شهروندهایش باز شود
+        if _is_dentist_scenario(g):
+            await _tk_check_open_citizens(ctx, chat_id, g)
+        else:
+            await _night_open_citizens(ctx, chat_id, g)
         return
 
     if data.startswith("night_neg_"):
@@ -12564,8 +12770,43 @@ _R_GUNMAN    = _nz("تفنگدار")
 _R_COMMANDO  = _nz("تکاور")
 
 
+# ═════════════════════════════════════════════════════════════
+#  🦷 دنتیست (۱۲ نفره) — همان موتورِ تکاور با نام‌های دیگر، به‌علاوهٔ
+#  چرچیل (مذاکره‌کننده)، اسنایپر (تک‌تیرانداز) و دنتیستِ مستقل.
+#  رئیس‌مافیا = گادفادر | دکستر = گروگان‌گیر (ولی لینکِ مافیا می‌گیرد)
+#  محافظ = نگهبان (شبی فقط ۱ نفر) | گان‌اسمیت = تفنگدار
+# ═════════════════════════════════════════════════════════════
+DENTIST_KEY   = "دنتیست"
+_R_DN_BOSS    = _nz("رئیس مافیا")
+_R_DN_CHURCH  = _nz("چرچیل")
+_R_DN_DEXTER  = _nz("دکستر")
+_R_DN_GUARD   = _nz("محافظ")
+_R_DN_GUNSM   = _nz("گان اسمیت")
+_R_DN_DENTIST = _nz("دنتیست")
+
+# نقشِ متناظرِ تکاور → نامِ واقعی در دنتیست
+_DN_ALIAS = {}      # پایین‌تر، بعد از تعریفِ ثابت‌های تکاور، پر می‌شود
+
+
+def _is_dentist_scenario(g) -> bool:
+    return bool(getattr(g, "scenario", None)) and (_nz(DENTIST_KEY) in _nz(g.scenario.name))
+
+
 def _is_takavar_scenario(g) -> bool:
-    return bool(getattr(g, "scenario", None)) and (_nz(TAKAVAR_KEY) in _nz(g.scenario.name))
+    """🎖 موتورِ تکاور — دنتیست هم همین موتور را می‌گیرد (با نام‌های خودش)."""
+    if not getattr(g, "scenario", None):
+        return False
+    _n = _nz(g.scenario.name)
+    return (_nz(TAKAVAR_KEY) in _n) or (_nz(DENTIST_KEY) in _n)
+
+
+_DN_ALIAS.update({
+    _R_GODFATHER: _R_DN_BOSS,      # رئیس‌مافیا
+    _R_HOSTAGE:   _R_DN_DEXTER,    # دکستر
+    _R_WATCHMAN:  _R_DN_GUARD,     # محافظ
+    _R_GUNMAN:    _R_DN_GUNSM,     # گان‌اسمیت
+    _R_NEGOTIATOR: _R_DN_CHURCH,   # چرچیل
+})
 
 
 def _tk_blocked(g, seat) -> bool:
@@ -12575,6 +12816,11 @@ def _tk_blocked(g, seat) -> bool:
 
 def _tk_guide_positive(g, seat) -> bool:
     # استعلام کاراگاه: ناتو و گروگانگیر مثبت، بقیه منفی
+    #    🦷 دنتیست: چرچیل و دکستر و جذب‌شده مثبت؛ رئیس‌مافیا منفی
+    if _is_dentist_scenario(g):
+        if seat in (g.negotiated_seats or set()):
+            return True
+        return _seat_role_norm(g, seat) in (_R_DN_CHURCH, _R_DN_DEXTER)
     return _seat_role_norm(g, seat) in (_R_NATO, _R_HOSTAGE)
 
 
@@ -12600,6 +12846,26 @@ async def _tk_send_hostage_notice(ctx, g):
         await _night_report(ctx, g, f"🔒 پیامِ گرو به {hs}. {escape(g.seats[hs][1], quote=False)} رفت.")
 
 
+async def _tk_open_hostage(ctx, g):
+    """🔒 پرامپتِ گروگان‌گیر (اسپم ندارد: دو شب متوالی یک نفر ممنوع؛ رد شدن آزاد)."""
+    host = _find_seat_by_role(g, _R_HOSTAGE)
+    if not host:
+        g.night_done.add("hostage")
+        store.save()
+        return
+    huid = g.seats[host][0]
+    targets = [s for s in _alive_seats(g) if s != host and s != g.hostage_last_target]
+    kb = _kb_night_seats(targets, g, "tk_host_",
+                         selected=g.night_sel.get(huid), confirm_cb="tk_host_confirm")
+    rows = list(kb.inline_keyboard) + [
+        [InlineKeyboardButton("⏭ امشب گرو نمی‌گیرم", callback_data="tk_host_skip")]
+    ]
+    m = await _safe_pm(ctx, huid, "🔒 چه کسی را گرو می‌گیری؟", InlineKeyboardMarkup(rows))
+    if m:
+        g.night_pm_msgs[huid] = m.message_id
+    store.save()
+
+
 async def _tk_open_shield(ctx, chat_id, g):
     # 🛡 خودکار: شیلد فقط با اجماعِ رأی نهایی می‌افتد (tk_shield_lost) — سؤالی از گاد پرسیده نمی‌شود
     g.night_shield = not getattr(g, "tk_shield_lost", False)
@@ -12613,7 +12879,8 @@ async def _tk_open_first(ctx, chat_id, g):
     watch = _find_seat_by_role(g, _R_WATCHMAN)
     if g.night_shield and watch:
         wuid = g.seats[watch][0]
-        need = 2 if g.night_alive_at_start >= 8 else 1
+        # 🦷 محافظِ دنتیست همیشه فقط یک نفر را نگهبانی می‌کند
+        need = 1 if _is_dentist_scenario(g) else (2 if g.night_alive_at_start >= 8 else 1)
         g.tk_guard_need = need
         targets = [s for s in _alive_seats(g) if s != watch]
         m = await _safe_pm(ctx, wuid, f"🛡 از چه کسانی نگهبانی می‌دهی؟ (تا {need} نفر)",
@@ -12623,21 +12890,25 @@ async def _tk_open_first(ctx, chat_id, g):
     else:
         g.night_done.add("watchman")
 
-    # 🔒 گروگانگیر (اسپم ندارد: دو شب متوالی یک نفر ممنوع؛ رد شدن هم آزاد است)
-    host = _find_seat_by_role(g, _R_HOSTAGE)
-    if host:
-        huid = g.seats[host][0]
-        targets = [s for s in _alive_seats(g) if s != host and s != g.hostage_last_target]
-        kb = _kb_night_seats(targets, g, "tk_host_",
-                             selected=g.night_sel.get(huid), confirm_cb="tk_host_confirm")
-        rows = list(kb.inline_keyboard) + [
-            [InlineKeyboardButton("⏭ امشب گرو نمی‌گیرم", callback_data="tk_host_skip")]
-        ]
-        m = await _safe_pm(ctx, huid, "🔒 چه کسی را گرو می‌گیری؟", InlineKeyboardMarkup(rows))
-        if m:
-            g.night_pm_msgs[huid] = m.message_id
-    else:
-        g.night_done.add("hostage")
+    # 🔒 گروگانگیر — 🦷 در دنتیست، دکستر با گروهِ مافیا اکت می‌دهد، نه در این بلوک
+    if not _is_dentist_scenario(g):
+        await _tk_open_hostage(ctx, g)
+
+    # 🦷 دنتیست هم در همین بلوکِ اول بیدار می‌شود (هم‌زمان با محافظ)
+    if _is_dentist_scenario(g):
+        dn = _find_seat_by_role(g, _R_DN_DENTIST)
+        if dn and not _tk_blocked(g, dn):
+            duid2 = g.seats[dn][0]
+            _what = "شهروند" if int(g.night_number or 0) % 2 == 1 else "مافیا"
+            targets = [s for s in _alive_seats(g) if s != dn]
+            m = await _safe_pm(
+                ctx, duid2,
+                f"🦷 شب {g.night_number} — امشب باید استعلامِ <b>{_what}</b> بگیری.\n"
+                f"چه کسی؟", _kb_night_seats(targets, g, "dn_inq_", confirm_cb="dn_inq_ok"))
+            if m:
+                g.night_pm_msgs[duid2] = m.message_id
+        else:
+            g.night_done.add("dentist")
     store.save()
     await _tk_check_open_mafia(ctx, chat_id, g)
 
@@ -12645,12 +12916,28 @@ async def _tk_open_first(ctx, chat_id, g):
 async def _tk_check_open_mafia(ctx, chat_id, g):
     if "mafia_opened" in g.night_done:
         return
-    if "watchman" not in g.night_done or "hostage" not in g.night_done:
+    if "watchman" not in g.night_done:
+        return
+    _dn_sc = _is_dentist_scenario(g)
+    if _dn_sc:
+        # 🦷 بلوکِ اول = محافظ + دنتیست؛ دکستر با مافیا می‌آید
+        if (_find_seat_by_role(g, _R_DN_DENTIST) is not None
+                and "dentist" not in g.night_done):
+            return
+    elif "hostage" not in g.night_done:
         return
     g.night_done.add("mafia_opened")
     store.save()
-    # 🔒 حالا که هم نگهبان هم گروگانگیر مشخص شده‌اند، پیامِ گرو ارسال می‌شود
-    await _tk_send_hostage_notice(ctx, g)
+    if _dn_sc:
+        # 🔓 حالا اتاقِ مافیا باز می‌شود و دکستر هم همین‌جا اکت می‌دهد
+        try:
+            await _room_set_locked(ctx, g, False)
+        except Exception as e:
+            print("⚠️ dn room unlock:", e)
+        await _tk_open_hostage(ctx, g)
+    else:
+        # 🔒 حالا که هم نگهبان هم گروگانگیر مشخص شده‌اند، پیامِ گرو ارسال می‌شود
+        await _tk_send_hostage_notice(ctx, g)
     await _tk_open_mafia(ctx, chat_id, g)
 
 
@@ -12658,7 +12945,11 @@ async def _tk_open_mafia(ctx, chat_id, g):
     gf = _find_seat_by_role(g, _R_GODFATHER)
     nato = _find_seat_by_role(g, _R_NATO)
     host = _find_seat_by_role(g, _R_HOSTAGE)
-    decider = gf or nato or host
+    # 🦷 دنتیست: رئیس‌مافیا → چرچیل → دکستر → مافیای مذاکره‌شده
+    if _is_dentist_scenario(g):
+        decider = gf or _find_seat_by_role(g, _R_DN_CHURCH) or host
+    else:
+        decider = gf or nato or host
     if not decider:
         # 🤝 اگر مافیای اصلی نمانده، جذب‌شده (مذاکره/یاکوزایی/خریداری) صاحبِ شات می‌شود
         converted = sorted(_mafia_seats(g, alive_only=True))
@@ -12673,6 +12964,14 @@ async def _tk_open_mafia(ctx, chat_id, g):
     rows = [[InlineKeyboardButton("🔫 شات", callback_data="tk_shot")]]
     if nato is not None and not g.nato_used:
         rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="tk_nato")])
+    # 🤝 چرچیل (دنتیست) — دقیقاً مثلِ مذاکره‌کنندهٔ سناریوی مذاکره
+    if _is_dentist_scenario(g):
+        _ch = _find_seat_by_role(g, _R_DN_CHURCH)
+        g.night_can_negotiate = bool(
+            (not g.negotiation_used) and _ch is not None and _dead_nonneg_mafia_exists(g))
+        if g.night_can_negotiate:
+            rows.insert(0, [InlineKeyboardButton("🤝 مذاکره",
+                                                 callback_data="night_dec_negotiate")])
     m = await _safe_pm(ctx, duid, f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
                        InlineKeyboardMarkup(rows))
     if m:
@@ -12685,8 +12984,14 @@ async def _tk_check_open_citizens(ctx, chat_id, g):
         return
     if "mafia" not in g.night_done:
         return
+    # 🦷 دنتیست: دکستر هم در همین بلوکِ مافیا بود — تا اکتش تمام نشود، شهروندها نه
+    if _is_dentist_scenario(g) and "hostage" not in g.night_done:
+        return
     g.night_done.add("citizens_opened")
     store.save()
+    if _is_dentist_scenario(g):
+        # 🔒 حالا که گروگان مشخص شده، پیامِ «گرو گرفته شدی» می‌رود
+        await _tk_send_hostage_notice(ctx, g)
     await _tk_open_citizens(ctx, chat_id, g)
 
 
@@ -12715,7 +13020,8 @@ async def _tk_open_citizens(ctx, chat_id, g):
         g.night_done.add("doctor")
     else:
         duid = g.seats[doc][0]
-        need = 2 if g.night_alive_at_start >= 8 else 1
+        # 🦷 پزشکِ دنتیست هر شب فقط یک نفر
+        need = 1 if _is_dentist_scenario(g) else (2 if g.night_alive_at_start >= 8 else 1)
         g.night_doc_need = need
         targets = _doctor_targets(g, doc)
         m = await _safe_pm(ctx, duid, f"💉 چه کسی را سیو می‌دهی؟ (تا {need} نفر)",
@@ -12739,6 +13045,23 @@ async def _tk_open_citizens(ctx, chat_id, g):
         if com and g.night_shot_target == com and getattr(g, "tk_com_burned", False):
             await _night_report(ctx, g, "🎖 تکاور دوباره شات شد، اما تیرش قبلاً سوخته — ضدشلیکی ندارد.")
         g.night_done.add("commando")
+
+    # 🦷 اکت‌های مخصوصِ دنتیست: اسنایپر (یک تیر، دلبخواهی) و خودِ دنتیست
+    if _is_dentist_scenario(g):
+        sn = _find_sniper(g)
+        if sn and not g.sniper_used and not _tk_blocked(g, sn):
+            suid = g.seats[sn][0]
+            targets = [s for s in _alive_seats(g) if s != sn]
+            kb = _kb_night_seats(targets, g, "dn_sn_", confirm_cb="dn_sn_ok")
+            rows = list(kb.inline_keyboard) + [
+                [InlineKeyboardButton("⏭ امشب شلیک نمی‌کنم", callback_data="dn_sn_skip")]]
+            m = await _safe_pm(ctx, suid, "🎯 می‌خواهی تیرت را بزنی؟ (یک تیر در کلِ بازی)",
+                               InlineKeyboardMarkup(rows))
+            if m:
+                g.night_pm_msgs[suid] = m.message_id
+        else:
+            g.night_done.add("sniper")
+
     store.save()
     await _tk_check_open_gunman(ctx, chat_id, g)
 
@@ -12773,7 +13096,9 @@ async def _tk_open_gunman(ctx, chat_id, g):
         [InlineKeyboardButton("✅ بله", callback_data="tk_gun_yes")],
         [InlineKeyboardButton("🚫 خیر", callback_data="tk_gun_no")],
     ])
-    m = await _safe_pm(ctx, guid, "🔫 آیا امشب تفنگ می‌دهی؟", kb)
+    _q = ("🔫 آیا امشب تفنگِ جنگی‌ات را می‌دهی؟ (فقط یک تفنگ داری)"
+          if _is_dentist_scenario(g) else "🔫 آیا امشب تفنگ می‌دهی؟")
+    m = await _safe_pm(ctx, guid, _q, kb)
     if m:
         g.night_pm_msgs[guid] = m.message_id
     store.save()
@@ -13347,6 +13672,96 @@ async def handle_takavar_callback(update, ctx):
     await safe_q_answer(q)
     mid = q.message.message_id if q.message else None
 
+    # ── 🎯 اسنایپرِ دنتیست ──
+    if data == "dn_sn_skip":
+        g.night_done.add("sniper")
+        store.save()
+        await _close_pm(ctx, uid, mid, "🎯 امشب شلیک نکردی.")
+        await _night_report(ctx, g, "🎯 اسنایپر → شلیک نکرد")
+        await _tk_check_open_gunman(ctx, chat_id, g)
+        return
+
+    if data == "dn_sn_ok":
+        if "sniper" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.sniper_used = True
+        g.night_sniper_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("sniper")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🎯 تیرت را به {s}. {g.seats[s][1]} زدی.")
+        await _night_report(ctx, g, f"🎯 اسنایپر → شلیک به <b>{s}. "
+                                    f"{escape(g.seats[s][1], quote=False)}</b>")
+        await _tk_check_open_gunman(ctx, chat_id, g)
+        return
+
+    if data.startswith("dn_sn_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        sn = _seat_of_uid(g, uid)
+        kb = _kb_night_seats([x for x in _alive_seats(g) if x != sn], g, "dn_sn_",
+                             selected=s, confirm_cb="dn_sn_ok")
+        rows = list(kb.inline_keyboard) + [
+            [InlineKeyboardButton("⏭ امشب شلیک نمی‌کنم", callback_data="dn_sn_skip")]]
+        await _edit_pm(ctx, uid, mid, "🎯 می‌خواهی تیرت را بزنی؟ (یک تیر در کلِ بازی)",
+                       InlineKeyboardMarkup(rows))
+        return
+
+    # ── 🦷 استعلامِ دنتیست ──
+    if data == "dn_inq_ok":
+        if "dentist" in (g.night_done or set()):
+            return
+        s = g.night_sel.get(uid)
+        if not s:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_sel.pop(uid, None)
+        g.night_done.add("dentist")
+        _odd = (int(g.night_number or 0) % 2 == 1)
+        _is_maf = s in _mafia_seats(g)      # شاملِ جذب‌شده‌ها و رئیس‌مافیا
+        ok = (not _is_maf) if _odd else _is_maf
+        _nm = escape(g.seats[s][1], quote=False)
+        if ok:
+            await _close_pm(ctx, uid, mid,
+                            f"🦷 استعلامِ {s}. {g.seats[s][1]}: <b>مثبت ☑️</b>")
+            await _night_report(ctx, g, f"🦷 دنتیست → استعلامِ <b>{s}. {_nm}</b>: مثبت")
+        else:
+            g.dn_wrong = int(getattr(g, "dn_wrong", 0) or 0) + 1
+            _extra = ""
+            if g.dn_wrong == 2 and not g.dn_mortal:
+                g.dn_mortal = True
+                _extra = "\n⚠️ دو استعلامِ غلط — از این شب دیگر نامیرا نیستی."
+            elif g.dn_wrong >= 3:
+                g.dn_selfkill = True
+                _extra = "\n⛔ سه استعلامِ غلط — همین امشب از بازی خارج می‌شوی."
+            store.save()
+            await _close_pm(ctx, uid, mid,
+                            f"🦷 استعلامِ {s}. {g.seats[s][1]}: <b>منفی ✖️</b>"
+                            f" ({g.dn_wrong}/۳){_extra}")
+            await _night_report(ctx, g, f"🦷 دنتیست → استعلامِ <b>{s}. {_nm}</b>: منفی "
+                                        f"({g.dn_wrong} غلط)")
+        store.save()
+        await _tk_check_open_mafia(ctx, chat_id, g)   # 🌙 بلوکِ اول تمام شد
+        return
+
+    if data.startswith("dn_inq_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        dn = _seat_of_uid(g, uid)
+        _what = "شهروند" if int(g.night_number or 0) % 2 == 1 else "مافیا"
+        await _edit_pm(ctx, uid, mid,
+                       f"🦷 شب {g.night_number} — امشب باید استعلامِ <b>{_what}</b> بگیری.\n"
+                       f"چه کسی؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != dn], g,
+                                       "dn_inq_", selected=s, confirm_cb="dn_inq_ok"))
+        return
+
     # ── نگهبان (چندانتخابی) ──
     if data == "tk_grd_confirm":
         sel = list(g.night_guard_sel.get(uid, []))
@@ -13390,7 +13805,11 @@ async def handle_takavar_callback(update, ctx):
         await _night_report(ctx, g, "🔒 گروگانگیر → امشب گرو نگرفت")
         g.night_done.add("hostage")
         store.save()
-        await _tk_check_open_mafia(ctx, chat_id, g)
+        # 🦷 دنتیست: دکستر با مافیا اکت داد → نوبتِ شهروندهاست
+        if _is_dentist_scenario(g):
+            await _tk_check_open_citizens(ctx, chat_id, g)
+        else:
+            await _tk_check_open_mafia(ctx, chat_id, g)
         return
 
     if data == "tk_host_confirm":
@@ -13408,7 +13827,11 @@ async def handle_takavar_callback(update, ctx):
         await _night_report(ctx, g, f"🔒 گروگانگیر → گرو گرفت: <b>{s}. {escape(tname, quote=False)}</b>")
         g.night_done.add("hostage")
         store.save()
-        await _tk_check_open_mafia(ctx, chat_id, g)
+        # 🦷 دنتیست: دکستر با مافیا اکت داد → نوبتِ شهروندهاست
+        if _is_dentist_scenario(g):
+            await _tk_check_open_citizens(ctx, chat_id, g)
+        else:
+            await _tk_check_open_mafia(ctx, chat_id, g)
         return
 
     if data.startswith("tk_host_"):
@@ -13640,8 +14063,10 @@ async def handle_takavar_callback(update, ctx):
 
     if data == "tk_gun_yes":
         gun = _seat_of_uid(g, uid)
-        targets = _alive_seats(g)
-        await _edit_pm(ctx, uid, mid, "🔫 تفنگ اول را به چه کسی می‌دهی؟",
+        # 🦷 گان‌اسمیت فقط تفنگِ جنگی دارد → به خودش نمی‌دهد
+        targets = ([x for x in _alive_seats(g) if x != gun]
+                   if _is_dentist_scenario(g) else _alive_seats(g))
+        await _edit_pm(ctx, uid, mid, "🔫 تفنگ را به چه کسی می‌دهی؟",
                        _kb_night_seats(targets, g, "tk_g1_",
                                        selected=g.night_sel.get(uid), confirm_cb="tk_g1_confirm"))
         return
@@ -13656,6 +14081,14 @@ async def handle_takavar_callback(update, ctx):
         store.save()
         gun = _seat_of_uid(g, uid)
         _tu, tname = g.seats[s]
+        # 🦷 دنتیست: تفنگ همیشه جنگی است و تفنگِ دومی در کار نیست
+        if _is_dentist_scenario(g):
+            g.night_gun1_type = "war"
+            g.night_gun2_target = None
+            g.night_gun2_type = None
+            store.save()
+            await _tk_finalize_gunman(ctx, chat_id, g, uid, mid)
+            return
         await _edit_pm(ctx, uid, mid, f"🔫 تفنگ اول به {s}. {tname} — نوع؟",
                        _tk_gun_type_kb(g, s, 1, gun))
         return
@@ -13664,8 +14097,10 @@ async def handle_takavar_callback(update, ctx):
         s = int(data.rsplit("_", 1)[1])
         g.night_sel[uid] = s
         store.save()
-        await _edit_pm(ctx, uid, mid, "🔫 تفنگ اول را به چه کسی می‌دهی؟",
-                       _kb_night_seats(_alive_seats(g), g, "tk_g1_", selected=s, confirm_cb="tk_g1_confirm"))
+        _tg = ([x for x in _alive_seats(g) if x != _seat_of_uid(g, uid)]
+               if _is_dentist_scenario(g) else _alive_seats(g))
+        await _edit_pm(ctx, uid, mid, "🔫 تفنگ را به چه کسی می‌دهی؟",
+                       _kb_night_seats(_tg, g, "tk_g1_", selected=s, confirm_cb="tk_g1_confirm"))
         return
 
     if data in ("tk_g1war", "tk_g1blank"):
@@ -14581,6 +15016,17 @@ async def _kp_after_vote(ctx, chat_id, g):
         try:
             await ctx.bot.edit_message_reply_markup(chat_id=g.god_id, message_id=_pmid,
                                                     reply_markup=None)
+        except Exception:
+            pass
+
+    # 📢 نتیجهٔ رأی به پیویِ همهٔ زنده‌ها — فقط «اکثریت موافق/مخالف»،
+    #    بدونِ تعداد و بدونِ اینکه معلوم شود چه کسی چه رأیی داده
+    _res = ("🧪 نتیجهٔ رأیِ پادزهر: <b>اکثریت موافق</b> بودند."
+            if majority_for else
+            "🧪 نتیجهٔ رأیِ پادزهر: <b>اکثریت مخالف</b> بودند.")
+    for _s in _alive_seats(g):
+        try:
+            await ctx.bot.send_message(g.seats[_s][0], _res, parse_mode="HTML")
         except Exception:
             pass
 
@@ -18393,7 +18839,7 @@ async def _run_night_act(update, ctx):
             await handle_baazpors_callback(update, ctx)
         elif _dt.startswith("nem_"):
             await handle_nemayande_callback(update, ctx)
-        elif _dt.startswith("tk_"):
+        elif _dt.startswith(("tk_", "dn_")):
             await handle_takavar_callback(update, ctx)
         elif _dt.startswith("kp_"):
             await handle_kapu_callback(update, ctx)
@@ -18605,7 +19051,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
-                                              "gm_", "sh_", "my_", "cl_")):
+                                              "gm_", "sh_", "my_", "cl_", "dn_")):
         # ⏪ چون هر اکت یک مهلتِ ۷ ثانیه‌ایِ «اکت مجدد» دارد، پردازش در پس‌زمینه
         #    می‌رود تا وب‌هوکِ تلگرام منتظر نماند (وگرنه هر اکت ۷ ثانیه لفت می‌داد)
         asyncio.create_task(_run_night_act(update, ctx))
@@ -20234,6 +20680,17 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid != g.god_id:
             return
 
+        # 🦷 بعد از رفتنِ دنتیست: به‌جای «چند شهروند/چند مافیا»، فهرستِ
+        #    نقش‌های خارج‌شده — بدونِ اشاره به اینکه کدام نقش مالِ چه کسی بوده
+        if _is_dentist_scenario(g) and getattr(g, "dn_out", False):
+            _roles = sorted(
+                ((g.assigned_roles or {}).get(s) or "—") for s in (g.striked or set()))
+            _txt = ("📢 <b>استعلام وضعیت</b> — نقش‌های خارج‌شده:\n"
+                    + ("\n".join(f"• {escape(r, quote=False)}" for r in _roles)
+                       if _roles else "—"))
+            await ctx.bot.send_message(chat, _txt, parse_mode="HTML")
+            return
+
         mafia_roles = {_nz(x) for x in load_mafia_roles()}
         dead_seats = [s for s in g.striked]
         mafia_count = 0
@@ -20530,6 +20987,12 @@ async def shuffle_and_assign(
     g.baz_duel_votes = {}
     g.baz_duel_unread = set()
     g.bzp_hunter_pending = None      # 🪢 سؤالِ معلقِ هانتر با نقشِ تازه بی‌معناست
+    # 🦷 دنتیست — با نقشِ تازه از نو
+    g.dn_wrong = 0
+    g.dn_mortal = False
+    g.dn_selfkill = False
+    g.dn_out = False
+    g.dn_sniper_hit = False
     # 🎃💎 گیمر ۱۷ — با نقشِ تازه همه‌چیزِ مترسک و تانوس از نو
     g.gm_scare_target = None
     g.gm_poisoned = None
@@ -20967,16 +21430,20 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat.id
     g = gs(chat_id)
 
-    # ⛔ «محروم» با ریپلای — فقط مدیرانِ اصلیِ بات (برای بقیه اصلاً شرط برقرار نیست
-    #    تا متنِ عادیِ «محروم» مسیرِ همیشگی‌اش را برود)
-    if _is_super_admin(uid) and _is_block_text(text):
-        await _block_from_reply(ctx, msg)
-        return
+    # ⛔ «محروم» — با ریپلای یا «محروم @یوزرنیم / محروم 12345».
+    #    فقط مدیرانِ اصلیِ بات (برای بقیه اصلاً شرط برقرار نیست تا متنِ عادیِ
+    #    «محروم» مسیرِ همیشگی‌اش را برود)
+    if _is_super_admin(uid):
+        _barg = _cmd_arg(text, _BLOCK_PHRASES)
+        if _barg is not None:
+            await _block_from_reply(ctx, msg, arg=_barg)
+            return
 
-    # 🔓 «رفع محرومیت» با ریپلای — مدیرِ اصلی یا ادمین‌های گروه (نه روی خودش)
-    if _is_unban_text(text):
+    # 🔓 «رفع محرومیت» — با ریپلای یا @یوزرنیم/آیدی (مدیرِ اصلی یا ادمینِ گروه)
+    _uarg = _cmd_arg(text, _UNBAN_PHRASES)
+    if _uarg is not None:
         if await _can_unban(ctx, chat_id, uid):
-            await _god_unban_from_reply(ctx, msg, by_uid=uid)
+            await _god_unban_from_reply(ctx, msg, by_uid=uid, arg=_uarg)
         return   # غیرِ ادمین: بی‌صدا نادیده گرفته می‌شود
 
     # 🗑 «حذف رویداد N» — فقط مدیرِ اصلی (ADMIN_ID): آمار/امتیاز/تاریخچهٔ همان رویدادِ
@@ -21890,11 +22357,15 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def _pm_keyboard(uid=None):
-    """کیبوردِ پیوی — برای سازندهٔ بات یک دکمهٔ اضافه‌ی «پنل مدیریت» هم دارد."""
+    """کیبوردِ پیوی — برای سازندهٔ بات یک دکمهٔ اضافه‌ی «پنل مدیریت» هم دارد.
+    ⚠️ is_persistent عمداً False است: با True تلگرام دکمهٔ جمع‌کردنِ کیبورد (⌨️) را
+    برمی‌دارد و کاربر گیر می‌کند — نه می‌تواند ببنددش نه تایپ کند. با False
+    همان دکمه‌ها هستند ولی هر وقت خواست با آیکنِ کیبورد جمع/باز می‌شوند."""
     rows = [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]]
     if uid == ADMIN_ID:
         rows.append(["🛠 پنل مدیریت"])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=False,
+                               input_field_placeholder="پیام بنویس یا از دکمه‌ها استفاده کن")
 
 
 async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -22248,34 +22719,42 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid == ADMIN_ID:
             await open_admin_panel(ctx, uid)
         return
+    # 🔓 با هر بار زدنِ این دکمه‌ها، کیبوردِ تازه (قابلِ بستن) هم فرستاده می‌شود؛
+    #    این کسانی را که پشتِ کیبوردِ چسبانِ قدیمی گیر کرده‌اند آزاد می‌کند.
+    _kb = _pm_keyboard(uid)
+
+    async def _rep(t, **kw):
+        kw.setdefault("reply_markup", _kb)
+        return await msg.reply_text(t, **kw)
+
     # دکمه‌های کیبورد ایموجی دارند («📊 آمار من») → تطبیقِ پسوندی
     if text.endswith("آمار من"):
         stats = load_player_stats() or {}
         p = stats.get(str(uid))
         if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
-            await msg.reply_text("📭 هنوز آماری برای شما ثبت نشده است.")
+            await _rep("📭 هنوز آماری برای شما ثبت نشده است.")
         else:
-            await msg.reply_text(format_player_stats(p), parse_mode="HTML")
+            await _rep(format_player_stats(p), parse_mode="HTML")
     elif text.endswith("آمار کل"):
         board = build_alltime_leaderboard_text(load_player_stats() or {})
         if not board:
-            await msg.reply_text("📭 هنوز آماری ثبت نشده است.")
+            await _rep("📭 هنوز آماری ثبت نشده است.")
         else:
-            await msg.reply_text(board, parse_mode="HTML")
+            await _rep(board, parse_mode="HTML")
     elif text.endswith("بازی من"):
         rows = (load_game_history() or {}).get(str(uid), [])
         if not rows:
-            await msg.reply_text("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
+            await _rep("📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.")
         else:
-            await msg.reply_text(format_game_history(rows), parse_mode="HTML")
+            await _rep(format_game_history(rows), parse_mode="HTML")
     elif text.endswith("آمار هفتگی"):
         meta = load_weekly_meta()
         snapshot = meta.get("snapshot", {}) if isinstance(meta, dict) else {}
         board = build_weekly_leaderboard_text(load_player_stats() or {}, snapshot, require_weekly=False)
         if not board:
-            await msg.reply_text("📭 هنوز آماری برای این هفته ثبت نشده است.")
+            await _rep("📭 هنوز آماری برای این هفته ثبت نشده است.")
         else:
-            await msg.reply_text(board, parse_mode="HTML")
+            await _rep(board, parse_mode="HTML")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -22536,7 +23015,8 @@ async def _room_sync_on_night(ctx, g):
     if not g.mafia_room_id:
         return
     # 🩸 هانیبال: اتاق تا اکتِ سایه بسته می‌ماند (در _hb_open_mafia باز می‌شود)
-    if not _is_hanibal_scenario(g):
+    # 🦷 دنتیست: تا دنتیست و محافظ اکت ندهند، اتاق بسته است (در _tk_check_open_mafia باز می‌شود)
+    if not (_is_hanibal_scenario(g) or _is_dentist_scenario(g)):
         await _room_set_locked(ctx, g, False)
     removed_any = False
     for uid in list(g.mafia_room_members):
@@ -22967,6 +23447,19 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     uid = msg.from_user.id
     g = gs(chat_id)
     text = msg.text.strip()
+
+    # ⛔🔓 «محروم / رفع محرومیت» با @یوزرنیم یا آیدی — بدونِ ریپلای هم کار کند
+    #    (مسیرِ ریپلایش در name_reply است؛ اینجا حالتِ بدونِ‌ریپلا‌ی را می‌گیریم)
+    if _is_super_admin(uid):
+        _barg = _cmd_arg(text, _BLOCK_PHRASES)
+        if _barg is not None:
+            await _block_from_reply(ctx, msg, arg=_barg)
+            return
+    _uarg = _cmd_arg(text, _UNBAN_PHRASES)
+    if _uarg is not None:
+        if await _can_unban(ctx, chat_id, uid):
+            await _god_unban_from_reply(ctx, msg, by_uid=uid, arg=_uarg)
+        return
 
     # 🗳 ثبت رأی — فقط «دولایک با هر رنگ» یا «..»؛ ملاک زمان = ساعت تلگرام
     # (قبل از هر شرط دیگری، تا هیچ هندلری پیامِ رأی را ندزدد)
