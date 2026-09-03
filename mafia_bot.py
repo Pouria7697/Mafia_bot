@@ -1632,17 +1632,43 @@ _UNAME_CACHE: dict[str, tuple] = {}
 _UNAME_CACHE_BY_ID: dict[int, str] = {}
 
 
-async def _resolve_target(ctx, msg, arg=""):
-    """🎯 هدفِ «محروم / رفع محرومیت» را پیدا می‌کند:
-    ریپلای → همان شخص | «@نام» → از نمایهٔ یوزرنیم‌ها یا خودِ تلگرام | عدد → آیدی.
-    خروجی: (آیدی، اسم) یا (None, پیامِ خطا)."""
-    rep = getattr(msg, "reply_to_message", None)
-    if rep is not None and getattr(rep, "from_user", None):
-        u = rep.from_user
-        return u.id, (u.full_name or str(u.id))
+def _pick_id_or_uname(text):
+    """🔎 اگر متنی «فقط» یک آیدیِ عددی یا @یوزرنیم باشد، خودش را برمی‌گرداند."""
+    t = " ".join(str(text or "").split())
+    if not t or " " in t:
+        return None
+    d = t.translate(_FA_DIGITS)
+    if d.isdigit() and len(d) >= 6:      # آیدیِ واقعی؛ عددهای کوتاه (رأی و…) نه
+        return d
+    if t.startswith("@") and len(t) > 2:
+        return t
+    return None
 
+
+async def _resolve_target(ctx, msg, arg=""):
+    """🎯 هدفِ «محروم / رفع محرومیت» را پیدا می‌کند. اولویت:
+    ۱) آیدی/یوزرنیمی که خودت نوشتی («محروم 12345» یا «محروم @ali»)
+    ۲) ریپلای روی پیامی که خودت آیدی/یوزرنیم را در آن نوشته‌ای
+    ۳) ریپلای روی پیامِ خودِ آن شخص
+    خروجی: (آیدی، اسم) یا (None, پیامِ خطا)."""
     a = (arg or "").strip()
+    rep = getattr(msg, "reply_to_message", None)
+
+    # 🧾 ریپلای روی پیامی که «خودت» یا «بات» فقط یک آیدی/یوزرنیم در آن نوشته
+    #    (وگرنه «محروم» + ریپلای روی پیامِ خودت یعنی محرومیتِ خودت — همان اشتباهِ رایج)
+    if not a and rep is not None:
+        _ru = getattr(rep, "from_user", None)
+        _me = getattr(getattr(msg, "from_user", None), "id", None)
+        if _ru is not None and (_ru.id == _me or getattr(_ru, "is_bot", False)):
+            _cand = _pick_id_or_uname(getattr(rep, "text", None)
+                                      or getattr(rep, "caption", None))
+            if _cand:
+                a = _cand
+
     if not a:
+        if rep is not None and getattr(rep, "from_user", None):
+            u = rep.from_user
+            return u.id, (u.full_name or str(u.id))
         return None, ("⚠️ یا روی پیامِ همان شخص ریپلای کن، یا بعدش "
                       "<code>@یوزرنیم</code> یا آیدیِ عددی‌اش را بنویس.")
 
@@ -1703,11 +1729,18 @@ async def _block_from_reply(ctx, msg, arg=""):
         await msg.reply_text(tname, parse_mode="HTML")
         return
     _rep = getattr(msg, "reply_to_message", None)
+    _by_reply = bool(_rep is not None and getattr(_rep, "from_user", None)
+                     and getattr(_rep.from_user, "id", None) == tid)
     target = SimpleNamespace(
         id=tid, full_name=tname,
-        is_bot=bool(getattr(getattr(_rep, "from_user", None), "is_bot", False)))
+        is_bot=bool(_by_reply and getattr(_rep.from_user, "is_bot", False)))
     if _is_super_admin(target.id):
-        await msg.reply_text("ℹ️ مدیرانِ اصلیِ بات را نمی‌شود محروم کرد.")
+        _self = (tid == getattr(getattr(msg, "from_user", None), "id", None))
+        await msg.reply_text(
+            "ℹ️ مدیرانِ اصلیِ بات را نمی‌شود محروم کرد."
+            + ("\n⚠️ هدف <b>خودت</b> شدی. برای محرومیت با آیدی، همان پیام را این‌طور بنویس:\n"
+               "<code>محروم 123456789</code>\n(نیازی به ریپلای نیست)" if _self else ""),
+            parse_mode="HTML")
         return
     if getattr(target, "is_bot", False):
         await msg.reply_text("ℹ️ بات را نمی‌شود محروم کرد.")
@@ -1717,9 +1750,10 @@ async def _block_from_reply(ctx, msg, arg=""):
         await msg.reply_text(f"ℹ️ {res}")
         return
     await msg.reply_text(
-        f"⛔ <b>{escape(res, quote=False)}</b> از بات محروم شد — از این به بعد هیچ "
-        f"پیام، دستور و دکمه‌ای از او خوانده نمی‌شود و در هیچ بازی‌ای نمی‌نشیند.\n"
-        f"🔓 فقط مدیرانِ اصلیِ بات با ریپلای و نوشتنِ «رفع محرومیت» می‌توانند برش دارند.",
+        f"⛔ <b>{escape(res, quote=False)}</b> (<code>{target.id}</code>) از بات محروم شد — "
+        f"از این به بعد هیچ پیام، دستور و دکمه‌ای از او خوانده نمی‌شود و در هیچ "
+        f"بازی‌ای نمی‌نشیند.\n"
+        f"🔓 برای برداشتنش: <code>رفع محرومیت {target.id}</code>",
         parse_mode="HTML")
     try:
         await ctx.bot.send_message(
@@ -4961,7 +4995,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
 
     # 🛡 زره‌پوش (مذاکره) و نگهبانِ شیلددار (تکاور) خط نمی‌خورند —
     #    تصمیم (افتادنِ شیلد یا خروج) با خودِ گاد است
-    rn = _seat_role_norm(g, exiter)
+    rn = _canon_role(g, _seat_role_norm(g, exiter))   # 🦷 «محافظِ» دنتیست = نگهبانِ تکاور
     protected = ((_is_takavar_scenario(g) and rn == _R_WATCHMAN
                   and not getattr(g, "tk_shield_lost", False))
                  or (_is_neg_scenario(g) and rn == _R_ARMORED
@@ -5810,6 +5844,22 @@ def _role_of(g, role_norm):
     try:
         if _DN_ALIAS and _is_dentist_scenario(g):
             return _DN_ALIAS.get(role_norm, role_norm)
+    except Exception:
+        pass
+    return role_norm
+
+
+_DN_UNALIAS = {}    # 🦷 نگاشتِ برعکسِ _DN_ALIAS — هم‌زمان با خودش پر می‌شود
+
+
+def _canon_role(g, role_norm):
+    """🦷 برعکسِ _role_of: نامِ نقش در سناریوی جاری → نامِ همان نقش در موتورِ تکاور
+    (مثلاً «محافظ» → «نگهبان»، «دکستر» → «گروگانگیر»).
+    ⚠️ لازم است چون بعضی از این نام‌ها در سناریوهای دیگر معنیِ دیگری دارند
+    («محافظ» در نماینده نقشِ دیگری است) و نگاشت‌های موتور را به هدفِ اشتباه می‌زدند."""
+    try:
+        if _DN_UNALIAS and _is_dentist_scenario(g):
+            return _DN_UNALIAS.get(role_norm, role_norm)
     except Exception:
         pass
     return role_norm
@@ -6964,7 +7014,7 @@ def _burn_seat_acts(g, seat, force=False):
         return
     if not force and _god_acted_for(g, seat):
         return []   # 🎛 اکتِ دستیِ گاد بر کیک اولویت دارد
-    rn = _seat_role_norm(g, seat)
+    rn = _canon_role(g, _seat_role_norm(g, seat))   # 🦷 نام‌های دنتیست → نامِ موتور
 
     # نقش → فیلدهایی که همان نقش می‌نویسد
     per_role = {
@@ -7144,6 +7194,15 @@ def _win_condition(g):
             return ("مافیا", False,
                     f"دنتیست خارج شده و تعدادِ مافیا ({len(maf)}) با شهروندها "
                     f"({len(city)}) برابر شده.")
+        # 🩸 دنتیست هنوز در بازی است: مافیا فقط وقتی می‌برد که کلین‌شیت باشد
+        #    (هیچ مافیایی خارج نشده) و تعدادش با بقیهٔ زنده‌ها برابر یا بیشتر شود.
+        #    اگر حتی یک مافیا رفته باشد، وضعیت نامعلوم است و بات چیزی اعلام نمی‌کند.
+        _maf_all = {s for s in g.seats if _sc_side(g, s) == "مافیا"}
+        if (dent_alive and _maf_all and len(maf) == len(_maf_all)
+                and len(maf) >= len(city) + 1):
+            return ("مافیا", False,
+                    f"هیچ مافیایی از بازی خارج نشده و تعدادِ مافیا ({len(maf)}) "
+                    f"با بقیهٔ زنده‌ها ({len(city) + 1}) برابر شده.")
         return None
 
     # ♦️ سناریوی مستقل‌دار → بات اصلاً دخالت نمی‌کند
@@ -8911,10 +8970,13 @@ async def _burn_advance(ctx, chat_id, g):
             _R_HACKER: "hacker", _R_SHIAD: "shiad", _R_MINER: "mine",
         }
         for s in burned:
-            rn = _seat_role_norm(g, s)
+            rn = _canon_role(g, _seat_role_norm(g, s))   # 🦷 نام‌های دنتیست → نامِ موتور
             k = role_keys.get(rn)
             if k:
                 g.night_done.add(k)
+            # 🦷 خودِ دنتیست هم کلیدِ خودش را دارد، وگرنه اتاقِ مافیا باز نمی‌شود
+            if _is_dentist_scenario(g) and rn == _R_DN_DENTIST:
+                g.night_done.add("dentist")
         # 🔎 اگر شهروندِ راهنمایی‌گرفته سوخت، استعلامش هم منتفی است
         if getattr(g, "night_guide_recipient_inv", None) in burned:
             g.night_done.add("ginv")
@@ -12807,6 +12869,7 @@ _DN_ALIAS.update({
     _R_GUNMAN:    _R_DN_GUNSM,     # گان‌اسمیت
     _R_NEGOTIATOR: _R_DN_CHURCH,   # چرچیل
 })
+_DN_UNALIAS.update({v: k for k, v in _DN_ALIAS.items()})
 
 
 def _tk_blocked(g, seat) -> bool:
@@ -13020,8 +13083,9 @@ async def _tk_open_citizens(ctx, chat_id, g):
         g.night_done.add("doctor")
     else:
         duid = g.seats[doc][0]
-        # 🦷 پزشکِ دنتیست هر شب فقط یک نفر
-        need = 1 if _is_dentist_scenario(g) else (2 if g.night_alive_at_start >= 8 else 1)
+        # 🦷 دنتیست: تا وقتی ۱۰ نفر یا بیشتر زنده‌اند ۲ سیو، زیرِ ۱۰ نفر ۱ سیو
+        _thr = 10 if _is_dentist_scenario(g) else 8
+        need = 2 if g.night_alive_at_start >= _thr else 1
         g.night_doc_need = need
         targets = _doctor_targets(g, doc)
         m = await _safe_pm(ctx, duid, f"💉 چه کسی را سیو می‌دهی؟ (تا {need} نفر)",
@@ -13167,7 +13231,7 @@ async def _tk_day_gun_fire(ctx, chat_id, g, shooter, target):
             chat_id, f"💨 تیر مشقی بود — {target}. {tname} وصیت نکند.", parse_mode="HTML")
         await _night_report(ctx, g, f"💨 گانِ روز: {shooter}. {sname} → {target}. {tname} (مشقی)")
         return
-    rn = _seat_role_norm(g, target)
+    rn = _canon_role(g, _seat_role_norm(g, target))   # 🦷 «محافظِ» دنتیست = نگهبانِ تکاور
     if rn == _R_WATCHMAN and not getattr(g, "tk_shield_lost", False):
         # 🛡 نگهبانِ شیلددار: نمی‌میرد — بعد از ۵۰ ثانیه اعلام می‌شود که زره‌اش افتاد
         g.tk_shield_lost = True
