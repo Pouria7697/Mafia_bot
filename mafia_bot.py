@@ -16,7 +16,7 @@ from telegram.error import RetryAfter, TimedOut, BadRequest
 group_filter = filters.ChatType.GROUPS
 from datetime import datetime, timezone, timedelta  
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply,
-                      Message, ChatPermissions, ReplyKeyboardMarkup)
+                      Message, ChatPermissions, ReplyKeyboardMarkup, ReplyKeyboardRemove)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters, TypeHandler, ApplicationHandlerStop
@@ -19057,6 +19057,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(_run_night_act(update, ctx))
         return
 
+    # 📊 دکمه‌های اینلاینِ پیوی (آمار من / آمار کل / هفتگی / بازی من / پنل)
+    if _q and _q.data and _q.data.startswith("pmb_"):
+        await handle_pm_buttons(update, ctx)
+        return
+
     # 🔹 جلوگیری از اجرای کال‌بک‌ها در پی‌وی مگر برای راوی در حالت خریداری
     if update.effective_chat.type == "private":
         q = update.callback_query
@@ -22356,16 +22361,58 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ نتونستم نقش‌ها رو به پیوی گاد جدید بفرستم.")
 
 
-def _pm_keyboard(uid=None):
-    """کیبوردِ پیوی — برای سازندهٔ بات یک دکمهٔ اضافه‌ی «پنل مدیریت» هم دارد.
-    ⚠️ is_persistent عمداً False است: با True تلگرام دکمهٔ جمع‌کردنِ کیبورد (⌨️) را
-    برمی‌دارد و کاربر گیر می‌کند — نه می‌تواند ببنددش نه تایپ کند. با False
-    همان دکمه‌ها هستند ولی هر وقت خواست با آیکنِ کیبورد جمع/باز می‌شوند."""
-    rows = [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]]
+def _pm_inline_kb(uid=None):
+    """⌨️ دکمه‌های پیوی — «اینلاین» (داخلِ پیام)، نه کیبوردِ پایینِ صفحه.
+    ⚠️ کیبوردِ پایین (ReplyKeyboard) عمداً حذف شد: روی اندروید دکمهٔ بکِ گوشی اول
+    سعی می‌کند آن کیبورد را ببندد و کاربر نمی‌توانست از چتِ بات بیرون برود."""
+    rows = [
+        [InlineKeyboardButton("📊 آمار من", callback_data="pmb_me"),
+         InlineKeyboardButton("👑 آمار کل", callback_data="pmb_all")],
+        [InlineKeyboardButton("🏆 آمار هفتگی", callback_data="pmb_week"),
+         InlineKeyboardButton("🎮 بازی من", callback_data="pmb_games")],
+    ]
     if uid == ADMIN_ID:
-        rows.append(["🛠 پنل مدیریت"])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=False,
-                               input_field_placeholder="پیام بنویس یا از دکمه‌ها استفاده کن")
+        rows.append([InlineKeyboardButton("🛠 پنل مدیریت", callback_data="pmb_admin")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_pm_buttons(update, ctx):
+    """📊 دکمه‌های اینلاینِ پیوی — همان کارِ دکمه‌های قدیمی، بدونِ کیبوردِ پایینِ صفحه."""
+    q = update.callback_query
+    uid = q.from_user.id
+    data = q.data or ""
+    await safe_q_answer(q)
+
+    async def _send(t, **kw):
+        try:
+            await ctx.bot.send_message(uid, t, **kw)
+        except Exception as e:
+            print("⚠️ pm buttons:", e)
+
+    if data == "pmb_admin":
+        if uid == ADMIN_ID:
+            await open_admin_panel(ctx, uid)
+        return
+    if data == "pmb_me":
+        p = (load_player_stats() or {}).get(str(uid))
+        if not p or (p.get("games", 0) == 0 and p.get("god_games", 0) == 0):
+            await _send("📭 هنوز آماری برای شما ثبت نشده است.")
+        else:
+            await _send(format_player_stats(p), parse_mode="HTML")
+    elif data == "pmb_all":
+        board = build_alltime_leaderboard_text(load_player_stats() or {})
+        await _send(board or "📭 هنوز آماری ثبت نشده است.", parse_mode="HTML")
+    elif data == "pmb_week":
+        meta = load_weekly_meta()
+        snap = meta.get("snapshot", {}) if isinstance(meta, dict) else {}
+        board = build_weekly_leaderboard_text(load_player_stats() or {}, snap,
+                                              require_weekly=False)
+        await _send(board or "📭 هنوز آماری برای این هفته ثبت نشده است.", parse_mode="HTML")
+    elif data == "pmb_games":
+        rows = (load_game_history() or {}).get(str(uid), [])
+        await _send(format_game_history(rows) if rows
+                    else "📭 از زمانِ فعال‌شدنِ تاریخچه، بازی‌ای برای شما ثبت نشده است.",
+                    parse_mode="HTML")
 
 
 async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -22375,10 +22422,12 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "سلام! 🎭 به بات مافیا خوش آمدید.\n\n"
             "این بات برای اجرای بازی مافیا در گروه‌ها ساخته شده و اکت‌های شبانهٔ نقش شما "
             "در همین پیوی انجام می‌شود.\n\n"
-            "از دکمه‌های پایین استفاده کنید 👇\n\n"
             "موفق باشید! 🌙",
-            reply_markup=_pm_keyboard(update.effective_user.id)
+            reply_markup=ReplyKeyboardRemove()   # 🔓 کیبوردِ چسبانِ قدیمی برداشته شود
         )
+        await update.message.reply_text(
+            "از این دکمه‌ها استفاده کن 👇",
+            reply_markup=_pm_inline_kb(update.effective_user.id))
     except Exception:
         pass
     # 📬 اگر وسطِ بازی تازه استارت کرده، هرچه از دستش رفته همین حالا برایش می‌رود
@@ -22719,12 +22768,14 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid == ADMIN_ID:
             await open_admin_panel(ctx, uid)
         return
-    # 🔓 با هر بار زدنِ این دکمه‌ها، کیبوردِ تازه (قابلِ بستن) هم فرستاده می‌شود؛
-    #    این کسانی را که پشتِ کیبوردِ چسبانِ قدیمی گیر کرده‌اند آزاد می‌کند.
-    _kb = _pm_keyboard(uid)
+    # 🔓 هر بار که یکی از دکمه‌های کیبوردِ قدیمی زده شود، همان‌جا برداشته می‌شود؛
+    #    این کسانی را که پشتِ کیبوردِ چسبان گیر کرده‌اند آزاد می‌کند.
+    _first = [True]
 
     async def _rep(t, **kw):
-        kw.setdefault("reply_markup", _kb)
+        if _first[0]:
+            kw.setdefault("reply_markup", ReplyKeyboardRemove())
+            _first[0] = False
         return await msg.reply_text(t, **kw)
 
     # دکمه‌های کیبورد ایموجی دارند («📊 آمار من») → تطبیقِ پسوندی
