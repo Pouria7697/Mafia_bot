@@ -22361,19 +22361,20 @@ async def transfer_god_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ نتونستم نقش‌ها رو به پیوی گاد جدید بفرستم.")
 
 
-def _pm_inline_kb(uid=None):
-    """⌨️ دکمه‌های پیوی — «اینلاین» (داخلِ پیام)، نه کیبوردِ پایینِ صفحه.
-    ⚠️ کیبوردِ پایین (ReplyKeyboard) عمداً حذف شد: روی اندروید دکمهٔ بکِ گوشی اول
-    سعی می‌کند آن کیبورد را ببندد و کاربر نمی‌توانست از چتِ بات بیرون برود."""
-    rows = [
-        [InlineKeyboardButton("📊 آمار من", callback_data="pmb_me"),
-         InlineKeyboardButton("👑 آمار کل", callback_data="pmb_all")],
-        [InlineKeyboardButton("🏆 آمار هفتگی", callback_data="pmb_week"),
-         InlineKeyboardButton("🎮 بازی من", callback_data="pmb_games")],
-    ]
+def _pm_keyboard(uid=None):
+    """⌨️ دکمه‌های پیوی روی کیبوردِ پایین — ولی «جمع‌شونده».
+
+    ⚠️ دو تنظیمِ حیاتی (قبلاً is_persistent=True بود و کاربر گیر می‌کرد —
+       بکِ اندروید مصرفِ بستنِ کیبوردی می‌شد که بسته نمی‌شد):
+       • is_persistent=False  → آیکنِ ⌨️/چهارخانه سرِ جایش می‌ماند و می‌شود جمعش کرد
+       • one_time_keyboard=True → بعد از هر استفاده خودش جمع می‌شود و کیبوردِ
+         تایپِ عادی می‌آید؛ هر وقت خواست با همان چهارخانه دوباره بازش می‌کند."""
+    rows = [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]]
     if uid == ADMIN_ID:
-        rows.append([InlineKeyboardButton("🛠 پنل مدیریت", callback_data="pmb_admin")])
-    return InlineKeyboardMarkup(rows)
+        rows.append(["🛠 پنل مدیریت"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True,
+                               is_persistent=False,
+                               input_field_placeholder="برای دیدنِ دکمه‌ها، چهارخانه را بزن")
 
 
 async def handle_pm_buttons(update, ctx):
@@ -22422,12 +22423,10 @@ async def start_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "سلام! 🎭 به بات مافیا خوش آمدید.\n\n"
             "این بات برای اجرای بازی مافیا در گروه‌ها ساخته شده و اکت‌های شبانهٔ نقش شما "
             "در همین پیوی انجام می‌شود.\n\n"
+            "برای دیدنِ آمار، آیکنِ ⌨️/چهارخانهٔ کنارِ کادرِ تایپ را بزن.\n\n"
             "موفق باشید! 🌙",
-            reply_markup=ReplyKeyboardRemove()   # 🔓 کیبوردِ چسبانِ قدیمی برداشته شود
+            reply_markup=_pm_keyboard(update.effective_user.id)
         )
-        await update.message.reply_text(
-            "از این دکمه‌ها استفاده کن 👇",
-            reply_markup=_pm_inline_kb(update.effective_user.id))
     except Exception:
         pass
     # 📬 اگر وسطِ بازی تازه استارت کرده، هرچه از دستش رفته همین حالا برایش می‌رود
@@ -22768,13 +22767,13 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if uid == ADMIN_ID:
             await open_admin_panel(ctx, uid)
         return
-    # 🔓 هر بار که یکی از دکمه‌های کیبوردِ قدیمی زده شود، همان‌جا برداشته می‌شود؛
-    #    این کسانی را که پشتِ کیبوردِ چسبان گیر کرده‌اند آزاد می‌کند.
+    # 🔓 با اولین استفاده، کیبوردِ تازه (جمع‌شونده) جای هر کیبوردِ چسبانِ قدیمی
+    #    می‌نشیند — این کسانی را که هنوز گیرِ نسخهٔ قدیمی‌اند آزاد می‌کند.
     _first = [True]
 
     async def _rep(t, **kw):
         if _first[0]:
-            kw.setdefault("reply_markup", ReplyKeyboardRemove())
+            kw.setdefault("reply_markup", _pm_keyboard(uid))
             _first[0] = False
         return await msg.reply_text(t, **kw)
 
