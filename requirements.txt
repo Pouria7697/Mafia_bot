@@ -1,4 +1,8 @@
 python-telegram-bot==20.3
+# ⚠️ anyio 4.15.0 به بعد httpcore 0.17.3 را می‌شکند
+#    (AttributeError: module 'anyio' has no attribute 'abc')
+#    زنجیره: python-telegram-bot 20.3 → httpx 0.24.1 → httpcore 0.17.3 → anyio
+anyio<4.15
 jdatetime
 flask
 aiohttp
