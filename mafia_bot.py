@@ -4461,23 +4461,9 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
     # مرتب‌سازی بر اساس تعداد رأی (نزولی)؛ در تساوی، ترتیبِ رأی‌گیری
     qualified.sort(key=lambda t: (-counts.get(t, 0), order.index(t)))
 
-    # ⚖️ قانونِ اختلاف آرا — ساده: هرکس ۳ رأی یا بیشتر از نفرِ اول عقب باشد،
-    #    اصلاً واردِ دفاعیه نمی‌شود. (۴ و ۵ و ۷ → فقط ۵ و ۷)
-    gap_note = None
-    if qualified:
-        top = counts.get(qualified[0], 0)
-        dropped = [t for t in qualified if (top - counts.get(t, 0)) >= 3]
-        if dropped:
-            qualified = [t for t in qualified if t not in dropped]
-            _nms = "، ".join(f"{t}. {escape(g.seats[t][1], quote=False)}"
-                             for t in sorted(dropped))
-            gap_note = (f"⚖️ اختلافِ ۳ رأی یا بیشتر با نفرِ اول ({top} رأی) → "
-                        f"{_nms} واردِ دفاعیه نمی‌شود.")
-
-    # 🔢 ترتیبِ نهایی (لیست و دکمه‌های رأی نهایی) = ترتیبِ رأی‌گیریِ اولیه، نه تعدادِ رأی
-    qualified.sort(key=lambda t: order.index(t))
-
     # ⚖️ نماینده: اکتِ وکیل (فقط ۲۴ ساعت — همان شبِ قبل) مانع ورود به دفاعیه می‌شود
+    #    ⚠️ باید *قبل از* قانونِ اختلاف آرا انجام شود: موکل اصلاً واردِ دفاعیه نمی‌شود،
+    #       پس رأی‌هایش هم نباید مبنای اختلافِ بقیه قرار بگیرد.
     lawyer_seat = None
     if _is_nemayande_scenario(g):
         lt = getattr(g, "night_lawyer_target", None)
@@ -4493,6 +4479,22 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
             else:
                 qualified.remove(lt)
                 lawyer_seat = lt
+
+    # ⚖️ قانونِ اختلاف آرا — ساده: هرکس ۳ رأی یا بیشتر از نفرِ اول عقب باشد،
+    #    اصلاً واردِ دفاعیه نمی‌شود. (۴ و ۵ و ۷ → فقط ۵ و ۷)
+    gap_note = None
+    if qualified:
+        top = counts.get(qualified[0], 0)
+        dropped = [t for t in qualified if (top - counts.get(t, 0)) >= 3]
+        if dropped:
+            qualified = [t for t in qualified if t not in dropped]
+            _nms = "، ".join(f"{t}. {escape(g.seats[t][1], quote=False)}"
+                             for t in sorted(dropped))
+            gap_note = (f"⚖️ اختلافِ ۳ رأی یا بیشتر با نفرِ اول ({top} رأی) → "
+                        f"{_nms} واردِ دفاعیه نمی‌شود.")
+
+    # 🔢 ترتیبِ نهایی (لیست و دکمه‌های رأی نهایی) = ترتیبِ رأی‌گیریِ اولیه، نه تعدادِ رأی
+    qualified.sort(key=lambda t: order.index(t))
 
     if not qualified and lawyer_seat is None:
         await ctx.bot.send_message(chat_id, f"ℹ️ هیچ‌کس به حدنصاب دفاعیه ({thr} رأی) نرسید.")
@@ -6040,14 +6042,33 @@ def _pm_target(uid):
     return uid
 
 
+def _pm_game(uid):
+    """🎯 بازیِ مربوط به این بازیکن — اول بازیی که شبش فعال است، بعد هر بازیِ دیگر.
+    ⚠️ اگر بازیکن در گروهِ دیگری هم نشسته باشد، جست‌وجوی سادهٔ «اولین بازی» پرامپتش را
+    در بازیِ اشتباه کش می‌کرد و مهلتِ «اکت مجدد» و اکتِ دستیِ گاد از کار می‌افتاد."""
+    fb = None
+    try:
+        for _g in store.games.values():
+            if not any(u == uid for u, _n in _g.seats.values()):
+                continue
+            if (getattr(_g, "night_active", False)
+                    or getattr(_g, "night_awaiting_sacrifice", False)
+                    or getattr(_g, "maarefe_active", False)):
+                return _g
+            if fb is None:
+                fb = _g
+    except Exception:
+        pass
+    return fb
+
+
 async def _safe_pm(ctx, uid, text, kb=None):
     # 📥 پرامپت را همیشه کش کن — حتی اگر ارسال نشود (گوشی خاموش/پیوی بسته)،
     #    تا گاد بتواند با «اکتِ دستی» همین سؤال را جای بازیکن جواب بدهد
     try:
-        for _g in store.games.values():
-            if any(u == uid for u, _n in _g.seats.values()):
-                _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
-                break
+        _g = _pm_game(uid)
+        if _g is not None:
+            _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
     except Exception:
         pass
     # 🔥 اکتِ سوخته: مثل بازیکنِ با پیویِ بسته رفتار می‌شود — هیچ پرامپتی نمی‌گیرد
@@ -6083,10 +6104,9 @@ async def _report_unreachable(ctx, chat_id, g):
 
 async def _edit_pm(ctx, uid, msg_id, text, kb):
     try:
-        for _g in store.games.values():
-            if any(u == uid for u, _n in _g.seats.values()):
-                _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
-                break
+        _g = _pm_game(uid)
+        if _g is not None:
+            _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
     except Exception:
         pass
     try:
@@ -6239,11 +6259,9 @@ async def _close_pm(ctx, uid, msg_id, text):
     if msg_id and _ACT_UID.get() == uid:
         _gr, _prompt = None, None
         try:
-            for _g in store.games.values():
-                if any(u == uid for u, _n in _g.seats.values()):
-                    _gr = _g
-                    _prompt = (_g.night_prompt_cache or {}).get(uid)
-                    break
+            _gr = _pm_game(uid)
+            if _gr is not None:
+                _prompt = (_gr.night_prompt_cache or {}).get(uid)
         except Exception:
             _gr = None
         if (_gr is not None and _prompt and _kb_load(_prompt[1]) is not None
@@ -6260,15 +6278,14 @@ async def _close_pm(ctx, uid, msg_id, text):
     else:
         _pending_flush = None
     try:
-        for _g in store.games.values():
-            if any(u == uid for u, _n in _g.seats.values()):
-                _g.night_prompt_cache.pop(uid, None)   # اکت تمام شد → دیگر پرامپتی نمانده
-                # 🎛 اکتِ دستی با تمام‌شدنِ همین اکت خودکار بسته می‌شود،
-                #    وگرنه بقیه‌ی پیام‌های این بازیکن هم به پیویِ گاد می‌رفت
-                s = getattr(_g, "god_acting_as", None)
-                if s and s in _g.seats and _g.seats[s][0] == uid:
-                    _g.god_acting_as = None
-                break
+        _g = _pm_game(uid)
+        if _g is not None:
+            _g.night_prompt_cache.pop(uid, None)   # اکت تمام شد → دیگر پرامپتی نمانده
+            # 🎛 اکتِ دستی با تمام‌شدنِ همین اکت خودکار بسته می‌شود،
+            #    وگرنه بقیه‌ی پیام‌های این بازیکن هم به پیویِ گاد می‌رفت
+            s = getattr(_g, "god_acting_as", None)
+            if s and s in _g.seats and _g.seats[s][0] == uid:
+                _g.god_acting_as = None
     except Exception:
         pass
     try:
@@ -6430,7 +6447,8 @@ def _night_all_done(g) -> bool:
         need = set()
         if not g.lawyer_used and _find_seat_role_sub(g, _R_LAWYER) is not None:
             need.add("lawyer")
-        if alive(_R_GUARD):
+        # 💣 بعد از یاغی، محافظ اصلاً اکت نمی‌گیرد → شب هم منتظرش نمی‌ماند
+        if alive(_R_GUARD) and not getattr(g, "nem_yaghi_used", False):
             need.add("guard")
         if not g.night_doctor_blocked and alive(_R_DOCTOR):
             need.add("doctor")
@@ -12287,8 +12305,9 @@ async def _nem_check_open_rest(ctx, chat_id, g):
             if m:
                 g.night_pm_msgs[luid] = m.message_id
 
-    # 🛡 محافظ (هر شب)
-    grd = _find_seat_by_role(g, _R_GUARD)
+    # 🛡 محافظ (هر شب) — 💣 بعد از اجرا شدنِ یاغی دیگر بی‌اثر است (محافظتش فقط
+    #    جلوی یاغی را می‌گرفت)، پس اصلاً پرسیده نمی‌شود
+    grd = None if getattr(g, "nem_yaghi_used", False) else _find_seat_by_role(g, _R_GUARD)
     if grd:
         guid = g.seats[grd][0]
         targets = [s for s in _alive_seats(g) if s != grd]
