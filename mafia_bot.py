@@ -2065,7 +2065,7 @@ async def handle_del_event_callback(update, ctx):
     q = update.callback_query
     if not q or not q.message:
         return
-    if q.from_user.id != ADMIN_ID:
+    if not _is_full_admin(q.from_user.id):
         await safe_q_answer(q, "⛔ فقط مدیرِ اصلیِ بات.", show_alert=True)
         return
     await safe_q_answer(q)
@@ -2241,7 +2241,7 @@ def _moveuser_apply(old_uid: str, new_uid: str) -> list[str]:
 async def cmd_moveuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🔀 /moveuser <آیدی قدیم> <آیدی جدید> — فقط سازندهٔ بات، فقط در پیوی."""
     msg = update.message
-    if not msg or msg.chat.type != "private" or msg.from_user.id != ADMIN_ID:
+    if not msg or msg.chat.type != "private" or not _is_full_admin(msg.from_user.id):
         return
     args = [a.strip() for a in (ctx.args or [])]
     if len(args) != 2 or not all(a.isdigit() for a in args):
@@ -2303,7 +2303,7 @@ async def cmd_moveuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_moveuser_callback(update, ctx):
     q = update.callback_query
     uid = q.from_user.id
-    if uid != ADMIN_ID:
+    if not _is_full_admin(uid):
         await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
         return
     data = q.data or ""
@@ -2817,7 +2817,8 @@ ADMIN_ID = 99347107
 # 👑 مدیرانِ اصلیِ بات — فقط دو اختیارِ خاص دارند:
 #    ۱) فعال/غیرفعال کردنِ گروه   ۲) «محروم» و «رفع محرومیت»
 #    ⚠️ بقیهٔ دستورهای سازندهٔ بات (/moveuser، /sendtoall، پنل مدیریت، افزودنِ
-#       سناریو و …) همچنان فقط دستِ ADMIN_ID است و اینجا باز نمی‌شود.
+#       سناریو و …) دستِ «مدیرانِ کامل» است — نگاه کن به FULL_ADMINS_DEFAULT و
+#       _is_full_admin پایین‌تر (فهرستشان در Gist است و از پنل عوض می‌شود).
 #    OWNER_IDS پایین‌ترِ فایل هم همین لیست است — یک تیر و دو نشان نداریم.
 SUPER_ADMINS = {
     ADMIN_ID,       # 99347107 — سازندهٔ بات
@@ -2830,7 +2831,8 @@ SUPER_ADMINS = {
 
 
 def _is_super_admin(uid) -> bool:
-    return uid in SUPER_ADMINS
+    # 👑 مدیرانِ کامل خودبه‌خود همهٔ اختیاراتِ مدیرِ اصلی را هم دارند
+    return uid in SUPER_ADMINS or _is_full_admin(uid)
 
 # ─── 📢 چنلِ آرشیو (لیست/گزارش/کارنامه‌ی هر بازی) ────────────────
 SETTINGS_FILENAME = "bot_settings.json"
@@ -2870,6 +2872,70 @@ def get_archive_channel():
     """آیدی/یوزرنیمِ چنلِ آرشیو (یا None اگر تنظیم نشده)."""
     v = (load_bot_settings() or {}).get("archive_channel")
     return v or (os.getenv("ARCHIVE_CHANNEL") or None)
+
+
+# ═══════════ 👑 مدیرانِ کاملِ بات ═══════════
+# دقیقاً همان دسترسیِ سازندهٔ بات. فهرست در Gist می‌نشیند تا از پنل بشود
+# دسترسی داد/گرفت بدونِ دیپلوی. ADMIN_ID همیشه هست و هرگز حذف نمی‌شود.
+FULL_ADMINS_DEFAULT = [
+    449916967,     # امیر خطیر
+    603814669,     # آرمان کاظمی
+]
+
+
+def _as_uid(x):
+    try:
+        n = int(str(x).strip())
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def load_full_admins() -> list:
+    """آیدیِ مدیرانِ کاملِ بات — به‌جز ADMIN_ID که جداگانه همیشه دسترسی دارد."""
+    v = (load_bot_settings() or {}).get("full_admins")
+    if v is None:
+        v = FULL_ADMINS_DEFAULT          # هنوز چیزی در Gist ثبت نشده
+    out = []
+    for x in v:
+        n = _as_uid(x)
+        if n and n != ADMIN_ID and n not in out:
+            out.append(n)
+    return out
+
+
+def save_full_admins(ids) -> list:
+    """ثبتِ فهرستِ تازه در Gist و برگرداندنِ فهرستِ پاک‌شده."""
+    clean = []
+    for x in ids:
+        n = _as_uid(x)
+        if n and n != ADMIN_ID and n not in clean:
+            clean.append(n)
+    data = dict(load_bot_settings() or {})
+    data["full_admins"] = clean
+    save_bot_settings(data)
+    return clean
+
+
+def _is_full_admin(uid) -> bool:
+    """👑 دسترسیِ کامل: سازندهٔ بات + هرکسی که در فهرستِ مدیرانِ کامل است."""
+    n = _as_uid(uid)
+    if n is None:
+        return False
+    return n == ADMIN_ID or n in load_full_admins()
+
+
+class _FullAdminFilter(filters.MessageFilter):
+    """فیلترِ پویا برای هندلرها. filters.User(...) یک‌بار موقعِ بالاآمدنِ بات ساخته
+    می‌شود و فهرستِ ثابت می‌گیرد؛ چون فهرستِ مدیران از پنل عوض می‌شود، لازم است
+    هر پیام تازه سنجیده شود."""
+
+    def filter(self, message):
+        try:
+            return bool(message and message.from_user
+                        and _is_full_admin(message.from_user.id))
+        except Exception:
+            return False
 
 
 async def _send_chunked(bot, chat_id, text, limit=3500):
@@ -21290,6 +21356,9 @@ async def shuffle_and_assign(
     store.save()
     await publish_seating(ctx, chat_id, g, mode=CTRL)
 
+    # 🪑 بازی شروع شد → اسمِ این بازیکن‌ها از لیستِ بقیهٔ گروه‌ها برداشته شود
+    await _free_seats_elsewhere(ctx, chat_id, g)
+
     return uid_to_role
 
 
@@ -21335,6 +21404,9 @@ async def handle_simple_seat_command(update: Update, ctx: ContextTypes.DEFAULT_T
         await ctx.bot.send_message(chat_id, "❗ شما قبلاً ثبت‌نام کرده‌اید.")
         return
 
+    if await _block_if_playing(ctx, chat_id, g, uid):
+        return
+
     _sb = seat_ban_info(uid)
     if _sb:
         await ctx.bot.send_message(
@@ -21373,6 +21445,8 @@ async def _sub_seat_fill(ctx, chat_id: int, g: GameState, seat_no: int, new_uid:
         return False
     if any(u == new_uid for u, _n in g.seats.values()):
         await ctx.bot.send_message(chat_id, "❗ این بازیکن همین حالا در لیست است.")
+        return False
+    if await _block_if_playing(ctx, chat_id, g, new_uid):
         return False
 
     old_uid, _old_name = (g.sub_open.get(seat_no) or (None, None))
@@ -21439,6 +21513,65 @@ def _looks_like_seating_list(msg) -> bool:
         return False
 
 
+def _live_game_of(uid, skip_chat=None):
+    """🎮 اگر این کاربر همین حالا در بازیِ در جریانِ گروهِ دیگری زنده است،
+    (آیدیِ گروه، بازی، صندلی) را برمی‌گرداند؛ وگرنه None."""
+    try:
+        for cid, game in (store.games or {}).items():
+            if skip_chat is not None and cid == skip_chat:
+                continue
+            if getattr(game, "phase", "idle") in ("idle", "ended"):
+                continue
+            s = _seat_of_uid(game, uid)
+            if s is not None and s not in (getattr(game, "striked", None) or set()):
+                return cid, game, s
+    except Exception as e:
+        print("⚠️ live game lookup:", e)
+    return None
+
+
+async def _block_if_playing(ctx, chat_id, g, uid, name=None) -> bool:
+    """⛔ کسی که در بازیِ در جریانِ گروهِ دیگری زنده است نمی‌تواند اینجا هم اسم بدهد.
+    True یعنی جلویش گرفته شد."""
+    if _live_game_of(uid, skip_chat=chat_id) is None:
+        return False
+    nm = name or (getattr(g, "user_names", None) or {}).get(uid) or "این بازیکن"
+    try:
+        await ctx.bot.send_message(
+            chat_id,
+            f"⛔ <b>{escape(str(nm), quote=False)}</b> الان در بازیِ گروهِ دیگری است — "
+            f"تا آن بازی تمام نشود نمی‌تواند در این لیست بنشیند.", parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ block playing:", e)
+    return True
+
+
+async def _free_seats_elsewhere(ctx, chat_id, g):
+    """🪑 بازی که شروع شد، اسمِ بازیکنانش از لیستِ گروه‌های دیگر برداشته می‌شود
+    تا جا برای کسی خالی شود که واقعاً می‌تواند بازی کند.
+    فقط لیست‌هایی که هنوز در مرحلهٔ ثبت‌نام‌اند دست می‌خورند."""
+    uids = {u for u, _n in (getattr(g, "seats", None) or {}).values()}
+    if not uids:
+        return
+    for cid, other in list((store.games or {}).items()):
+        if cid == chat_id or getattr(other, "phase", "idle") != "idle":
+            continue
+        freed = [s for s, (u, _n) in list((getattr(other, "seats", None) or {}).items())
+                 if u in uids]
+        if not freed:
+            continue
+        for s in freed:
+            other.seats.pop(s, None)
+        store.save()
+        try:
+            await publish_seating(ctx, cid, other, mode=_ui_mode(other))
+            await ctx.bot.send_message(
+                cid, f"🪑 صندلیِ {_fa_seq(sorted(freed))} خالی شد — این بازیکن‌ها "
+                     f"الان در بازیِ گروهِ دیگری هستند.")
+        except Exception as e:
+            print("⚠️ free seats elsewhere:", e)
+
+
 async def _seat_take_by_number(ctx, chat_id: int, g: GameState, uid: int, seat_no: int) -> bool:
     """🪑 نشستن/جابه‌جایی روی صندلی با نوشتنِ شمارهٔ خالی وسطِ گروه (قبل از شروعِ بازی)."""
     if not (1 <= seat_no <= (g.max_seats or 0)):
@@ -21454,6 +21587,8 @@ async def _seat_take_by_number(ctx, chat_id: int, g: GameState, uid: int, seat_n
         return True
 
     if cur_seat is None:
+        if await _block_if_playing(ctx, chat_id, g, uid):
+            return True
         _sb = seat_ban_info(uid)
         if _sb:
             await ctx.bot.send_message(
@@ -21536,7 +21671,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🗑 «حذف رویداد N» — فقط مدیرِ اصلی (ADMIN_ID): آمار/امتیاز/تاریخچهٔ همان رویدادِ
     #    همین گروه برمی‌گردد (برای بازی‌های الکی که فقط برای امتیاز باز و بسته می‌شوند)
-    if uid == ADMIN_ID:
+    if _is_full_admin(uid):
         _ev_del = _parse_del_event_text(text)
         if _ev_del is not None:
             await _del_event_prompt(ctx, msg, _ev_del)
@@ -21760,6 +21895,10 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     existing_name = n
                     break
 
+            if existing_seat is None and await _block_if_playing(
+                    ctx, chat_id, g, uid, preferred_name):
+                return
+
             _sb = seat_ban_info(uid)
             if _sb and existing_seat is None:
                 await ctx.bot.send_message(
@@ -21927,6 +22066,14 @@ async def newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.args and ctx.args[0].isdigit():
         seats = int(ctx.args[0])
 
+    # 🎥 اگر بازیِ قبلی نیمه‌کاره بود و ضبطش هنوز باز است، همین‌جا بسته شود و
+    #    اکانتِ صوتی از مایک پایین بیاید — بدونِ ارسال به چنل (لیستِ قبلی تپان شده).
+    #    وگرنه گاد مجبور بود جداگانه /resetgame بزند.
+    try:
+        voice_god.record_abort(chat)
+    except Exception as e:
+        print("⚠️ newgame record_abort:", e)
+
     # ساخت گیم جدید
     store.games[chat] = GameState(max_seats=seats)
     g = gs(chat)
@@ -22051,6 +22198,12 @@ async def add_seat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if blocked_info(target_uid):
         await update.message.reply_text("⛔ این بازیکن از بات محروم است و نمی‌تواند در لیست بنشیند.")
+        return
+
+    if _live_game_of(target_uid, skip_chat=update.effective_chat.id) is not None:
+        await update.message.reply_text(
+            "⛔ این بازیکن الان در بازیِ گروهِ دیگری است — تا آن بازی تمام نشود "
+            "نمی‌تواند در این لیست بنشیند.")
         return
 
     _sb = seat_ban_info(target_uid)
@@ -22453,7 +22606,7 @@ def _pm_keyboard(uid=None):
        • one_time_keyboard=True → بعد از هر استفاده خودش جمع می‌شود و کیبوردِ
          تایپِ عادی می‌آید؛ هر وقت خواست با همان چهارخانه دوباره بازش می‌کند."""
     rows = [["📊 آمار من", "👑 آمار کل"], ["🏆 آمار هفتگی", "🎮 بازی من"]]
-    if uid == ADMIN_ID:
+    if _is_full_admin(uid):
         rows.append(["🛠 پنل مدیریت"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True,
                                is_persistent=False,
@@ -22474,7 +22627,7 @@ async def handle_pm_buttons(update, ctx):
             print("⚠️ pm buttons:", e)
 
     if data == "pmb_admin":
-        if uid == ADMIN_ID:
+        if _is_full_admin(uid):
             await open_admin_panel(ctx, uid)
         return
     if data == "pmb_me":
@@ -22591,8 +22744,8 @@ class _AdmCtx:
         self.args = list(args or [])
 
 
-def _adm_panel_kb():
-    return InlineKeyboardMarkup([
+def _adm_panel_kb(uid=None):
+    rows = [
         [InlineKeyboardButton("🏠 اتاق‌های مافیا", callback_data="adm_rooms"),
          InlineKeyboardButton("🌍 گروه‌های فعال", callback_data="adm_groups")],
         [InlineKeyboardButton("🎬 سناریوها", callback_data="adm_scen"),
@@ -22606,8 +22759,43 @@ def _adm_panel_kb():
         [InlineKeyboardButton("📢 ارسالِ آمار هفتگی", callback_data="adm_ask_weekly")],
         [InlineKeyboardButton("📨 ارسالِ دعوت‌نامهٔ منتخب", callback_data="adm_ask_invite")],
         [InlineKeyboardButton("🏁 بستنِ فصل و دادنِ مدال", callback_data="adm_ask_season")],
+        [InlineKeyboardButton("❓ این دکمه‌ها چه‌کار می‌کنند؟", callback_data="adm_guide")],
         [InlineKeyboardButton("📖 دستورهایی که تایپ می‌خواهند", callback_data="adm_help")],
-    ])
+    ]
+    # 👑 مدیریتِ دسترسی‌ها فقط دستِ سازندهٔ بات است — نه مدیرانِ کامل
+    if uid is not None and _as_uid(uid) == ADMIN_ID:
+        rows.append([InlineKeyboardButton("👮 مدیرانِ بات", callback_data="adm_admins")])
+    return InlineKeyboardMarkup(rows)
+
+
+_ADM_GUIDE = (
+    "❓ <b>هر دکمهٔ پنل چه‌کار می‌کند</b>\n\n"
+    "🏠 <b>اتاق‌های مافیا</b> — فهرستِ اتاق‌های ثبت‌شده: چند نفر داخلشان هستند، کدام "
+    "اتاق الان دستِ کدام بازی است، و یک <b>لینکِ سرکشی</b> برای هر اتاق. زیرِ همین "
+    "فهرست دکمهٔ <b>🧹 خالی کردنِ اتاق‌ها</b> هست؛ می‌زنی و بات هرکسی را که می‌شناسد "
+    "از همهٔ اتاق‌ها بیرون می‌کند و لینک‌ها را باطل می‌کند.\n\n"
+    "🌍 <b>گروه‌های فعال</b> — گروه‌هایی که آمارشان ثبت می‌شود (با <code>/active</code> "
+    "فعال و با <code>/deactivate</code> غیرفعال می‌شوند).\n\n"
+    "🎬 <b>سناریوها</b> — فهرستِ سناریوها و نقش‌هایشان.\n\n"
+    "😈 <b>نقش‌های مافیا</b> / 🕵️ <b>نقش‌های مستقل</b> — بات از روی همین‌ها ساید را "
+    "تشخیص می‌دهد. اگر نقشی اینجا نباشد، شهروند حساب می‌شود.\n\n"
+    "🃏 <b>کارت‌ها</b> — کارت‌های متنیِ هر سناریو.\n\n"
+    "📡 <b>چنلِ آرشیو</b> — چنلی که لیست و گزارش و ضبطِ هر بازی آنجا می‌رود.\n\n"
+    "🏆 <b>وضعیتِ فصل</b> — فصلِ فعلی و اینکه کسی به سقف رسیده یا نه. فقط گزارش است، "
+    "چیزی را عوض نمی‌کند.\n\n"
+    "📋 <b>لیستِ منتخب</b> — وضعیتِ دورِ جاریِ لیستِ منتخب.\n\n"
+    "🚫 <b>محرومیت‌ها</b> — چه کسانی محروم‌اند.\n\n"
+    "📢 <b>ارسالِ آمار هفتگی</b> — آمارِ هفته به <b>همهٔ</b> گروه‌های فعال می‌رود و "
+    "پین می‌شود. ⚠️ قبلش تأیید می‌گیرد.\n\n"
+    "📨 <b>ارسالِ دعوت‌نامهٔ منتخب</b> — دعوت‌نامه به پیویِ نفراتِ برتر می‌رود.\n\n"
+    "🏁 <b>بستنِ فصل و دادنِ مدال</b> — ⚠️ <b>برگشت‌ناپذیر:</b> مدال‌ها ثبت، همهٔ "
+    "امتیازها صفر، و در همهٔ گروه‌ها اعلام می‌شود. تا وقتی مطمئن نیستی نزن.\n\n"
+    "📖 <b>دستورهایی که تایپ می‌خواهند</b> — کارهایی که دکمه ندارند چون ورودی "
+    "می‌گیرند (اسمِ سناریو، آیدی و …).\n\n"
+    "🗑 <b>حذفِ رویداد</b> — دکمه ندارد: داخلِ گروه بنویس <code>حذف رویداد ۵</code> "
+    "تا آمار و امتیاز و تاریخچهٔ آن رویداد از همان گروه پاک شود و شمارهٔ رویداد "
+    "یکی برگردد عقب. ⚠️ برگشت‌ناپذیر."
+)
 
 
 _ADM_CONFIRM = {
@@ -22627,7 +22815,9 @@ _ADM_HELP = (
     "• <code>/channel @name</code> یا <code>/channel -100…</code> — ثبتِ چنلِ آرشیو | "
     "<code>/channel off</code> — حذف\n"
     "• <code>/addsticker &lt;نامِ نقش&gt;</code> — روی یک استیکر ریپلای کن\n"
-    "• <code>/leave &lt;آیدیِ گروه&gt;</code> — خروجِ بات از یک گروه\n\n"
+    "• <code>/leave &lt;آیدیِ گروه&gt;</code> — خروجِ بات از یک گروه\n"
+    "• <code>/addadmin &lt;آیدیِ عددی&gt;</code> — دادنِ دسترسیِ کاملِ بات به یک نفر "
+    "(فقط سازندهٔ بات؛ گرفتنِ دسترسی با دکمهٔ «👮 مدیرانِ بات»)\n\n"
     "<b>در گروه:</b>\n"
     "• <code>/active</code> / <code>/deactivate</code> — فعال/غیرفعال کردنِ گروه برای آمار\n"
     "• <code>/addroom</code> / <code>/delroom</code> — ثبت/حذفِ گروه به‌عنوان اتاقِ چتِ مافیا\n"
@@ -22652,16 +22842,123 @@ async def _adm_send(ctx, uid, text):
         print("⚠️ adm send:", e)
 
 
+async def _rooms_purge(ctx, uid):
+    """🧹 خالی کردنِ همهٔ اتاق‌های مافیا: هرکسی را که بات می‌شناسد بیرون می‌کند،
+    لینک‌ها را باطل می‌کند و اتاقِ در دستِ بازی‌های نیمه‌کاره را آزاد می‌کند.
+    ⚠️ تلگرام به بات‌ها فهرستِ اعضا نمی‌دهد؛ اگر کسی دستی (نه با لینکِ بات) وارد
+    شده باشد بات نمی‌شناسدش — تعدادِ باقی‌مانده در گزارش نوشته می‌شود."""
+    rooms = load_mafia_rooms()
+    if not rooms:
+        await _adm_send(ctx, uid, "ℹ️ هیچ اتاقی ثبت نشده.")
+        return
+    # هرکسی که بات تا حالا در هر بازی‌ای برایش لینکِ اتاق فرستاده یا از اتاق بیرونش کرده
+    known = set()
+    for _g in store.games.values():
+        known |= set(getattr(_g, "mafia_room_members", None) or set())
+        known |= set(getattr(_g, "mafia_room_kicked", None) or set())
+    known.discard(_as_uid(uid))          # خودِ زننده‌ی دکمه بیرون انداخته نشود
+    lines = ["🧹 <b>خالی کردنِ اتاق‌ها</b>"]
+    for rid in rooms:
+        try:
+            title = escape((await ctx.bot.get_chat(rid)).title or str(rid), quote=False)
+        except Exception as e:
+            lines.append(f"\n• <code>{rid}</code> → ❌ در دسترس نیست ({type(e).__name__})")
+            continue
+        try:
+            before = max(0, (await ctx.bot.get_chat_member_count(rid)) - 1)
+        except Exception:
+            before = None
+        # 🎮 اگر بازیِ نیمه‌کاره‌ای این اتاق را در دست دارد، جاروی کاملِ همان بازی
+        holder = next((_g for _g in store.games.values()
+                       if getattr(_g, "mafia_room_id", None) == rid), None)
+        if holder is not None:
+            try:
+                await _room_cleanup(ctx, holder)
+            except Exception as e:
+                print("⚠️ purge cleanup:", e)
+        # 👥 بقیهٔ آشناها (از بازی‌های قبلیِ همین اتاق یا اتاق‌های دیگر)
+        for u in known:
+            try:
+                await ctx.bot.ban_chat_member(rid, u)
+                await ctx.bot.unban_chat_member(rid, u, only_if_banned=True)
+            except Exception:
+                pass
+        try:
+            after = max(0, (await ctx.bot.get_chat_member_count(rid)) - 1)
+        except Exception:
+            after = None
+        _b = "؟" if before is None else before
+        _a = "؟" if after is None else after
+        note = ""
+        if isinstance(after, int) and after > 0:
+            note = (f"\n  ⚠️ {after} نفر مانده که بات نمی‌شناسدشان — با لینکِ سرکشیِ "
+                    f"«🏠 اتاق‌های مافیا» برو داخل و دستی بیرونشان کن.")
+        lines.append(f"\n• <b>{title}</b> — 👥 {_b} ← {_a}"
+                     + (" | 🔓 از دستِ بازی آزاد شد" if holder is not None else "")
+                     + note)
+    await _adm_send(ctx, uid, "\n".join(lines))
+
+
+async def _adm_admins_list(ctx, uid):
+    """👮 فهرستِ مدیرانِ کاملِ بات + دکمهٔ گرفتنِ دسترسی (فقط سازندهٔ بات)."""
+    cur = load_full_admins()
+    lines = ["👮 <b>مدیرانِ بات</b>", "",
+             f"👑 <code>{ADMIN_ID}</code> — سازندهٔ بات (همیشه، حذف‌نشدنی)"]
+    rows = []
+    for n in cur:
+        nm = (load_usernames_from_gist() or {}).get(str(n)) or ""
+        lines.append(f"• <code>{n}</code>" + (f" — {escape(nm, quote=False)}" if nm else ""))
+        rows.append([InlineKeyboardButton(f"🚫 گرفتنِ دسترسیِ {nm or n}",
+                                          callback_data=f"adm_adm_del_{n}")])
+    if not cur:
+        lines.append("— فعلاً کسی جز خودت دسترسی ندارد.")
+    lines += ["", "➕ برای دادنِ دسترسی، در پیوی بنویس: <code>/addadmin آیدیِ‌عددی</code>",
+              "این افراد دقیقاً همان دسترسیِ تو را دارند، جز همین دکمهٔ «مدیرانِ بات»."]
+    try:
+        await ctx.bot.send_message(uid, "\n".join(lines), parse_mode="HTML",
+                                   reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+    except Exception as e:
+        print("⚠️ admins list:", e)
+
+
+async def cmd_addadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """➕ /addadmin <آیدی> — دادنِ دسترسیِ کامل. فقط سازندهٔ بات، فقط در پیوی."""
+    msg = update.message
+    if not msg or msg.chat.type != "private" or _as_uid(msg.from_user.id) != ADMIN_ID:
+        return
+    tgt = _as_uid((ctx.args or [None])[0])
+    if not tgt:
+        await msg.reply_text("➕ <code>/addadmin آیدیِ‌عددی</code>", parse_mode="HTML")
+        return
+    if tgt == ADMIN_ID:
+        await msg.reply_text("😄 خودت که همیشه دسترسی داری.")
+        return
+    cur = load_full_admins()
+    if tgt in cur:
+        await msg.reply_text("ℹ️ این آیدی از قبل دسترسیِ کامل دارد.")
+        return
+    save_full_admins(cur + [tgt])
+    await msg.reply_text(f"✅ دسترسیِ کامل به <code>{tgt}</code> داده شد.", parse_mode="HTML")
+    try:
+        await ctx.bot.send_message(
+            tgt, "👑 دسترسیِ مدیریتیِ کاملِ بات به شما داده شد.\n"
+                 "در پیوی، دکمهٔ «🛠 پنل مدیریت» را بزن و اول "
+                 "«❓ این دکمه‌ها چه‌کار می‌کنند؟» را بخوان.")
+    except Exception:
+        pass
+
+
 async def open_admin_panel(ctx, uid):
     await ctx.bot.send_message(
-        uid, "🛠 <b>پنلِ مدیریت</b>\nهر دکمه کارش را زیرش نوشته — کارهای اجرایی تأیید می‌خواهند.",
-        parse_mode="HTML", reply_markup=_adm_panel_kb())
+        uid, "🛠 <b>پنلِ مدیریت</b>\nاگر نمی‌دانی کدام دکمه چه‌کار می‌کند، اول "
+             "«❓ این دکمه‌ها چه‌کار می‌کنند؟» را بزن.\nکارهای اجرایی قبلِ انجام تأیید می‌گیرند.",
+        parse_mode="HTML", reply_markup=_adm_panel_kb(uid))
 
 
 async def handle_admin_panel_callback(update, ctx):
     q = update.callback_query
     uid = q.from_user.id
-    if uid != ADMIN_ID:
+    if not _is_full_admin(uid):
         await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
         return
     await safe_q_answer(q)
@@ -22709,9 +23006,56 @@ async def handle_admin_panel_callback(update, ctx):
         return
 
     # ── گزارش‌های فقط‌خواندنی ──
+    if data == "adm_guide":
+        await _adm_send(ctx, uid, _ADM_GUIDE)
+        return
+
     if data == "adm_rooms":
         await rooms_status_cmd(_AdmUpdate(bot, uid), _AdmCtx(bot))
+        # 🙈 اگر خودش بازیکنِ زندهٔ یک بازیِ در جریان است، نه لیست را دید و نه
+        #    دکمهٔ خالی‌کردن را می‌بیند (وگرنه از روی همان می‌فهمید اتاق‌ها چه خبرند)
+        if _live_game_of(uid) is None:
+            try:
+                await bot.send_message(
+                    uid, "🧹 اگر کسی از بازی‌های قبلی داخلِ اتاق‌ها مانده، با این دکمه "
+                         "بات بیرونشان می‌کند و لینک‌ها را باطل می‌کند:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "🧹 خالی کردنِ اتاق‌ها", callback_data="adm_rooms_purge")]]))
+            except Exception as e:
+                print("⚠️ purge btn:", e)
         return
+
+    # 🧹 خالی کردنِ اتاق‌ها
+    if data == "adm_rooms_purge":
+        if _live_game_of(uid) is not None:
+            await safe_q_answer(q, "🙈 الان خودت بازیکنِ یک بازیِ در جریانی — "
+                                   "بعد از بازی دوباره بزن.", show_alert=True)
+            return
+        await _adm_send(ctx, uid, "🧹 دارم اتاق‌ها را خالی می‌کنم… کمی طول می‌کشد.")
+        await _rooms_purge(ctx, uid)
+        return
+
+    # 👮 مدیرانِ بات — فقط سازندهٔ بات
+    if data.startswith("adm_adm"):
+        if _as_uid(uid) != ADMIN_ID:
+            await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
+            return
+        if data == "adm_admins":
+            await _adm_admins_list(ctx, uid)
+            return
+        if data.startswith("adm_adm_del_"):
+            tgt = _as_uid(data.rsplit("_", 1)[1])
+            cur = load_full_admins()
+            if tgt in cur:
+                save_full_admins([x for x in cur if x != tgt])
+                await _adm_send(ctx, uid, f"✅ دسترسیِ <code>{tgt}</code> گرفته شد.")
+                try:
+                    await bot.send_message(
+                        tgt, "ℹ️ دسترسیِ مدیریتیِ شما روی بات برداشته شد.")
+                except Exception:
+                    pass
+            await _adm_admins_list(ctx, uid)
+            return
 
     if data == "adm_sel":
         await selected_report_cmd(_AdmUpdate(bot, uid), _AdmCtx(bot))
@@ -22847,7 +23191,7 @@ async def handle_stats_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     # 🛠 پنلِ مدیریت (فقط سازندهٔ بات)
     if text.endswith("پنل مدیریت"):
-        if uid == ADMIN_ID:
+        if _is_full_admin(uid):
             await open_admin_panel(ctx, uid)
         return
     # 🔓 با اولین استفاده، کیبوردِ تازه (جمع‌شونده) جای هر کیبوردِ چسبانِ قدیمی
@@ -23269,16 +23613,12 @@ async def addroom_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def rooms_status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🏠 وضعیت اتاق‌های مافیا (فقط سازنده‌ی بات، در پیوی): تعداد اعضا + لینک سرکشی."""
-    if update.effective_user.id != ADMIN_ID:
+    if not _is_full_admin(update.effective_user.id):
         return
     # 🙈 اگر خودم بازیکنِ زنده‌ی یک بازیِ در جریانم، لیست اتاق‌ها نباید لو برود
-    for _cid, _game in store.games.items():
-        if getattr(_game, "phase", "idle") in ("idle", "ended"):
-            continue
-        _seat = _seat_of_uid(_game, update.effective_user.id)
-        if _seat is not None and _seat not in (_game.striked or set()):
-            await update.message.reply_text("🙈 الان خودت بازیکنِ یک بازیِ در جریانی — بعد از بازی دوباره بزن.")
-            return
+    if _live_game_of(update.effective_user.id) is not None:
+        await update.message.reply_text("🙈 الان خودت بازیکنِ یک بازیِ در جریانی — بعد از بازی دوباره بزن.")
+        return
     rooms = load_mafia_rooms()
     if not rooms:
         await update.message.reply_text("ℹ️ هیچ اتاقی ثبت نشده.")
@@ -24166,7 +24506,7 @@ async def sendtoall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/channel — تنظیمِ چنلِ آرشیوِ بازی‌ها (فقط مدیر اصلی، در پی‌وی).
     /channel @name یا -100…  → ثبت | /channel off → حذف | /channel → نمایش"""
-    if update.effective_user.id != ADMIN_ID:
+    if not _is_full_admin(update.effective_user.id):
         return
     if update.effective_chat.type != "private":
         await update.message.reply_text("⚠️ این دستور را فقط در پی‌وی بات بزن.")
@@ -24225,7 +24565,7 @@ async def channel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def season_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/season → گزارشِ صدرِ جدول و چکِ دستیِ پایانِ فصل (فقط مدیر اصلی، در پی‌وی).
     اگر کسی به سقف رسیده باشد: مدال + ریست + اعلان در همهٔ گروه‌ها."""
-    if update.effective_user.id != ADMIN_ID:
+    if not _is_full_admin(update.effective_user.id):
         return
     if update.effective_chat.type != "private":
         await update.message.reply_text("⚠️ این دستور را فقط در پی‌وی بات بزن.")
@@ -24271,7 +24611,7 @@ async def season_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """شروع دستی دور لیست منتخب (برای تست) — فقط مدیر اصلی."""
-    if update.effective_user.id != ADMIN_ID:
+    if not _is_full_admin(update.effective_user.id):
         return
     result = await launch_selected_round(ctx.bot)
     sent_names = result.get("sent", [])
@@ -24295,7 +24635,7 @@ async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def selected_report_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """گزارش وضعیت لیست منتخب — فقط مدیر اصلی."""
-    if update.effective_user.id != ADMIN_ID:
+    if not _is_full_admin(update.effective_user.id):
         return
     sl = load_selected_list()
     if not sl.get("candidates"):
@@ -24892,7 +25232,7 @@ async def _voice_install_and_record(ctx, uid: int, key: str, fid: str):
 async def handle_voice_upload_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🎙 سازنده در پیوی یک وویس/فایلِ صوتی می‌فرستد → می‌پرسیم برای کدام جمله."""
     msg = update.message
-    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
+    if not msg or not msg.from_user or not _is_full_admin(msg.from_user.id):
         return
     media = msg.voice or msg.audio
     if not media:
@@ -24905,7 +25245,7 @@ async def handle_voice_set_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     q = update.callback_query
     uid = q.from_user.id
     data = q.data or ""
-    if uid != ADMIN_ID:
+    if not _is_full_admin(uid):
         await safe_q_answer(q)
         return
     mid = q.message.message_id if q.message else None
@@ -24952,7 +25292,7 @@ async def handle_voice_set_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
 async def handle_voice_seat_number_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🗳 شمارهٔ صندلی بعد از «رأی‌گیری برای صندلیِ …» — فقط وقتی وویسی معلق باشد."""
     msg = update.message
-    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
+    if not msg or not msg.from_user or not _is_full_admin(msg.from_user.id):
         return
     uid = msg.from_user.id
     if uid not in _VOICE_PENDING_VOTE:
@@ -24972,7 +25312,7 @@ async def handle_voice_seat_number_pm(update: Update, ctx: ContextTypes.DEFAULT_
 async def handle_voice_text_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """«صداها» → فهرست | «حذف صدا <جمله>» → برگشت به صدای پیش‌فرض"""
     msg = update.message
-    if not msg or not msg.from_user or msg.from_user.id != ADMIN_ID:
+    if not msg or not msg.from_user or not _is_full_admin(msg.from_user.id):
         return
     text = (msg.text or "").strip()
     if _nz(text) == _nz("صداها"):
@@ -25023,15 +25363,15 @@ async def main():
     app.add_handler(TypeHandler(Update, blocked_gate), group=-1)
     # 🎙 صدای سفارشیِ گادِ صوتی — فقط پیویِ سازنده؛ قبل از هندلرهای عمومیِ پیوی
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO) & filters.User(ADMIN_ID),
+        filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO) & _FullAdminFilter(),
         handle_voice_upload_pm))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & filters.User(ADMIN_ID)
+        filters.ChatType.PRIVATE & filters.TEXT & _FullAdminFilter()
         & filters.Regex(r"^\s*(صداها|حذف\s*صدا\b.*)\s*$"),
         handle_voice_text_pm))
     # 🗳 شمارهٔ صندلی بعد از «رأی‌گیری برای صندلیِ …» — گروهِ جدا تا با بقیهٔ پیوی تداخل نکند
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & filters.User(ADMIN_ID)
+        filters.ChatType.PRIVATE & filters.TEXT & _FullAdminFilter()
         & filters.Regex(r"^\s*[0-9۰-۹٠-٩]{1,2}\s*$"),
         handle_voice_seat_number_pm), group=2)
     app.add_handler(CommandHandler("start", start_welcome, filters=filters.ChatType.PRIVATE))
@@ -25053,7 +25393,7 @@ async def main():
     app.add_handler(CommandHandler("addroom", addroom_cmd, filters=group_filter))
     app.add_handler(CommandHandler("delroom", delroom_cmd, filters=group_filter))
     app.add_handler(CommandHandler("rooms", rooms_status_cmd,
-                                   filters=filters.ChatType.PRIVATE & filters.User(ADMIN_ID)))
+                                   filters=filters.ChatType.PRIVATE & _FullAdminFilter()))
     app.add_handler(CommandHandler("active", activate_group))
     app.add_handler(CommandHandler("deactivate", deactivate_group))
     app.add_handler(CommandHandler("weekly", weekly_now_cmd))
@@ -25064,7 +25404,7 @@ async def main():
     app.add_handler(CommandHandler("selected", selected_report_cmd, filters=filters.ChatType.PRIVATE))
     # 👉 اضافه کردن هندلرها
     app.add_handler(CommandHandler("newgame", newgame, filters=group_filter))
-    app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & filters.User(99347107)))
+    app.add_handler(CommandHandler("leave", leave_group, filters=filters.ChatType.PRIVATE & _FullAdminFilter()))
 
     # 🪑 انتخاب صندلی با دستور مثل /3
     app.add_handler(
@@ -25075,11 +25415,14 @@ async def main():
     )
     app.add_handler(CommandHandler("resetgame", resetgame_cmd, filters=group_filter))
     # 🔒 مدیریتِ سناریو/نقش/کارت — فقط ادمینِ اصلیِ بات
-    _owner = filters.User(ADMIN_ID)
+    _owner = _FullAdminFilter()
     app.add_handler(CommandHandler("addscenario", addscenario, filters=_owner))
     app.add_handler(CommandHandler("listscenarios", list_scenarios, filters=_owner))
     app.add_handler(CommandHandler("removescenario", remove_scenario, filters=_owner))
     app.add_handler(CommandHandler("moveuser", cmd_moveuser, filters=_owner))
+    # 👮 دادنِ دسترسیِ کامل — داخلِ خودِ تابع فقط ADMIN_ID اجازه دارد
+    app.add_handler(CommandHandler("addadmin", cmd_addadmin,
+                                   filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("addmafia", cmd_addmafia, filters=_owner))
     app.add_handler(CommandHandler("listmafia", cmd_listmafia, filters=_owner))
     app.add_handler(CommandHandler("list", cmd_lists, filters=group_filter))
@@ -25122,7 +25465,7 @@ async def main():
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
-            & filters.User(99347107)
+            & _FullAdminFilter()
             & filters.TEXT
             & filters.Regex(r"^/stats$"),
             handle_stats_request
