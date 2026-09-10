@@ -12455,6 +12455,16 @@ async def _nem_trigger_mine(ctx, chat_id, g):
     if not picker or not mafia_alive:
         await _night_report(ctx, g, "⚠️ مافیایی برای فدا کردن نیست.")
         return
+    # 🩸 فقط یک مافیا مانده → انتخابی در کار نیست: خودش فدا می‌شود (کنارِ شهروندِ شات‌شده)
+    if len(mafia_alive) == 1:
+        s = mafia_alive[0]
+        g.night_mine_sacrifice = s
+        g.night_awaiting_sacrifice = False
+        store.save()
+        await _night_report(
+            ctx, g, f"💥 فقط یک مافیا مانده بود → خودکار فدا شد: "
+                    f"<b>{s}. {escape(g.seats[s][1], quote=False)}</b>")
+        return
     g.night_awaiting_sacrifice = True
     store.save()
     puid = g.seats[picker][0]
