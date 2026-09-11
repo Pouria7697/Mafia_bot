@@ -2874,6 +2874,17 @@ def get_archive_channel():
     return v or (os.getenv("ARCHIVE_CHANNEL") or None)
 
 
+def selected_list_paused() -> bool:
+    """⏸ آیا دعوت‌نامه‌های لیستِ منتخب متوقف است؟ (آمارِ هفتگی همچنان می‌رود)"""
+    return bool((load_bot_settings() or {}).get("selected_paused", False))
+
+
+def set_selected_list_paused(paused: bool):
+    data = dict(load_bot_settings() or {})
+    data["selected_paused"] = bool(paused)
+    save_bot_settings(data)
+
+
 # ═══════════ 👑 مدیرانِ کاملِ بات ═══════════
 # دقیقاً همان دسترسیِ سازندهٔ بات. فهرست در Gist می‌نشیند تا از پنل بشود
 # دسترسی داد/گرفت بدونِ دیپلوی. ADMIN_ID همیشه هست و هرگز حذف نمی‌شود.
@@ -3024,6 +3035,10 @@ def kb_selected_days(selected_days) -> InlineKeyboardMarkup:
 
 async def launch_selected_round(bot, candidates=None) -> int:
     """دور جدید لیست منتخب: کاندیداها را ثبت و به همه پیام دعوت می‌فرستد."""
+    # ⏸ لیستِ منتخب متوقف است → هیچ دعوت‌نامه یا سؤالی برای کسی نمی‌رود
+    if selected_list_paused():
+        print("⏸ selected list paused — no invites sent")
+        return {"sent": [], "failed": [], "paused": True}
     if candidates is None:
         current = load_player_stats() or {}
         meta = load_weekly_meta()
@@ -6199,6 +6214,85 @@ _REDO_WAIT: dict[int, dict] = {}                             # uid → {"evt", "
 _ACT_OUTBOX: dict[int, list] = {}    # uid → پیام‌هایی که تا پایانِ مهلت صبر می‌کنند
 _ACT_SNAP: dict[int, tuple] = {}     # uid → (بازی، night_done، مقادیرِ سادهٔ قبل از اکت)
 
+# 🔐 قفلِ اکتِ هر بازی — از «عکسِ قبل از اکت» تا بازشدنِ پنجرهٔ ۷ ثانیه، اکتِ بازیکنِ
+#    دیگری وسطش نمی‌پرد. وگرنه «اکت مجدد»ِ یک نفر تغییرِ نفرِ دیگر را هم (مثلاً تیرِ
+#    تک‌تیر) سهمِ خودش حساب می‌کرد و پاکش می‌کرد. در طولِ خودِ ۷ ثانیه قفل آزاد است.
+ACT_LOCK_TIMEOUT = 15
+_GAME_ACT_LOCKS: dict[int, "asyncio.Lock"] = {}
+_ACT_LOCK = contextvars.ContextVar("act_lock", default=None)   # (قفل، تسکِ صاحبش)
+
+
+def _game_act_lock(g):
+    lk = _GAME_ACT_LOCKS.get(id(g))
+    if lk is None:
+        lk = _GAME_ACT_LOCKS[id(g)] = asyncio.Lock()
+    return lk
+
+
+async def _act_lock_acquire(g):
+    lk = _game_act_lock(g)
+    tok = _ACT_LOCK.get()
+    if tok and tok[0] is lk and tok[1] is asyncio.current_task():
+        return
+    try:
+        await asyncio.wait_for(lk.acquire(), timeout=ACT_LOCK_TIMEOUT)
+    except asyncio.TimeoutError:
+        print("⚠️ act lock: timeout — continuing without it")
+        _ACT_LOCK.set(None)
+        return
+    _ACT_LOCK.set((lk, asyncio.current_task()))
+
+
+def _act_lock_release():
+    """آزادکردنِ قفل، فقط اگر همین تسک صاحبش باشد. توکن برمی‌گردد تا بشود دوباره گرفت."""
+    tok = _ACT_LOCK.get()
+    _ACT_LOCK.set(None)
+    if tok and tok[1] is asyncio.current_task() and tok[0].locked():
+        tok[0].release()
+        return tok
+    return None
+
+
+async def _act_lock_reacquire(tok):
+    if not tok:
+        return
+    try:
+        await asyncio.wait_for(tok[0].acquire(), timeout=ACT_LOCK_TIMEOUT)
+        _ACT_LOCK.set((tok[0], asyncio.current_task()))
+    except asyncio.TimeoutError:
+        print("⚠️ act lock: re-acquire timeout")
+        _ACT_LOCK.set(None)
+
+
+async def _act_sleep(sec):
+    """⏳ مکث وسطِ اکت بدونِ معطل‌کردنِ اکتِ بقیه (قفل در طولِ مکث آزاد است)."""
+    tok = _act_lock_release()
+    try:
+        await asyncio.sleep(sec)
+    finally:
+        await _act_lock_reacquire(tok)
+
+
+async def _act_quiesce(g):
+    """صبر تا اکتی که همین حالا وسطِ ثبت است سهمش را تمام کند."""
+    lk = _game_act_lock(g)
+    tok = _ACT_LOCK.get()
+    if tok and tok[0] is lk and tok[1] is asyncio.current_task():
+        return
+    try:
+        await asyncio.wait_for(lk.acquire(), timeout=ACT_LOCK_TIMEOUT)
+    except asyncio.TimeoutError:
+        return
+    lk.release()
+
+
+def _redo_open_for_game(g) -> bool:
+    """آیا یکی از بازیکنانِ همین بازی الان در ۷ ثانیهٔ «اکت مجدد» است؟"""
+    try:
+        return any(_seat_of_uid(g, u) is not None for u in list(_REDO_WAIT))
+    except Exception:
+        return False
+
 # 🚫 فیلدهایی که هرگز برنمی‌گردند — چون بازیکن‌های دیگر هم هم‌زمان دستشان می‌زنند
 _SNAP_SKIP = {"night_pm_msgs", "night_prompt_cache", "night_sel", "night_doc_sel",
               "seats", "user_names", "last_snapshot", "score_events"}
@@ -6274,47 +6368,61 @@ async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
         snap_done = set(getattr(g, "night_done", set()) or set())
         snap_vals = _act_snapshot(g)
     own_added, own_vals = _act_diff(g, snap_done, snap_vals)   # 🔍 سهمِ همین اکت
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 اکت مجدد", callback_data=f"redo_{token}")]])
+    _lock_tok = _act_lock_release()   # 🔓 در طولِ ۷ ثانیه بقیه معطل نمانند
     try:
-        await ctx.bot.edit_message_text(
-            chat_id=_pm_target(uid), message_id=msg_id,
-            text=f"✅ اکتت ثبت شد.\n⏳ اگر اشتباه زدی، تا {REDO_WINDOW_SEC} ثانیه «اکت مجدد» را بزن.",
-            reply_markup=kb)
-    except Exception:
-        _REDO_WAIT.pop(uid, None)
-        return False
-    pressed = False
-    try:
-        await asyncio.wait_for(evt.wait(), timeout=REDO_WINDOW_SEC)
-        pressed = True
-    except asyncio.TimeoutError:
-        pass
-    except Exception:
-        pass
-    finally:
-        if (_REDO_WAIT.get(uid) or {}).get("token") == token:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 اکت مجدد", callback_data=f"redo_{token}")]])
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=_pm_target(uid), message_id=msg_id,
+                text=f"✅ اکتت ثبت شد.\n⏳ اگر اشتباه زدی، تا {REDO_WINDOW_SEC} ثانیه «اکت مجدد» را بزن.",
+                reply_markup=kb)
+        except Exception:
             _REDO_WAIT.pop(uid, None)
-    if not pressed:
-        return False
-    # ⏪ برگرداندنِ وضعیت و نمایشِ دوبارهٔ همان پرامپت
-    _act_restore(g, own_added, own_vals)
-    await _edit_pm(ctx, uid, msg_id, prompt[0], _kb_load(prompt[1]))
-    return True
+            return False
+        pressed = False
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=REDO_WINDOW_SEC)
+            pressed = True
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
+        finally:
+            if (_REDO_WAIT.get(uid) or {}).get("token") == token:
+                _REDO_WAIT.pop(uid, None)
+        if not pressed:
+            return False
+        # ⏪ برگرداندنِ وضعیت و نمایشِ دوبارهٔ همان پرامپت
+        await _act_lock_reacquire(_lock_tok)   # ⏪ برگرداندن هم زیرِ قفل
+        _lock_tok = None
+        _act_restore(g, own_added, own_vals)
+        await _edit_pm(ctx, uid, msg_id, prompt[0], _kb_load(prompt[1]))
+        return True
+    finally:
+        await _act_lock_reacquire(_lock_tok)   # بقیهٔ اکت (گزارش/اثر) هم زیرِ قفل
 
 
 async def handle_redo_callback(update, ctx):
     """🔄 دکمهٔ «اکت مجدد» — فقط پنجرهٔ باز را بیدار می‌کند (تطبیق با توکن،
     تا در «اکتِ دستیِ گاد» هم که پیام در پیویِ گاد است درست کار کند)."""
     q = update.callback_query
-    await safe_q_answer(q)
     tok = (q.data or "")[len("redo_"):]
     for _u, st in list(_REDO_WAIT.items()):
         if st.get("token") == tok:
+            # ⏰ روز شده → اکت دیگر برنمی‌گردد (وگرنه مثلاً تیرِ تک‌تیر به او برمی‌گشت)
+            _gx = _pm_game(_u)
+            if _gx is not None and not (getattr(_gx, "night_active", False)
+                                        or getattr(_gx, "maarefe_active", False)):
+                await safe_q_answer(q, "⏰ شب تمام شده — دیگر نمی‌شود اکت را عوض کرد.",
+                                    show_alert=True)
+                return
+            await safe_q_answer(q)
             try:
                 st["evt"].set()
             except Exception:
                 pass
-            break
+            return
+    await safe_q_answer(q)
 
 
 async def _close_pm(ctx, uid, msg_id, text):
@@ -6483,7 +6591,7 @@ def _night_all_done(g) -> bool:
         need = set()
         if alive(_R_DETECTIVE):
             need.add("detective")
-        if not g.night_is_negotiation and alive(_R_DOCTOR):
+        if alive(_R_DOCTOR):   # 💉 شبِ مذاکره هم — ممکن است هدفِ تک‌تیر را سیو دهد
             need.add("doctor")
         if not g.sniper_used and _find_sniper(g) is not None:
             need.add("sniper")
@@ -6954,19 +7062,18 @@ async def _night_open_citizens(ctx, chat_id, g):
         if m:
             g.night_pm_msgs[duid] = m.message_id
 
-    # 💉 پزشک — در شب مذاکره نیازی به سیو نیست
-    if not g.night_is_negotiation:
-        doc = _find_seat_by_role(g, _R_DOCTOR)
-        if doc:
-            duid, _dn = g.seats[doc]
-            need = 2 if g.night_alive_at_start >= 8 else 1
-            g.night_doc_need = need
-            targets = _doctor_targets(g, doc)
-            m = await _safe_pm(ctx, duid, f"💉 چه کسی را سیو می‌دهی؟ (تا {need} نفر)",
-                               _kb_night_seats(targets, g, "night_doc_", selected=set(),
-                                               confirm_cb="night_doc_confirm"))
-            if m:
-                g.night_pm_msgs[duid] = m.message_id
+    # 💉 پزشک — هر شب، حتی شبِ مذاکره (ممکن است هدفِ تک‌تیر را سیو دهد)
+    doc = _find_seat_by_role(g, _R_DOCTOR)
+    if doc:
+        duid, _dn = g.seats[doc]
+        need = 2 if g.night_alive_at_start >= 8 else 1
+        g.night_doc_need = need
+        targets = _doctor_targets(g, doc)
+        m = await _safe_pm(ctx, duid, f"💉 چه کسی را سیو می‌دهی؟ (تا {need} نفر)",
+                           _kb_night_seats(targets, g, "night_doc_", selected=set(),
+                                           confirm_cb="night_doc_confirm"))
+        if m:
+            g.night_pm_msgs[duid] = m.message_id
 
     # 🎯 تک‌تیرانداز — فقط اگر تیرش را استفاده نکرده
     if not g.sniper_used:
@@ -7973,6 +8080,21 @@ async def _resolve_nemayande(ctx, chat_id, g):
 
 async def _do_day(ctx, chat_id, g):
     """☀️ روز — هم برای دستورِ متنی /روز هم دکمه‌ی پنل."""
+    # ⏳ اکتی هنوز وسطِ ثبت یا در ۷ ثانیهٔ «اکت مجدد» است → روز نشود. وگرنه شب بدونِ آن
+    #    اکت حساب می‌شد و بعدش پیام‌ها و دکمه‌های شب وسطِ روز می‌رفت. فقط گاد باخبر می‌شود.
+    if g.night_active or getattr(g, "maarefe_active", False):
+        await _act_quiesce(g)
+        if _redo_open_for_game(g):
+            _msg = ("⏳ یک اکت هنوز در ۷ ثانیهٔ «اکت مجدد» است — "
+                    "چند ثانیه صبر کن و دوباره «روز» را بزن.")
+            _lq = _LAST_CB.get("q")
+            _fresh = (datetime.now(timezone.utc).timestamp() - float(_LAST_CB.get("ts") or 0)) < 10
+            if (_lq is not None and getattr(_lq, "data", None) == "ctl_day"
+                    and _LAST_CB.get("uid") == g.god_id and _fresh):
+                await safe_q_answer(_lq, _msg, show_alert=True)
+            else:
+                await _night_report(ctx, g, _msg)
+            return
     _started_day = bool(g.night_active or getattr(g, "maarefe_active", False))
     if g.night_active:
         await end_night(ctx, chat_id, g)
@@ -10017,6 +10139,13 @@ async def handle_night_callback(update, ctx):
             g.negotiation_used = False
             g.night_stage = None
         store.save()
+        # 🦷 دنتیست: منوی مافیا مالِ موتورِ تکاور است (tk_decider_seat) — همان دوباره باز شود،
+        #    نه منوی «مذاکره یا شات»ِ سناریوی مذاکره (که شب را در مسیرِ اشتباه قفل می‌کرد)
+        if _is_dentist_scenario(g):
+            _ACT_UID.set(None)          # «بازگشت» اکت نیست → پنجرهٔ «اکت مجدد» نمی‌خواهد
+            await _close_pm(ctx, uid, mid, "↩️ برگشت به منوی مافیا.")
+            await _tk_open_mafia(ctx, chat_id, g)
+            return
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🤝 مذاکره", callback_data="night_dec_negotiate")],
             [InlineKeyboardButton("🔫 شات",    callback_data="night_dec_shoot")],
@@ -10110,6 +10239,9 @@ async def handle_night_callback(update, ctx):
         tu, tname = g.seats[s]
         rn = _seat_role_norm(g, s)
         converted = (rn in _R_CITIZEN) or (rn == _R_ARMORED)
+        # ⏪ اول مهلتِ «اکت مجدد»؛ جذب، پیامِ هدف، لینکِ اتاق و گزارش فقط وقتی اکت قطعی شد.
+        #    (فهرستِ جذب‌شده‌ها در عکسِ قبل از اکت نیست، پس «اکت مجدد» پسش نمی‌گرفت.)
+        await _close_pm(ctx, uid, mid, "✅ مذاکره ثبت شد.")
         if converted:
             g.negotiated_seats.add(s)
             try:
@@ -10122,7 +10254,6 @@ async def handle_night_callback(update, ctx):
             await _night_report(ctx, g, f"🤝 مذاکره با <b>{s}. {escape(tname, quote=False)}</b> → تبدیل به مافیا ساده ✅")
         else:
             await _night_report(ctx, g, f"🤝 مذاکره با <b>{s}. {escape(tname, quote=False)}</b> → نقش قابل جذب نبود ❌")
-        await _close_pm(ctx, uid, mid, "✅ مذاکره ثبت شد.")
         g.night_done.add("mafia")
         store.save()
         await _broadcast_negotiation_night(ctx, g)
@@ -16564,7 +16695,7 @@ async def handle_gamer_callback(update, ctx):
             val = dm.dice.value
         except Exception:
             val = random.randint(1, 6)
-        await asyncio.sleep(4)
+        await _act_sleep(4)   # ⏳ قفلِ اکت در طولِ مکثِ تاس آزاد است
         nums = list(g.gm_james_nums or [])
         don = _find_seat_by_role(g, _R_DONC)
         hit = (val in nums)
@@ -18974,11 +19105,13 @@ async def _run_night_act(update, ctx):
     _dt = (_q.data or "") if _q else ""
     _owner = _q_uid(_q) if _q else None
     _ACT_UID.set(_owner)
+    _ACT_LOCK.set(None)
     # 📸 وضعیت را قبل از دست‌خوردن نگه دار — «اکت مجدد» به همین برمی‌گردد
     if _owner is not None:
         try:
             _g0, _ = _find_active_night_game(_owner, _q)
             if _g0 is not None:
+                await _act_lock_acquire(_g0)   # 🔐 تا ثبتِ سهمِ همین اکت
                 _ACT_SNAP[_owner] = (_g0, set(getattr(_g0, "night_done", set()) or set()),
                                      _act_snapshot(_g0))
         except Exception:
@@ -19022,6 +19155,7 @@ async def _run_night_act(update, ctx):
                     await _act_flush(_owner)
                 except Exception:
                     pass
+        _act_lock_release()   # 🔓
     # پس از هر اکت: اگر همه‌ی اکت‌ها تمام شد، به گاد اطلاع بده
     try:
         _gg, _ = _find_active_night_game(_q_uid(_q), _q)
@@ -22768,6 +22902,9 @@ def _adm_panel_kb(uid=None):
          InlineKeyboardButton("🚫 محرومیت‌ها", callback_data="adm_bans")],
         [InlineKeyboardButton("📢 ارسالِ آمار هفتگی", callback_data="adm_ask_weekly")],
         [InlineKeyboardButton("📨 ارسالِ دعوت‌نامهٔ منتخب", callback_data="adm_ask_invite")],
+        *([[InlineKeyboardButton("▶️ ادامهٔ لیستِ منتخب" if selected_list_paused()
+                                 else "⏸ توقفِ لیستِ منتخب", callback_data="adm_pause_sel")]]
+          if uid is not None and _as_uid(uid) == ADMIN_ID else []),
         [InlineKeyboardButton("🏁 بستنِ فصل و دادنِ مدال", callback_data="adm_ask_season")],
         [InlineKeyboardButton("❓ این دکمه‌ها چه‌کار می‌کنند؟", callback_data="adm_guide")],
         [InlineKeyboardButton("📖 دستورهایی که تایپ می‌خواهند", callback_data="adm_help")],
@@ -22798,6 +22935,9 @@ _ADM_GUIDE = (
     "📢 <b>ارسالِ آمار هفتگی</b> — آمارِ هفته به <b>همهٔ</b> گروه‌های فعال می‌رود و "
     "پین می‌شود. ⚠️ قبلش تأیید می‌گیرد.\n\n"
     "📨 <b>ارسالِ دعوت‌نامهٔ منتخب</b> — دعوت‌نامه به پیویِ نفراتِ برتر می‌رود.\n\n"
+    "⏸ <b>توقفِ لیستِ منتخب</b> — تا دوباره روشنش نکنی، هیچ دعوت‌نامه‌ای برای لیستِ منتخب "
+    "نمی‌رود (نه خودکار بعد از آمارِ هفتگی، نه با دکمه). خودِ آمارِ هفتگی مثلِ قبل فرستاده "
+    "می‌شود. همان دکمه بعد از زدن «▶️ ادامهٔ لیستِ منتخب» می‌شود.\n\n"
     "🏁 <b>بستنِ فصل و دادنِ مدال</b> — ⚠️ <b>برگشت‌ناپذیر:</b> مدال‌ها ثبت، همهٔ "
     "امتیازها صفر، و در همهٔ گروه‌ها اعلام می‌شود. تا وقتی مطمئن نیستی نزن.\n\n"
     "📖 <b>دستورهایی که تایپ می‌خواهند</b> — کارهایی که دکمه ندارند چون ورودی "
@@ -23002,8 +23142,34 @@ async def handle_admin_panel_callback(update, ctx):
                                      if not n and res.get("reason") else ""))
         return
 
+    # ⏸ توقف/ادامهٔ لیستِ منتخب
+    if data == "adm_pause_sel":
+        if _as_uid(uid) != ADMIN_ID:
+            await safe_q_answer(q, "⛔ فقط سازندهٔ بات.", show_alert=True)
+            return
+        now_paused = not selected_list_paused()
+        set_selected_list_paused(now_paused)
+        try:
+            await bot.edit_message_reply_markup(chat_id=uid, message_id=q.message.message_id,
+                                                reply_markup=_adm_panel_kb(uid))
+        except Exception:
+            pass
+        await _adm_send(
+            ctx, uid,
+            "⏸ <b>لیستِ منتخب متوقف شد.</b>\n"
+            "آمارِ هفتگی مثلِ قبل فرستاده می‌شود، ولی دیگر به هیچ‌کس دعوت‌نامه یا "
+            "سؤالِ «شرکت می‌کنی؟» نمی‌رود — نه خودکار، نه با دکمه."
+            if now_paused else
+            "▶️ <b>لیستِ منتخب دوباره روشن شد.</b>\n"
+            "از آمارِ هفتگیِ بعدی، دعوت‌نامه برای ۱۰ نفرِ برتر می‌رود.")
+        return
+
     if data == "adm_do_invite":
         res = await launch_selected_round(bot) or {}
+        if isinstance(res, dict) and res.get("paused"):
+            await _adm_send(ctx, uid, "⏸ لیستِ منتخب متوقف است — دعوت‌نامه‌ای فرستاده نشد.\n"
+                                      "برای روشن‌کردن، «▶️ ادامهٔ لیستِ منتخب» را بزن.")
+            return
         sent = res.get("sent", []) if isinstance(res, dict) else []
         failed = res.get("failed", []) if isinstance(res, dict) else []
         await _adm_send(ctx, uid,
@@ -23518,6 +23684,10 @@ async def _room_sync_on_night(ctx, g):
     if removed_any:
         await _room_rotate_link(ctx, g)
     for uid in list(g.mafia_room_pending_link or []):
+        # 🚪 همان شبِ جذب خارج شد (مثلاً با تیرِ تک‌تیر) → لینکِ اتاق نمی‌گیرد
+        _ps = _seat_of_uid(g, uid)
+        if _ps is None or _ps in (g.striked or set()):
+            continue
         await _room_send_link(ctx, g, uid)
     g.mafia_room_pending_link = []
     store.save()
@@ -24624,6 +24794,9 @@ async def start_selected_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_full_admin(update.effective_user.id):
         return
     result = await launch_selected_round(ctx.bot)
+    if isinstance(result, dict) and result.get("paused"):
+        await update.message.reply_text("⏸ لیستِ منتخب متوقف است — دعوت‌نامه‌ای فرستاده نشد.")
+        return
     sent_names = result.get("sent", [])
     failed = result.get("failed", [])
 
