@@ -980,6 +980,19 @@ def _medal_badges(d) -> str:
     return "".join(parts)
 
 
+def _medal_badges_full(d) -> str:
+    """نشانِ مدال‌ها بدونِ «×» — هر مدال جداگانه (🥇🥉🥉)؛ برای کنارِ اسم در لیستِ بازی."""
+    m = d.get("medals") or {}
+    out = []
+    for k, e in (("gold", "🥇"), ("silver", "🥈"), ("bronze", "🥉")):
+        try:
+            c = int(m.get(k, 0) or 0)
+        except Exception:
+            c = 0
+        out.append(e * max(0, c))
+    return "".join(out)
+
+
 # 🎖 کشِ مدال‌ها — برای نمایشِ نشان کنارِ اسم در لیست‌ها (بدون خواندنِ گیست در هر رفرش)
 _MEDAL_CACHE: dict = {"ts": 0.0, "map": {}}
 _MEDAL_TTL = 1800.0   # نیم ساعت — مدال فقط در پایانِ فصل عوض می‌شود
@@ -992,7 +1005,7 @@ def refresh_medal_cache(stats: dict | None = None):
             stats = load_player_stats() or {}
         _MEDAL_CACHE["map"] = {
             str(u): b for u, d in (stats or {}).items()
-            if isinstance(d, dict) and (b := _medal_badges(d))
+            if isinstance(d, dict) and (b := _medal_badges_full(d))
         }
         _MEDAL_CACHE["ts"] = datetime.now(timezone.utc).timestamp()
     except Exception as e:
@@ -5102,7 +5115,7 @@ async def _finalize_final_vote(ctx, chat_id, g):
             pass
         await _check_auto_end(ctx, chat_id, g)   # 🏁
         _bzp_hunter_day_exit(ctx, chat_id, g, exiter)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
-        _hb_day_exit(ctx, chat_id, g, exiter)           # 🧬 بافتِ هانیبال → ۹۰ ثانیه بعد
+        _hb_day_exit(ctx, chat_id, g, exiter)           # 🧬 بافتِ هانیبال → ۳۰ ثانیه بعد
 
     # 🏅 امتیازِ رأی نهایی (خروجِ واقعی = وقتی خط خورده باشد)
     _score_votes_final(g, targets, exiter, not protected)
@@ -8026,16 +8039,6 @@ async def _resolve_baazpors(ctx, chat_id, g):
 
     await _apply_deaths(ctx, chat_id, g, dead, reasons, zereh)
 
-    # 🧑‍⚖️ اعلامِ خودکارِ بازپرسیِ امروز — بعد از اعلامِ کشته‌های شب، که گاد
-    #    لازم نباشد خودش بگوید بین چه کسانی است
-    bt_day = sorted(t for t in bt if t in g.seats and t not in (g.striked or set()))
-    if (getattr(g, "baazpors_used", False) and len(bt_day) == 2
-            and g.phase not in ("idle", "ended")):
-        await ctx.bot.send_message(
-            chat_id,
-            f"🧑‍⚖️ بازپرسیِ امروز بین صندلیِ <b>{bt_day[0]}</b> و <b>{bt_day[1]}</b> است.",
-            parse_mode="HTML")
-
 
 async def _resolve_nemayande(ctx, chat_id, g):
     dead, reasons, zereh = set(), {}, []
@@ -8311,6 +8314,30 @@ def _baz_duel_parse(text, pair) -> int | None:
     return v if v in (pair or ()) else None
 
 
+async def _baz_announce(ctx, chat_id, g):
+    """🧑‍⚖️ دکمهٔ «بازپرسی» (بعد از روز): اعلامِ اینکه بازپرسی بین چه کسانی است، با دکمهٔ
+    «پرسش از بازپرس» که گاد با آن ادامه/ملغی را از بازپرس می‌پرسد."""
+    # ⚠️ حالت‌های نامعتبر فقط به گاد گفته می‌شود — وضعیتِ بازپرس لو نرود
+    if not (_is_baazpors_scenario(g) and getattr(g, "baazpors_used", False)):
+        await _night_report(ctx, g, "🧑‍⚖️ بازپرسیِ فعالی وجود ندارد (بازپرس اکتی نداده) — فقط تو می‌دانی.")
+        return
+    bt = sorted(t for t in (getattr(g, "night_baz_targets", []) or [])
+                if t in g.seats and t not in (g.striked or set()))
+    if len(bt) != 2:
+        await _night_report(ctx, g, "🧑‍⚖️ بازپرسی معتبر نیست (احضارشده‌ای در بازی نیست) — فقط تو می‌دانی.")
+        return
+    g.baz_ask_used = False
+    store.save()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❓ پرسش از بازپرس", callback_data="ctl_bazask")]])
+    await ctx.bot.send_message(
+        chat_id,
+        f"🧑‍⚖️ <b>بازپرسیِ امروز</b> بین این دو نفر است:\n"
+        f"• <b>{bt[0]}</b>. {escape(g.seats[bt[0]][1], quote=False)}\n"
+        f"• <b>{bt[1]}</b>. {escape(g.seats[bt[1]][1], quote=False)}",
+        parse_mode="HTML", reply_markup=kb)
+
+
+
 async def _baz_trigger(ctx, chat_id, g):
     """🧑‍⚖️ دکمه‌ی «بازپرسی»: پرامپتِ ادامه/ملغی به بازپرسِ زنده، یا ادامه‌ی خودکار برای بازپرسِ مرده."""
     # ⚠️ هیچ پیامِ عمومی برای حالت‌های نامعتبر — که وضعیتِ بازپرس لو نرود
@@ -8337,14 +8364,14 @@ async def _baz_trigger(ctx, chat_id, g):
         else:
             await ctx.bot.send_message(chat_id, "⚠️ پیویِ بازپرس بسته است.")
     elif _find_seat_by_role(g, _R_BAAZPORS, alive_only=False) is not None:
-        # ⚰️ بازپرس مُرده → ادامه‌ی خودکار (ملغی ممکن نیست) با ۳۰ ثانیه تأخیرِ ضدلورفتن
+        # ⚰️ بازپرس مُرده → ادامه‌ی خودکار (ملغی ممکن نیست) با ۱۰ ثانیه تأخیرِ ضدلورفتن
         g.baz_day_choice = "cont"
         store.save()
         asyncio.create_task(_baz_dead_auto_continue(ctx, chat_id, g))
 
 
-async def _baz_dead_auto_continue(ctx, chat_id, g, delay=15):
-    """⚰️ بازپرسِ مرده: بعد از ۱۵ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
+async def _baz_dead_auto_continue(ctx, chat_id, g, delay=10):
+    """⚰️ بازپرسِ مرده: بعد از ۱۰ ثانیه — اعلامِ «ادامه»، پنلِ شمارش، و بستنِ بی‌سروصدای اتاق.
     همه‌چیز عینِ جریانِ زنده‌بودنش دیده می‌شود تا کسی نفهمد بازپرس مرده."""
     try:
         await asyncio.sleep(delay)
@@ -8413,7 +8440,7 @@ async def handle_buy_link_callback(update, ctx):
 
 
 async def _baz_duel_count(ctx, chat_id, g):
-    """🧑‍⚖️ شمارشِ دوئل — خودکار (همه رأی دادند) یا با دکمه‌ی گاد (بدونِ غایب‌ها آمار نمی‌دهد)."""
+    """🧑‍⚖️ شمارشِ دوئل — خودکار (همه رأی دادند) یا با دکمهٔ «پایان شمارش»ِ گاد؛ در هر دو حالت هر رأیِ قابل‌شمارش شمرده می‌شود."""
     if not getattr(g, "baz_duel_active", False):
         return
     g.baz_duel_active = False
@@ -8425,21 +8452,8 @@ async def _baz_duel_count(ctx, chat_id, g):
     if len(pair) != 2:
         return
 
-    # ✅ شرطِ اعلامِ آمار: همه‌ی زنده‌ها «به‌جز دو طرفِ بازپرسی» رأیِ خوانا داده باشند
-    missing = []
-    for s_ in sorted(_alive_seats(g)):
-        if s_ in pair:
-            continue
-        if g.seats[s_][0] not in votes:
-            missing.append(f"{s_}. {escape(g.seats[s_][1], quote=False)}")
-    if missing:
-        await ctx.bot.send_message(
-            chat_id,
-            "⚠️ این افراد رأی ندادند یا رأیشان قابل‌شمارش نبود:\n• "
-            + "\n• ".join(missing)
-            + "\n🧮 آمار اعلام نمی‌شود — شمارش و تصمیم با خودِ گاد.",
-            parse_mode="HTML")
-        return
+    # 🧮 مثلِ پایانِ شمارشِ بقیهٔ سناریوها: غایب‌ها فقط رأی ندارند؛ هرچه قابل‌شمارش است شمرده و
+    #    نتیجه (و خروجی) اعلام می‌شود — دیگر «تصمیم با گاد» نمی‌نویسد.
 
     c1 = sum(1 for v in votes.values() if v == pair[0])
     c2 = sum(1 for v in votes.values() if v == pair[1])
@@ -8468,7 +8482,7 @@ async def _baz_duel_count(ctx, chat_id, g):
 
     await _check_auto_end(ctx, chat_id, g)   # 🏁
     _bzp_hunter_day_exit(ctx, chat_id, g, loser)   # 🪢 هانترِ درست‌بسته → ۹۰ ثانیه بعد
-    _hb_day_exit(ctx, chat_id, g, loser)           # 🧬 بافتِ هانیبال → ۹۰ ثانیه بعد
+    _hb_day_exit(ctx, chat_id, g, loser)           # 🧬 بافتِ هانیبال → ۳۰ ثانیه بعد
 
     # ⏳ ساید بعد از وصیت اعلام می‌شود (مافیا ۵۰، بقیه ۷۵ ثانیه)
     _lside = _sc_side(g, loser)
@@ -10838,7 +10852,14 @@ async def _hb_check_open_citizens(ctx, chat_id, g):
         g.night_done.add("doctor")
     else:
         duid = g.seats[doc][0]
-        need = 2 if getattr(g, "hb_doc_double", False) else 1
+        # 💉 ۲ سیو فقط شبِ «بلافاصله بعد از» ردِ سیو به انتخابِ خودِ دکتر. هیچ اکتِ دیگری
+        #    (مثلاً ناتویی) آن را نمی‌سازد و اگر آن شب مصرف نشد، منقضی می‌شود.
+        _dfrom = getattr(g, "hb_doc_double_from", None)
+        _dbl = bool(getattr(g, "hb_doc_double", False)) and (
+            _dfrom is None or int(g.night_number or 0) == int(_dfrom) + 1)
+        if getattr(g, "hb_doc_double", False) and not _dbl:
+            g.hb_doc_double = False
+        need = 2 if _dbl else 1
         g.night_doc_need = need
         kb = _kb_night_seats(_hb_doc_targets(g, doc), g, "hb_doc_",
                              selected=set(), confirm_cb="hb_doc_ok")
@@ -10947,7 +10968,7 @@ async def _resolve_hanibal(ctx, chat_id, g):
 
 
 def _hb_day_exit(ctx, chat_id, g, exiter):
-    """🧬 خروجِ روزِ هانیبال (رأی/دوئل): اگر بافتش شهرسادهٔ زنده بود، ۹۰ ثانیه بعد او هم می‌رود."""
+    """🧬 خروجِ روزِ هانیبال (رأی/دوئل): اگر بافتش شهرسادهٔ زنده بود، ۳۰ ثانیه بعد او هم می‌رود."""
     if not _is_hanibal_scenario(g):
         return
     if _seat_role_norm(g, exiter) != _R_HB_HANIBAL:
@@ -10964,7 +10985,7 @@ def _hb_day_exit(ctx, chat_id, g, exiter):
 
     async def _later():
         try:
-            await asyncio.sleep(HUNTER_DRAG_DELAY)
+            await asyncio.sleep(HB_BOND_EXIT_DELAY)
             if g.phase in ("idle", "ended"):
                 return
             if exiter not in (g.striked or set()):
@@ -10975,8 +10996,7 @@ def _hb_day_exit(ctx, chat_id, g, exiter):
             store.save()
             await ctx.bot.send_message(
                 chat_id,
-                f"🧬 {exiter}. {hn} <b>هانیبال</b> بود و به {bond}. {bn} بافت زده بود — "
-                f"{bond}. {bn} بدونِ وصیت از بازی خارج شد.",
+                f"🧬 {bond}. {bn} همراهِ {exiter}. {hn} از بازی خارج شد — بدونِ وصیت.",
                 parse_mode="HTML")
             await _night_report(ctx, g, f"🧬 هانیبال در روز رفت → بافتش ({bond}. {bn}) هم خارج شد.")
             await _room_drop_dead(ctx, g)   # 🚪 اگر عضوِ اتاق بود، بیرون برود
@@ -11393,6 +11413,7 @@ async def handle_hanibal_callback(update, ctx):
             return
         g.hb_doc_skip_used = True
         g.hb_doc_double = True
+        g.hb_doc_double_from = int(g.night_number or 0)   # ۲ سیو فقط برای شبِ بلافاصله بعد
         g.night_doc_saved = []
         g.night_doc_sel.pop(uid, None)
         g.night_done.add("doctor")
@@ -11474,6 +11495,7 @@ async def handle_hanibal_callback(update, ctx):
             await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
             return
         mm = _seat_of_uid(g, uid)
+        g.hb_card_chosen = s   # 🏛 همانی که خودِ معمار انتخاب کرد (برای پیامِ خودش)
         if getattr(g, "night_hb_shadow", None) == mm:
             # 🌑 سایه روی معمار: کارت جلوی خودش می‌افتد
             g.hb_card_seat = mm
@@ -11518,8 +11540,10 @@ async def handle_hanibal_callback(update, ctx):
         g.night_done.add("memar")
         store.save()
         _d = "بالا (به سمتِ ۱)" if g.hb_card_dir == -1 else "پایین (به سمتِ آخر)"
+        # 🌑 سایه‌خورده هم نباید بفهمد: همان صندلی‌ای را می‌بیند که خودش انتخاب کرد
+        _chosen = getattr(g, "hb_card_chosen", None) or g.hb_card_seat
         await _close_pm(ctx, uid, mid,
-                        f"🏛 ثبت شد — کارت جلوی {g.hb_card_seat}، رأی از {g.hb_card_start} به سمتِ {_d}.")
+                        f"🏛 ثبت شد — کارت جلوی {_chosen}، رأی از {g.hb_card_start} به سمتِ {_d}.")
         await _night_report(ctx, g, f"🏛 معمار → شروعِ رأی از <b>{g.hb_card_start}</b> به سمتِ {_d}")
         await _hb_check_open_avenger(ctx, chat_id, g)
         return
@@ -11594,6 +11618,7 @@ def _bzp_detective_positive(g, seat) -> bool:
 
 
 HUNTER_DRAG_DELAY = 90   # ⏳ بعد از خروجِ روزِ هانتر، این‌قدر صبر (وصیت) و بعد اعلام
+HB_BOND_EXIT_DELAY = 30  # 🧬 بعد از خروجِ روزِ هانیبال، این‌قدر صبر و بعد خروجِ بافتِ شهرساده‌اش
 
 
 def _bzp_hunter_drag_target(g, hunter_seat):
@@ -19821,7 +19846,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ─── دکمه‌های معارفه/شب/روز و قفلِ چت مافیا ────────
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
-                "ctl_bazparsi", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
+                "ctl_bazparsi", "ctl_bazask", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
                 "ctl_terror", "ctl_yaghi", "ctl_memar", "ctl_eliot"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
@@ -20012,11 +20037,25 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.baz_button_used = True   # ♻️ یک‌بارمصرف — دکمه از پنل غیب می‌شود
             g.baz_day_choice = None
             store.save()
-            await _baz_trigger(ctx, chat, g)
+            await _baz_announce(ctx, chat, g)   # 📣 اعلامِ دو نفر + دکمهٔ «پرسش از بازپرس»
             try:
                 await publish_seating(ctx, chat, g, mode=CTRL)
             except Exception:
                 pass
+            return
+        if data == "ctl_bazask":
+            # ❓ «پرسش از بازپرس» (فقط گاد، یک‌بار): همان کارِ دکمهٔ قدیمیِ بازپرسی
+            if getattr(g, "baz_ask_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            g.baz_ask_used = True
+            store.save()
+            try:
+                await ctx.bot.edit_message_reply_markup(chat_id=chat, message_id=q.message.message_id,
+                                                        reply_markup=None)
+            except Exception:
+                pass
+            await _baz_trigger(ctx, chat, g)
             return
         if data == "ctl_kick":
             # 👢 کیکِ روز — دکمه‌های پنل عوض می‌شوند (مثلِ خط‌زدن)
@@ -21276,6 +21315,7 @@ async def shuffle_and_assign(
     g.tk_gun_aiming = None
     g.zereh_fallen = False
     g.baz_button_used = False
+    g.baz_ask_used = False
     # 🕵️⚔️ ناتویی و جلادی: یک‌بار در کلِ بازی — با پخشِ نقشِ تازه از نو
     g.nato_used = False
     g.jalad_used = False
@@ -21339,6 +21379,7 @@ async def shuffle_and_assign(
     g.hb_hero_shield = True
     g.hb_doc_self = 0
     g.hb_doc_double = False
+    g.hb_doc_double_from = None
     g.hb_doc_skip_used = False
     g.hb_bond = None
     g.hb_shadow_last = None
