@@ -5029,16 +5029,22 @@ async def _finalize_final_vote(ctx, chat_id, g):
         else:
             rep_lbl = "اول" if idx == 0 else "دوم"
             sign_lbl = "مثبت (+۱)" if sign > 0 else "منفی (−۱)"
-            if idx < len(targets):
-                t = targets[idx]
+            # 🎯 تارگتِ هر نماینده = ترتیبی که دفاعیه با آن ساخته شد (نفرِ اولِ دفاعیه
+            #    = تارگتِ نمایندهٔ اول). صفِ رأی‌گیری ملاک نیست: با رأیِ اولیهٔ پُل و
+            #    رأی‌گیریِ اتومات به ترتیبِ شمارهٔ صندلی جابه‌جا می‌شود و دنگ به نفرِ اشتباه می‌خورد.
+            _ding_order = [s for s in (getattr(g, "defense_seats", []) or []) if s in counts]
+            if len(_ding_order) < 2:
+                _ding_order = targets
+            if idx < len(_ding_order):
+                t = _ding_order[idx]
                 old_c = counts[t]
                 counts[t] = max(0, old_c + sign)
                 note = (f"🗡 با احتسابِ دنگ خیانتِ {sign_lbl} روی نماینده‌ی {rep_lbl}: "
-                        f"آرای نفرِ {rep_lbl} رأی‌گیری ({t}. {escape(g.seats[t][1], quote=False)}): "
+                        f"آرای {t}. {escape(g.seats[t][1], quote=False)} (تارگتِ نمایندهٔ {rep_lbl}): "
                         f"{old_c} ← <b>{counts[t]}</b>")
             else:
                 note = (f"🗡 دنگ خیانتِ {sign_lbl} روی نماینده‌ی {rep_lbl} بود، "
-                        f"اما نفرِ {rep_lbl}ی در رأی‌گیری نبود — بی‌اثر.")
+                        f"اما تارگتش در رأی نهایی نبود — بی‌اثر.")
             await ctx.bot.send_message(chat_id, note, parse_mode="HTML")
             await _night_report(ctx, g, note)
 
