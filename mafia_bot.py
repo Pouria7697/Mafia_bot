@@ -6960,6 +6960,12 @@ async def start_night(ctx, chat_id, g):
             store.save()
             await _tk_open_shield(ctx, chat_id, g)
         elif is_kp:
+            # ⚱️ وارث: اگر فردِ انتخابی‌اش در روز رفته باشد، همین سرِ شب نقش را می‌گیرد
+            #    تا همین شب اکت داشته باشد. قبلاً فقط آخرِ شب چک می‌شد و یک شب می‌سوخت.
+            try:
+                await _kp_check_heir_inherit(ctx, g)
+            except Exception as e:
+                print("⚠️ heir inherit at night start:", e)
             g.night_stage = "don"
             store.save()
             if g.attar_poisoned_seat is not None:
