@@ -5049,6 +5049,8 @@ async def _finalize_final_vote(ctx, chat_id, g):
             await _night_report(ctx, g, note)
 
     hist = getattr(g, "defense_history", {}) or {}
+    # ⚔️ میتیک سابقهٔ دفاع ندارد — نه ثبت می‌شود و نه در تساوی ملاک است
+    _no_hist = _is_mythic_scenario(g)
     alive = len(_alive_seats(g))
     thr = _final_vote_threshold(alive, g)
     reached = [t for t in targets if counts[t] >= thr]
@@ -5059,6 +5061,8 @@ async def _finalize_final_vote(ctx, chat_id, g):
         tops = [t for t in reached if counts[t] == mx]
         if len(tops) == 1:
             exiter = tops[0]
+        elif _no_hist:
+            await ctx.bot.send_message(chat_id, "⚖️ تساوی آرا — تصمیم با گاد.")
         else:
             # 📜 تساوی آرا → سابقه‌ی بیشتر (دفعاتِ حضور در رأی نهایی) خارج می‌شود
             hmx = max(hist.get(t, 0) for t in tops)
@@ -5074,7 +5078,8 @@ async def _finalize_final_vote(ctx, chat_id, g):
                 await ctx.bot.send_message(chat_id, "📜 تساوی آرا و تساوی سابقه — تصمیم با گاد.")
 
     # 📜 ثبتِ سابقه برای همه‌ی حاضرانِ دفاعِ امروز
-    _bump_defense_history(g, targets)
+    if not _no_hist:
+        _bump_defense_history(g, targets)
 
     if exiter is None:
         _score_votes_final(g, targets, None, False)   # 🏅 کسی خارج نشد
