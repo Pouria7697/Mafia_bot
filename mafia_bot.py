@@ -458,6 +458,7 @@ class GameState:
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
         self.d1_guess_done = getattr(self, "d1_guess_done", False)
+        self.d1_guess_used = getattr(self, "d1_guess_used", set()) or set()
         # ── محاسبهٔ خودکار مرگ ──
         self.night_doc_saved = getattr(self, "night_doc_saved", []) or []
         self.night_sniper_target = getattr(self, "night_sniper_target", None)
@@ -1042,6 +1043,13 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
         m = d.get("medals") or {}
         m[key] = int(m.get(key, 0) or 0) + 1
         d["medals"] = m
+        # 🏛 شمارِ کلِ دوران — با صفرشدنِ مدال‌ها پاک نمی‌شود (برای «آمار من»)
+        _ma = d.get("medals_all")
+        if not isinstance(_ma, dict):
+            _ma = dict(m)
+        else:
+            _ma[key] = int(_ma.get(key, 0) or 0) + 1
+        d["medals_all"] = _ma
         winners.append({"uid": uid, "name": d.get("name", "بازیکن"),
                         "medal": key, "score": round(tot, 1)})
 
@@ -1067,7 +1075,46 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
             m = d.get("medals") or {}
             m[key] = max(0, int(m.get(key, 0) or 0) - 1)
             d["medals"] = m
+            _ma = d.get("medals_all") or {}
+            _ma[key] = max(0, int(_ma.get(key, 0) or 0) - 1)
+            d["medals_all"] = _ma
         return None
+
+    # ♻️ اگر فصلِ قبل کسی دو طلا شد، ریست به همین فصل موکول شده بود:
+    #    اول همهٔ مدال‌ها صفر می‌شوند، بعد فقط مدالِ همین فصل به سه نفرِ اول می‌رسد.
+    _wiped = False
+    try:
+        if (load_bot_settings() or {}).get("medals_reset_next_season"):
+            for _d in stats.values():
+                if not isinstance(_d.get("medals_all"), dict):
+                    _d["medals_all"] = dict(_d.get("medals") or {})   # 🏛 تاریخچه بماند
+                _d["medals"] = {}
+            for _i, (_u, _d, _t) in enumerate(rows[:3]):
+                _d["medals"] = {("gold", "silver", "bronze")[_i]: 1}
+            _bs = dict(load_bot_settings() or {})
+            _bs["medals_reset_next_season"] = False
+            save_bot_settings(_bs)
+            _wiped = True
+    except Exception as _e:
+        print("⚠️ medals reset:", _e)
+
+    # 🥇🥇 کسی که دومین طلایش را گرفت: مدال‌هایش سرِ جا می‌مانند (۲ طلا کنارِ اسمش)،
+    #      ۳ حقِ انتخابِ ساید می‌گیرد، و صفرشدنِ همهٔ مدال‌ها به پایانِ فصلِ بعد می‌افتد.
+    _two_gold = None
+    if not _wiped:
+        try:
+            _guid, _gd, _ = rows[0]
+            if int((_gd.get("medals") or {}).get("gold", 0) or 0) >= 2:
+                _gd["side_picks_left"] = SIDE_PICK_TOTAL
+                _gd["side_pick_last"] = None
+                _gd["side_pick_season"] = int(_SEASON_CACHE.get("no") or 0)
+                _bs2 = dict(load_bot_settings() or {})
+                _bs2["medals_reset_next_season"] = True
+                save_bot_settings(_bs2)
+                _two_gold = (_guid, _gd.get("name", "بازیکن"))
+        except Exception as _e:
+            print("⚠️ two-gold reward:", _e)
+
 
     # 🔄 صفر کردنِ همه‌ی امتیازها (شمارنده‌های بازی/برد دست‌نخورده می‌مانند؛
     #    score_games=games یعنی سهمِ «بازی‌های قدیمی» هم از این به بعد صفر است)
@@ -1110,6 +1157,17 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
               "🎖 مدال‌ها برای همیشه در آمار ثبت شدند."]
 
     # 🎖 نشان‌های تازه فوراً کنارِ اسم‌ها ظاهر شوند
+    if _wiped:
+        lines += ["", "♻️ همهٔ مدال‌های قبلی صفر شد — از این فصل با مدال‌های تازه شروع می‌کنیم."]
+    if _two_gold:
+        _tu, _tn = _two_gold
+        lines += ["",
+                  f"🥇🥇 <a href='tg://user?id={_tu}'>{escape(_tn, quote=False)}</a> "
+                  f"دومین طلایش را گرفت!",
+                  f"🎲 در فصلِ تازه <b>{SIDE_PICK_TOTAL}</b> بار حقِ انتخابِ ساید دارد.",
+                  "♻️ مدال‌های همه در پایانِ فصلِ بعد صفر می‌شوند."]
+
+
     refresh_medal_cache(stats)
     return "\n".join(lines)
 
@@ -2384,6 +2442,7 @@ def format_player_stats(p: dict) -> str:
 
     _avg = (_st / _sgames) if _sgames else 0
     _mb = _medal_badges(p)
+    _mb_all = _medal_badges({"medals": p.get("medals_all") or {}})
     lines = [
         f"📊 <b>آمار {name}</b>" + (f" {_mb}" if _mb else ""),
         f"<i>{season_label()}</i>",
@@ -2392,7 +2451,8 @@ def format_player_stats(p: dict) -> str:
         + (f" | این فصل: <b>{_sgames}</b>" if _sgames != games else ""),
         f"🏆 کل بردها: <b>{wins}</b>{pct(wins, games)}",
         f"🏅 امتیاز فصل: <b>{_lat(_st)}</b> | میانگین: <b>{_lat(_avg)}</b>",
-    ] + ([f"🎖 مدال‌ها: {_mb}"] if _mb else []) + [
+    ] + ([f"🎖 مدال‌ها: {_mb}"] if _mb else []) + (
+        [f"🏛 مدال‌های کلِ دوران: {_mb_all}"] if _mb_all and _mb_all != _mb else []) + [
         "",
         f"◽️ شهروند: {cg} بازی | {cw} برد{pct(cw, cg)}",
         f"◾️ مافیا: {mg} بازی | {mw} برد{pct(mw, mg)}",
@@ -4914,27 +4974,37 @@ async def _d1_guess_finish(ctx, g, timeout=False):
     await _night_report(ctx, g, f"🎯 حدسِ شهروندِ خروجی ({seat}): [{pk}] → درست: [{ck}] = +{pts}")
 
 
-async def _d1_guess_start(ctx, g, seat):
-    """فقط برای شهروندِ خروجیِ روزِ ۱ — یک‌بار در بازی."""
-    if getattr(g, "d1_guess_seat", None) is not None or getattr(g, "d1_guess_done", False):
+async def _d1_guess_start(ctx, g, seat, kind="day1"):
+    """🎯 حدسِ ۳ مافیا — برای شهروندِ خروجیِ روزِ ۱ و شهروندِ شات‌شدهٔ شبِ ۱ (هرکدام یک‌بار)."""
+    _used = set(getattr(g, "d1_guess_used", None) or set())
+    if kind in _used:
         return
-    if getattr(g, "night_number", 0) != 0 or seat not in g.seats or _sc_side(g, seat) != "شهر":
+    # یکی هنوز در جریان است → مزاحمش نمی‌شویم
+    if getattr(g, "d1_guess_seat", None) is not None and not getattr(g, "d1_guess_done", False):
         return
+    if int(getattr(g, "night_number", 0) or 0) != (0 if kind == "day1" else 1):
+        return
+    if seat not in g.seats or _sc_side(g, seat) != "شهر":
+        return
+    _used.add(kind)
+    g.d1_guess_used = _used
     g.d1_guess_seat = seat
     g.d1_guess_picks = []
     g.d1_guess_done = False
     store.save()
+    _who = ("تو شهروندِ خروجیِ روزِ اولی!" if kind == "day1"
+            else "تو شهروندی هستی که شبِ اول شات شدی!")
     m = await _safe_pm(ctx, g.seats[seat][0],
-                       "🎯 تو شهروندِ خروجیِ روزِ اولی!\n"
+                       f"🎯 {_who}\n"
                        "۳ نفر را که فکر می‌کنی تیمِ مافیا هستند انتخاب کن.\n"
                        "⏱ ۲ دقیقه و ۳۰ ثانیه فرصت داری — هر حدسِ درست ۱۵ امتیاز!",
                        _d1_guess_kb(g))
     if not m:
         g.d1_guess_done = True
         store.save()
-        await _night_report(ctx, g, f"🎯 پیویِ شهروندِ خروجی ({seat}) بسته بود — حدسِ مافیا انجام نشد.")
+        await _night_report(ctx, g, f"🎯 پیویِ شهروند ({seat}) بسته بود — حدسِ مافیا انجام نشد.")
         return
-    await _night_report(ctx, g, f"🎯 حدسِ ۳ مافیا برای شهروندِ خروجی ({seat}) فرستاده شد — ⏱ ۲:۳۰")
+    await _night_report(ctx, g, f"🎯 حدسِ ۳ مافیا برای شهروند ({seat}) فرستاده شد — ⏱ ۲:۳۰")
 
     async def _d1_timer():
         try:
@@ -5118,6 +5188,8 @@ async def _finalize_final_vote(ctx, chat_id, g):
                             f"🛡 {exiter}. {nm} با رأی خارج نشد — زره/شیلدش از همین حالا افتاد (فقط تو می‌دانی).")
     if not protected:
         g.striked.add(exiter)
+        _game_log(g, f"☀️ روز {int(g.night_number or 0) + 1} — خروجیِ رأی: "
+                        f"{exiter}. {nm} (ساید: {_sc_side(g, exiter)})")
         store.save()
         await _room_drop_dead(ctx, g)   # 🚪 خروجی‌شدهٔ مافیا، همان لحظه از اتاق بیرون
         try:
@@ -5744,9 +5816,9 @@ async def announce_winner(ctx, update, g: GameState):
     if season_msg:
         await _broadcast_season_end(ctx.bot, season_msg, first_chat_id=chat.id)
 
-    # 🌙 گزارش شب‌به‌شبِ اکت‌ها (به‌صورت متن جداگانه زیر لیست پایانی)
+    # 📜 گزارشِ بازی: اکت‌های شب‌به‌شب + خروجی‌های روز (زیرِ لیستِ پایانی)
     night_log = getattr(g, "night_log", None)
-    report = ("📜 <b>گزارش شب‌به‌شب</b>\n" + "\n".join(night_log)) if night_log else None
+    report = ("📜 <b>گزارش بازی</b>\n" + "\n".join(night_log)) if night_log else None
     if report:
         await _send_chunked(ctx.bot, chat.id, report)
 
@@ -6568,6 +6640,18 @@ async def _room_shot_send(ctx, g, seat, extra=""):
             parse_mode="HTML")
     except Exception as e:
         print("⚠️ room shot announce:", e)
+
+
+def _game_log(g, text):
+    """📜 یک خط برای «گزارش بازی» که آخرِ بازی زیرِ لیست می‌رود — به گاد پیامی نمی‌دهد."""
+    try:
+        if not isinstance(getattr(g, "night_log", None), list):
+            g.night_log = []
+        g.night_log.append(text)
+        store.save()
+    except Exception as e:
+        print("⚠️ game log:", e)
+
 
 
 async def _night_report(ctx, g, text):
@@ -7693,6 +7777,13 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
     except Exception:
         pass
     await _check_auto_end(ctx, chat_id, g, after_night=True)   # 🏁 پایانِ خودکار / 🌀 کی‌آس
+    # 🎯 شهروندی که شبِ اول شات شد هم حدسِ ۳ مافیا می‌گیرد (بعد از زدنِ «روز»)
+    try:
+        _st = getattr(g, "night_shot_target", None)
+        if int(getattr(g, "night_number", 0) or 0) == 1 and _st in dead:
+            await _d1_guess_start(ctx, g, _st, kind="night1")
+    except Exception as _e:
+        print("⚠️ night1 guess:", _e)
 
 
 async def _resolve_night(ctx, chat_id, g):
@@ -8487,6 +8578,8 @@ async def _baz_duel_count(ctx, chat_id, g):
     _lname = escape(g.seats[loser][1], quote=False)
     lines.append(f"🚪 {loser}. {_lname} از بازی خارج شد — وصیت کند.")
     g.striked.add(loser)
+    _game_log(g, f"☀️ روز {int(g.night_number or 0) + 1} — خروجیِ بازپرسی: "
+                 f"{loser}. {_lname} (ساید: {_sc_side(g, loser)})")
     # 🏅 مافیای خارج‌شده با رأیِ بازپرسی هم فریبش صفر می‌شود
     if _sc_side(g, loser) == "مافیا":
         _sc_add(g, loser, "farib1", -100, "خروج با رأی بازپرسی — فریب صفر")
@@ -9141,6 +9234,8 @@ async def _cl_count_final(ctx, chat_id, g, counts, votes_by_target, abst=0):
     await ctx.bot.send_message(chat_id, f"🚪 {exiter}. {nm} حد نصاب آورد — وصیت کند.",
                                parse_mode="HTML")
     g.striked.add(exiter)
+    _game_log(g, f"☀️ روز {int(g.night_number or 0) + 1} — خروجیِ رأی: "
+                 f"{exiter}. {nm} (ساید: {_sc_side(g, exiter)})")
     store.save()
     try:
         await publish_seating(ctx, chat_id, g, mode=CTRL)
@@ -19375,6 +19470,12 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🔄 دکمهٔ «اکت مجدد» — فقط پنجرهٔ بازِ تصحیح را بیدار می‌کند
+    # 🎲 انتخابِ ساید (جایزهٔ دو طلا) — در پیویِ خودش
+    if _q and _q.data and _q.data.startswith("sidep_"):
+        await handle_side_pick_callback(update, ctx)
+        return
+
+
     if _q and _q.data and _q.data.startswith("redo_"):
         await handle_redo_callback(update, ctx)
         return
@@ -21229,6 +21330,138 @@ def kick_button_markup(g: GameState) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+SIDE_PICK_TOTAL = 3        # 🎲 تعدادِ انتخابِ ساید در کلِ فصل (جایزهٔ دو طلا)
+SIDE_PICK_TIMEOUT = 45     # ⏳ فرصتِ جواب؛ بعدش نقش‌ها عادی پخش می‌شوند
+_SIDE_WAIT: dict[int, dict] = {}    # uid → {"evt", "answer"}
+_SIDE_LBL = {"مافیا": "مافیا", "شهر": "شهروند"}
+
+
+def _role_side_name(g, role) -> str:
+    """سایدِ یک نقش در سناریوی جاری: مافیا / مستقل / شهر."""
+    rn = _nz(role or "")
+    if rn in {_nz(x) for x in (load_mafia_roles() or set())}:
+        return "مافیا"
+    _sc = getattr(g, "scenario", None)
+    _ind = (load_indep_roles() or {}).get(_sc.name, []) if _sc else []
+    if rn in {_nz(x) for x in _ind}:
+        return "مستقل"
+    return "شهر"
+
+
+def _side_pick_candidate(g, stats):
+    """بازیکنِ نشسته‌ای که جایزهٔ انتخابِ ساید دارد (uid، دادهٔ آمارش) یا (None, None)."""
+    try:
+        _season = int(current_season_no())
+    except Exception:
+        return None, None
+    for _s in sorted(g.seats or {}):
+        uid = g.seats[_s][0]
+        d = (stats or {}).get(str(uid)) or {}
+        if int(d.get("side_picks_left", 0) or 0) <= 0:
+            continue
+        if int(d.get("side_pick_season", 0) or 0) != _season:
+            continue     # جایزه مالِ فصلِ دیگری بوده
+        return uid, d
+    return None, None
+
+
+async def _side_wait(uid):
+    evt = asyncio.Event()
+    _SIDE_WAIT[uid] = {"evt": evt, "answer": None}
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=SIDE_PICK_TIMEOUT)
+    except Exception:
+        pass
+    return (_SIDE_WAIT.pop(uid, None) or {}).get("answer")
+
+
+async def _side_pick_ask(ctx, uid, last=None):
+    """پرسش در پیویِ خودش. سایدِ انتخابی را برمی‌گرداند یا None.
+    ⚠️ دکمه‌ها در هر حالت پاک می‌شوند تا وسطِ بازی چیزی زده نشود."""
+    forced = ("شهر" if last == "مافیا" else "مافیا") if last in ("مافیا", "شهر") else None
+    txt = "🎲 این بازی ساید انتخاب می‌کنی؟"
+    if forced:
+        txt += (f"\n(بارِ قبل «{_SIDE_LBL[last]}» گرفتی، پس این بار "
+                f"«{_SIDE_LBL[forced]}» می‌شود)")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ بله", callback_data="sidep_yes"),
+        InlineKeyboardButton("🚫 خیر", callback_data="sidep_no"),
+    ]])
+    m = await _safe_pm(ctx, uid, txt, kb)
+    if not m:
+        return None
+    mid = m.message_id
+    side = None
+    ans = await _side_wait(uid)
+    if ans == "yes":
+        if forced:
+            side = forced
+        else:
+            kb2 = InlineKeyboardMarkup([[
+                InlineKeyboardButton("😈 مافیا", callback_data="sidep_maf"),
+                InlineKeyboardButton("🧍 شهروند", callback_data="sidep_cit"),
+            ]])
+            try:
+                await ctx.bot.edit_message_text(chat_id=uid, message_id=mid,
+                                               text="🎲 مافیا یا شهروند؟", reply_markup=kb2)
+            except Exception:
+                pass
+            side = {"maf": "مافیا", "cit": "شهر"}.get(await _side_wait(uid))
+    _final = ("🎲 ثبت شد." if side else
+              ("🚫 این بازی ساید انتخاب نکردی." if ans == "no" else "⏰ فرصتِ انتخابِ ساید تمام شد."))
+    try:
+        await ctx.bot.edit_message_text(chat_id=uid, message_id=mid, text=_final, reply_markup=None)
+    except Exception:
+        pass
+    return side
+
+
+async def handle_side_pick_callback(update, ctx):
+    q = update.callback_query
+    uid = q.from_user.id
+    st = _SIDE_WAIT.get(uid)
+    if not st:
+        await safe_q_answer(q, "⏰ این دکمه دیگر فعال نیست.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    st["answer"] = (q.data or "").replace("sidep_", "")
+    try:
+        st["evt"].set()
+    except Exception:
+        pass
+
+
+async def _side_pick_apply(ctx, g, uid_to_role):
+    """🎲 اگر صاحبِ جایزه در این بازی است و «بله» بزند، نقشی تصادفی از سایدِ انتخابی‌اش
+    می‌گیرد و نقشِ خودش به همان کسی می‌رسد که آن نقش را داشت (استخرِ نقش‌ها عوض نمی‌شود).
+    هیچ‌کس خبردار نمی‌شود؛ فقط آخرِ بازی در «گزارش بازی» می‌آید."""
+    try:
+        stats = load_player_stats() or {}
+        uid, d = _side_pick_candidate(g, stats)
+        if uid is None:
+            return
+        side = await _side_pick_ask(ctx, uid, d.get("side_pick_last"))
+        if not side:
+            return
+        cands = [u for u, r in uid_to_role.items() if _role_side_name(g, r) == side]
+        if not cands:
+            await _safe_pm(ctx, uid, "⚠️ در این سناریو نقشی از آن ساید نبود — ساید عوض نشد.")
+            return
+        if _role_side_name(g, uid_to_role.get(uid)) != side:
+            _pick = random.choice(cands)
+            uid_to_role[uid], uid_to_role[_pick] = uid_to_role[_pick], uid_to_role[uid]
+        d["side_picks_left"] = max(0, int(d.get("side_picks_left", 0) or 0) - 1)
+        d["side_pick_last"] = side
+        stats[str(uid)] = d
+        save_player_stats(stats)
+        _game_log(g, f"🎲 انتخابِ ساید: {escape(str(d.get('name') or 'بازیکن'), quote=False)} "
+                     f"این بازی ساید «{_SIDE_LBL[side]}» را انتخاب کرد "
+                     f"({d['side_picks_left']} بار دیگر مانده).")
+    except Exception as e:
+        print("⚠️ side pick:", e)
+
+
+
 async def shuffle_and_assign(
     ctx,
     chat_id: int,
@@ -21253,6 +21486,11 @@ async def shuffle_and_assign(
             random.shuffle(pool)
             random.shuffle(uids_for_roles)
         uid_to_role = {uid_: pool[i] for i, uid_ in enumerate(uids_for_roles)}
+
+    # 🎲 جایزهٔ دو طلا: قبل از پخشِ نقش‌ها از صاحبش در پیوی پرسیده می‌شود
+    if not preview_mode and notify_players:
+        await _side_pick_apply(ctx, g, uid_to_role)
+
 
     # 3) حالت پیش‌نمایش: فقط نگاشت را ذخیره کن و خارج شو (هیچ پیام/تغییری اعمال نکن)
     if preview_mode:
@@ -21319,6 +21557,7 @@ async def shuffle_and_assign(
     g.d1_guess_seat = None
     g.d1_guess_picks = []
     g.d1_guess_done = False
+    g.d1_guess_used = set()
     g.defense_history = {}
     g.nem_reps = []
     g.nem_reps_tmp = []
