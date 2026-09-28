@@ -2441,8 +2441,8 @@ def format_player_stats(p: dict) -> str:
             return str(v)
 
     _avg = (_st / _sgames) if _sgames else 0
-    _mb = _medal_badges(p)
-    _mb_all = _medal_badges({"medals": p.get("medals_all") or {}})
+    _mb = _medal_badges_full(p)          # 🎖 در «آمار من» تک‌تکِ مدال‌ها، نه «×۲»
+    _mb_all = _medal_badges_full({"medals": p.get("medals_all") or {}})
     lines = [
         f"📊 <b>آمار {name}</b>" + (f" {_mb}" if _mb else ""),
         f"<i>{season_label()}</i>",
