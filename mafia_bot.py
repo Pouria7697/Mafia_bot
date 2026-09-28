@@ -21453,10 +21453,8 @@ async def _side_pick_apply(ctx, g, uid_to_role):
         d["side_picks_left"] = max(0, int(d.get("side_picks_left", 0) or 0) - 1)
         d["side_pick_last"] = side
         stats[str(uid)] = d
+        # 🤫 هیچ گزارشی در کار نیست — نه به گاد، نه در «گزارش بازی». فقط خودش می‌داند.
         save_player_stats(stats)
-        _game_log(g, f"🎲 انتخابِ ساید: {escape(str(d.get('name') or 'بازیکن'), quote=False)} "
-                     f"این بازی ساید «{_SIDE_LBL[side]}» را انتخاب کرد "
-                     f"({d['side_picks_left']} بار دیگر مانده).")
     except Exception as e:
         print("⚠️ side pick:", e)
 
