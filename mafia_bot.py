@@ -1080,40 +1080,25 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
             d["medals_all"] = _ma
         return None
 
-    # ♻️ اگر فصلِ قبل کسی دو طلا شد، ریست به همین فصل موکول شده بود:
-    #    اول همهٔ مدال‌ها صفر می‌شوند، بعد فقط مدالِ همین فصل به سه نفرِ اول می‌رسد.
-    _wiped = False
-    try:
-        if (load_bot_settings() or {}).get("medals_reset_next_season"):
-            for _d in stats.values():
-                if not isinstance(_d.get("medals_all"), dict):
-                    _d["medals_all"] = dict(_d.get("medals") or {})   # 🏛 تاریخچه بماند
-                _d["medals"] = {}
-            for _i, (_u, _d, _t) in enumerate(rows[:3]):
-                _d["medals"] = {("gold", "silver", "bronze")[_i]: 1}
-            _bs = dict(load_bot_settings() or {})
-            _bs["medals_reset_next_season"] = False
-            save_bot_settings(_bs)
-            _wiped = True
-    except Exception as _e:
-        print("⚠️ medals reset:", _e)
-
-    # 🥇🥇 کسی که دومین طلایش را گرفت: مدال‌هایش سرِ جا می‌مانند (۲ طلا کنارِ اسمش)،
-    #      ۳ حقِ انتخابِ ساید می‌گیرد، و صفرشدنِ همهٔ مدال‌ها به پایانِ فصلِ بعد می‌افتد.
+    # 🥇🥇 جایزهٔ دو طلا: مدال‌ها هیچ‌وقت پاک نمی‌شوند و همه کنارِ اسم می‌مانند.
+    #      فقط شمارندهٔ پشت‌صحنهٔ «طلا از آخرین جایزه تا حالا» صفر می‌شود تا دفعهٔ
+    #      بعد هم که کسی دو طلا شد، جایزه دوباره کار کند.
     _two_gold = None
-    if not _wiped:
-        try:
-            _guid, _gd, _ = rows[0]
-            if int((_gd.get("medals") or {}).get("gold", 0) or 0) >= 2:
-                _gd["side_picks_left"] = SIDE_PICK_TOTAL
-                _gd["side_pick_last"] = None
-                _gd["side_pick_season"] = int(_SEASON_CACHE.get("no") or 0)
-                _bs2 = dict(load_bot_settings() or {})
-                _bs2["medals_reset_next_season"] = True
-                save_bot_settings(_bs2)
-                _two_gold = (_guid, _gd.get("name", "بازیکن"))
-        except Exception as _e:
-            print("⚠️ two-gold reward:", _e)
+    try:
+        _guid, _gd, _ = rows[0]
+        _ct = _gd.get("gold_ct")
+        _ct = (int((_gd.get("medals") or {}).get("gold", 0) or 0) if _ct is None
+               else int(_ct or 0) + 1)
+        _gd["gold_ct"] = _ct
+        if _ct >= 2:
+            _gd["side_picks_left"] = SIDE_PICK_TOTAL
+            _gd["side_pick_last"] = None
+            _gd["side_pick_season"] = int(_SEASON_CACHE.get("no") or 0)
+            for _d in stats.values():
+                _d["gold_ct"] = 0        # ♻️ شمارش از نو، برای نفرِ بعدی
+            _two_gold = (_guid, _gd.get("name", "بازیکن"))
+    except Exception as _e:
+        print("⚠️ two-gold reward:", _e)
 
 
     # 🔄 صفر کردنِ همه‌ی امتیازها (شمارنده‌های بازی/برد دست‌نخورده می‌مانند؛
@@ -1157,15 +1142,12 @@ def _season_check_and_reset(stats: dict, date_str=None) -> str | None:
               "🎖 مدال‌ها برای همیشه در آمار ثبت شدند."]
 
     # 🎖 نشان‌های تازه فوراً کنارِ اسم‌ها ظاهر شوند
-    if _wiped:
-        lines += ["", "♻️ همهٔ مدال‌های قبلی صفر شد — از این فصل با مدال‌های تازه شروع می‌کنیم."]
     if _two_gold:
         _tu, _tn = _two_gold
         lines += ["",
                   f"🥇🥇 <a href='tg://user?id={_tu}'>{escape(_tn, quote=False)}</a> "
-                  f"دومین طلایش را گرفت!",
-                  f"🎲 در فصلِ تازه <b>{SIDE_PICK_TOTAL}</b> بار حقِ انتخابِ ساید دارد.",
-                  "♻️ مدال‌های همه در پایانِ فصلِ بعد صفر می‌شوند."]
+                  f"دو طلا شد!",
+                  f"🎲 در فصلِ تازه <b>{SIDE_PICK_TOTAL}</b> بار حقِ انتخابِ ساید دارد."]
 
 
     refresh_medal_cache(stats)
@@ -8142,6 +8124,8 @@ async def _resolve_baazpors(ctx, chat_id, g):
     bt = getattr(g, "night_baz_targets", []) or []
     if bt and any(t in dead for t in bt):
         g.baazpors_used = False
+        g.baz_button_used = False   # 🔁 بازپرس دوباره اکت دارد → دکمهٔ روز هم برگردد
+        g.baz_ask_used = False
         await _night_report(ctx, g, "🧑‍⚖️ یکی از احضارشدگان به بازپرسی امشب کشته شد — "
                             "خطِ بازپرسی شکست؛ بازپرس شبِ بعد دوباره اکت دارد.")
 
@@ -8427,13 +8411,16 @@ async def _baz_announce(ctx, chat_id, g):
     «پرسش از بازپرس» که گاد با آن ادامه/ملغی را از بازپرس می‌پرسد."""
     # ⚠️ حالت‌های نامعتبر فقط به گاد گفته می‌شود — وضعیتِ بازپرس لو نرود
     if not (_is_baazpors_scenario(g) and getattr(g, "baazpors_used", False)):
-        await _night_report(ctx, g, "🧑‍⚖️ بازپرسیِ فعالی وجود ندارد (بازپرس اکتی نداده) — فقط تو می‌دانی.")
-        return
+        await _night_report(
+            ctx, g,
+            "🧑‍⚖️ بازپرسیِ فعالی نیست — یا بازپرس اکت نداده، یا خطِ بازپرسی شکسته. "
+            "دکمه دستت می‌ماند؛ شبِ بعد دوباره امتحان کن. (فقط تو می‌دانی)")
+        return False
     bt = sorted(t for t in (getattr(g, "night_baz_targets", []) or [])
                 if t in g.seats and t not in (g.striked or set()))
     if len(bt) != 2:
         await _night_report(ctx, g, "🧑‍⚖️ بازپرسی معتبر نیست (احضارشده‌ای در بازی نیست) — فقط تو می‌دانی.")
-        return
+        return False
     g.baz_ask_used = False
     store.save()
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❓ پرسش از بازپرس", callback_data="ctl_bazask")]])
@@ -8443,6 +8430,7 @@ async def _baz_announce(ctx, chat_id, g):
         f"• <b>{bt[0]}</b>. {escape(g.seats[bt[0]][1], quote=False)}\n"
         f"• <b>{bt[1]}</b>. {escape(g.seats[bt[1]][1], quote=False)}",
         parse_mode="HTML", reply_markup=kb)
+    return True
 
 
 
@@ -20152,10 +20140,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if getattr(g, "baz_button_used", False):
                 await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
                 return
-            g.baz_button_used = True   # ♻️ یک‌بارمصرف — دکمه از پنل غیب می‌شود
             g.baz_day_choice = None
             store.save()
-            await _baz_announce(ctx, chat, g)   # 📣 اعلامِ دو نفر + دکمهٔ «پرسش از بازپرس»
+            if await _baz_announce(ctx, chat, g):
+                g.baz_button_used = True   # ♻️ فقط وقتی واقعاً اعلام شد، دکمه مصرف شود
+                store.save()
             try:
                 await publish_seating(ctx, chat, g, mode=CTRL)
             except Exception:
