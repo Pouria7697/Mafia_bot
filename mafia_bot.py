@@ -5967,7 +5967,12 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
             # 🧹 پیامِ «درحال پاکسازی…» آخرِ کار خودش هم می‌رود
             await _cleanup_del_one(ctx, chat_id, int(notice_id))
         if g is not None:
-            g.cleanup_upto = max(done_upto, int(notice_id or 0), limit - 1)
+            # ⚠️ پیشرفت هرگز جلوتر از محدوده‌ای که واقعاً گشته‌ایم ثبت نشود،
+            #    وگرنه پیام‌های جامانده دیگر هیچ‌وقت پاک نمی‌شوند.
+            _upto = limit - 1
+            if notice_id and int(notice_id) <= limit:
+                _upto = max(_upto, int(notice_id))
+            g.cleanup_upto = max(done_upto, _upto)
             store.save()
     except Exception as e:
         print(f"⚠️ cleanup_after error: {e}")
@@ -20845,12 +20850,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_q_answer(q, "🧹 همین حالا در حال پاکسازی است…", show_alert=True)
             return
         _m = await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
-        # 🎯 سقفِ واقعی: پیامِ همین حالا — بالاتر از آن اصلاً پیامی وجود ندارد
-        stop_id = g.shuffle_prompt_msg_id or _m.message_id
+        # 🎯 سقف همیشه «همین حالا» است تا هیچ پیامی جا نماند. پیامِ «رندومِ نقش‌ها»
+        #    به‌جای سقف‌بودن، فقط در فهرستِ نگه‌داشتنی‌ها می‌آید.
         # 📜 پیامِ لیستِ نقش‌های سناریو و خودِ لیست نباید پاک شوند
-        _keep = {getattr(g, "last_roles_msg_id", None), _m.message_id, g.last_seating_msg_id}
+        _keep = {getattr(g, "last_roles_msg_id", None), _m.message_id, g.last_seating_msg_id,
+                 getattr(g, "shuffle_prompt_msg_id", None)}
         asyncio.create_task(
-            cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep, g=g, notice_id=_m.message_id)
+            cleanup_after(ctx, chat, g.last_seating_msg_id, _m.message_id, keep=_keep, g=g, notice_id=_m.message_id)
         )
         return
 
