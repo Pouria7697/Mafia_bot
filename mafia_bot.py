@@ -5954,9 +5954,11 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
             for _r in _res:
                 _cleanup_tally[_r] = _cleanup_tally.get(_r, 0) + 1
             await asyncio.sleep(CLEANUP_PAUSE)
-        # 📋 گزارشِ همیشگی به پیویِ گاد: دقیقاً چه محدوده‌ای گشته شد و نتیجه چه بود.
-        #    بدونِ این، پیامی که «بیرونِ محدوده» است هیچ خطایی نمی‌دهد و بی‌صدا می‌ماند.
-        if g is not None:
+        # 📋 گزارش فقط وقتی چیزی برای گفتن هست: جاماندنِ سقف، نبودِ دسترسی، یا خطای ناشناخته.
+        #    ⚠️ «پیامی نبود» طبیعی است: شماره‌های خالی، و پیامِ بات‌های دیگر که تلگرام
+        #    اجازه نمی‌دهد بات با شماره پاکشان کند (بات، پیامِ باتِ دیگر را نمی‌بیند).
+        _bad = {k: v for k, v in _cleanup_tally.items() if k not in ("ok", "notfound")}
+        if g is not None and (_bad or _cut):
             _ok = _cleanup_tally.get("ok", 0)
             _nf = _cleanup_tally.get("notfound", 0)
             _lines = [f"🧹 پاکسازی: محدودهٔ {start} تا {limit} "
@@ -22676,11 +22678,15 @@ async def delmsg_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _frm = getattr(tgt, "from_user", None)
     _who = ("بات" if getattr(_frm, "is_bot", False) else "کاربر") if _frm else "—"
     _nm = getattr(_frm, "full_name", "—") if _frm else "—"
+    _dt = getattr(tgt, "date", None)
+    _dt = _dt.strftime("%H:%M:%S") if _dt else "—"
+    _ed = getattr(tgt, "edit_date", None)
+    _ed = _ed.strftime("%H:%M:%S") if _ed else "—"
     res = await _cleanup_del_one(ctx, chat_id, tgt.message_id)
     await msg.reply_text(
         f"🔍 حذفِ پیام {tgt.message_id} (فرستنده: {_who} — "
         f"{escape(str(_nm), quote=False)}):" + chr(10) +
-        f"<code>{escape(str(res), quote=False)}</code>", parse_mode="HTML")
+        f"<code>{escape(str(res), quote=False)}</code>" + chr(10) + f"🕐 ارسال: {_dt} | ویرایش: {_ed}", parse_mode="HTML")
 
 
 async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
