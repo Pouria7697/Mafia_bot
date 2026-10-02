@@ -5909,15 +5909,22 @@ CLEANUP_MAX_IDS = 1500          # سقفِ هر اجرا — محافظِ ضدِ
 
 
 async def _cleanup_del_one(ctx, chat_id, mid):
-    """یک حذف؛ اگر تلگرام گفت «زیاد شد»، یک‌بار صبر و دوباره."""
+    """یک حذف؛ اگر تلگرام گفت «زیاد شد»، یک‌بار صبر و دوباره.
+    نتیجه را برمی‌گرداند: ok / notfound / rights / دیگر (متنِ خطا) — برای گزارش به گاد."""
     for _ in range(2):
         try:
             await ctx.bot.delete_message(chat_id, mid)
-            return
+            return "ok"
         except RetryAfter as e:
             await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.5)
-        except Exception:
-            return   # وجود ندارد / قدیمی‌تر از ۴۸ ساعت / اجازهٔ حذف نداریم
+        except Exception as e:
+            _t = str(e).lower()
+            if "not found" in _t or "message to delete" in _t or "message identifier" in _t:
+                return "notfound"
+            if "rights" in _t or "forbidden" in _t or "permission" in _t:
+                return "rights"
+            return str(e)[:80]
+    return "flood"
 
 
 async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None,
@@ -5938,10 +5945,24 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
         if done_upto >= start:
             start = done_upto + 1
         ids = [i for i in range(start, limit) if i not in keep][:CLEANUP_MAX_IDS]
+        _cleanup_tally = {}
         for i in range(0, len(ids), CLEANUP_CHUNK):
-            await asyncio.gather(*[_cleanup_del_one(ctx, chat_id, m)
-                                   for m in ids[i:i + CLEANUP_CHUNK]])
+            _res = await asyncio.gather(*[_cleanup_del_one(ctx, chat_id, m)
+                                          for m in ids[i:i + CLEANUP_CHUNK]])
+            for _r in _res:
+                _cleanup_tally[_r] = _cleanup_tally.get(_r, 0) + 1
             await asyncio.sleep(CLEANUP_PAUSE)
+        # 📋 اگر حذفی به‌خاطرِ دسترسی یا خطای ناشناخته رد شد، گاد باید بداند
+        _bad = {k: v for k, v in _cleanup_tally.items() if k not in ("ok", "notfound")}
+        if _bad and g is not None:
+            _ok = _cleanup_tally.get("ok", 0)
+            _lines = [f"🧹 پاکسازی: {_ok} پیام پاک شد."]
+            for _k, _v in _bad.items():
+                if _k == "rights":
+                    _lines.append(f"⛔ {_v} پیام پاک نشد — بات اجازهٔ «حذف پیام‌ها» را ندارد.")
+                else:
+                    _lines.append(f"⚠️ {_v} پیام پاک نشد — خطای تلگرام: {_k}")
+            await _night_report(ctx, g, chr(10).join(_lines))
         if notice_id:
             # 🧹 پیامِ «درحال پاکسازی…» آخرِ کار خودش هم می‌رود
             await _cleanup_del_one(ctx, chat_id, int(notice_id))
@@ -22626,6 +22647,28 @@ async def reset_game(ctx: ContextTypes.DEFAULT_TYPE = None, update: Update = Non
     if update and update.message:
         await update.message.reply_text("🔁 بازی با حفظ نام‌ها ریست شد.")
 
+async def delmsg_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🔍 عیب‌یابیِ پاکسازی: روی یک پیام ریپلای کن و /delmsg بزن — بات سعی می‌کند
+    پاکش کند و «جوابِ دقیقِ تلگرام» را می‌نویسد. فقط گادِ بازی یا مدیرانِ بات."""
+    msg = update.message
+    if not msg or not msg.reply_to_message:
+        return
+    chat_id = msg.chat.id
+    g = store.games.get(chat_id)
+    uid = msg.from_user.id
+    if not (_is_full_admin(uid) or (g is not None and uid == g.god_id)):
+        return
+    tgt = msg.reply_to_message
+    _frm = getattr(tgt, "from_user", None)
+    _who = ("بات" if getattr(_frm, "is_bot", False) else "کاربر") if _frm else "—"
+    _nm = getattr(_frm, "full_name", "—") if _frm else "—"
+    res = await _cleanup_del_one(ctx, chat_id, tgt.message_id)
+    await msg.reply_text(
+        f"🔍 حذفِ پیام {tgt.message_id} (فرستنده: {_who} — "
+        f"{escape(str(_nm), quote=False)}):" + chr(10) +
+        f"<code>{escape(str(res), quote=False)}</code>", parse_mode="HTML")
+
+
 async def resetgame_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -25925,6 +25968,7 @@ async def main():
         )
     )
     app.add_handler(CommandHandler("resetgame", resetgame_cmd, filters=group_filter))
+    app.add_handler(CommandHandler("delmsg", delmsg_cmd, filters=group_filter))
     # 🔒 مدیریتِ سناریو/نقش/کارت — فقط ادمینِ اصلیِ بات
     _owner = _FullAdminFilter()
     app.add_handler(CommandHandler("addscenario", addscenario, filters=_owner))
