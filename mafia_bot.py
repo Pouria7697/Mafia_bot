@@ -5921,7 +5921,7 @@ async def _cleanup_del_one(ctx, chat_id, mid):
 
 
 async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None,
-                        keep: set | None = None, g=None):
+                        keep: set | None = None, g=None, notice_id: int | None = None):
     """🧹 پاک‌کردنِ پیام‌های بینِ دو شماره — به‌جز keep (مثلِ «📜 لیست نقش‌های سناریو»).
     سقف همیشه یک شمارهٔ واقعی است (پیامِ همین حالا)، نه «+۵۰۰۰»؛ و شماره‌هایی که
     قبلاً رسیدگی شده‌اند دوباره گشته نمی‌شوند — پس فشارِ دومِ دکمه آنی تمام می‌شود.
@@ -5942,8 +5942,11 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
             await asyncio.gather(*[_cleanup_del_one(ctx, chat_id, m)
                                    for m in ids[i:i + CLEANUP_CHUNK]])
             await asyncio.sleep(CLEANUP_PAUSE)
+        if notice_id:
+            # 🧹 پیامِ «درحال پاکسازی…» آخرِ کار خودش هم می‌رود
+            await _cleanup_del_one(ctx, chat_id, int(notice_id))
         if g is not None:
-            g.cleanup_upto = max(done_upto, limit - 1)
+            g.cleanup_upto = max(done_upto, int(notice_id or 0), limit - 1)
             store.save()
     except Exception as e:
         print(f"⚠️ cleanup_after error: {e}")
@@ -20826,7 +20829,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # 📜 پیامِ لیستِ نقش‌های سناریو و خودِ لیست نباید پاک شوند
         _keep = {getattr(g, "last_roles_msg_id", None), _m.message_id, g.last_seating_msg_id}
         asyncio.create_task(
-            cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep, g=g)
+            cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep, g=g, notice_id=_m.message_id)
         )
         return
 
