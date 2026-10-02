@@ -5902,42 +5902,53 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
 
 
 
+_CLEANUP_RUNNING: set = set()   # 🧹 گروه‌هایی که پاکسازی‌شان همین حالا در جریان است
+CLEANUP_CHUNK = 25              # چند حذف هم‌زمان
+CLEANUP_PAUSE = 0.3             # مکثِ کوتاه بینِ دسته‌ها
+CLEANUP_MAX_IDS = 1500          # سقفِ هر اجرا — محافظِ ضدِ حلقهٔ طولانی
+
+
+async def _cleanup_del_one(ctx, chat_id, mid):
+    """یک حذف؛ اگر تلگرام گفت «زیاد شد»، یک‌بار صبر و دوباره."""
+    for _ in range(2):
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+            return
+        except RetryAfter as e:
+            await asyncio.sleep(float(getattr(e, "retry_after", 1.0)) + 0.5)
+        except Exception:
+            return   # وجود ندارد / قدیمی‌تر از ۴۸ ساعت / اجازهٔ حذف نداریم
+
+
 async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id: int | None = None,
-                        keep: set | None = None):
-    """🧹 پاک‌کردنِ پیام‌های بینِ دو آی‌دی — به‌جز آن‌هایی که در keep آمده‌اند
-    (مثلِ پیامِ «📜 لیست نقش‌های سناریو» که باید سرِ جایش بماند)."""
+                        keep: set | None = None, g=None):
+    """🧹 پاک‌کردنِ پیام‌های بینِ دو شماره — به‌جز keep (مثلِ «📜 لیست نقش‌های سناریو»).
+    سقف همیشه یک شمارهٔ واقعی است (پیامِ همین حالا)، نه «+۵۰۰۰»؛ و شماره‌هایی که
+    قبلاً رسیدگی شده‌اند دوباره گشته نمی‌شوند — پس فشارِ دومِ دکمه آنی تمام می‌شود.
+    با قفلِ هر گروه، فشارِ پشتِ‌هم کارها را روی هم تلنبار نمی‌کند."""
+    if chat_id in _CLEANUP_RUNNING:
+        return
+    _CLEANUP_RUNNING.add(chat_id)
     keep = {int(k) for k in (keep or set()) if k}
     try:
-
-        if stop_message_id:
-            limit = stop_message_id
-        else:
-
-            limit = from_message_id + 5000
-
-        batch = []
-        for msg_id in range(from_message_id + 1, limit):
-            if msg_id in keep:
-                continue
-            batch.append(msg_id)
-            if len(batch) == 100:  # هر 100 تا
-                for mid in batch:
-                    try:
-                        await ctx.bot.delete_message(chat_id, mid)
-                    except Exception:
-                        pass
-                batch = []
-                await asyncio.sleep(1)  # جلوگیری از FloodLimit
-
-        # باقی‌مانده
-        for mid in batch:
-            try:
-                await ctx.bot.delete_message(chat_id, mid)
-            except Exception:
-                pass
-
+        limit = (int(stop_message_id) if stop_message_id
+                 else int(from_message_id) + CLEANUP_MAX_IDS)
+        start = int(from_message_id) + 1
+        done_upto = int(getattr(g, "cleanup_upto", 0) or 0) if g is not None else 0
+        if done_upto >= start:
+            start = done_upto + 1
+        ids = [i for i in range(start, limit) if i not in keep][:CLEANUP_MAX_IDS]
+        for i in range(0, len(ids), CLEANUP_CHUNK):
+            await asyncio.gather(*[_cleanup_del_one(ctx, chat_id, m)
+                                   for m in ids[i:i + CLEANUP_CHUNK]])
+            await asyncio.sleep(CLEANUP_PAUSE)
+        if g is not None:
+            g.cleanup_upto = max(done_upto, limit - 1)
+            store.save()
     except Exception as e:
         print(f"⚠️ cleanup_after error: {e}")
+    finally:
+        _CLEANUP_RUNNING.discard(chat_id)
 
 
 
@@ -6983,6 +6994,7 @@ async def start_night(ctx, chat_id, g):
     g.night_baz_sel = {}
     g.night_baz_targets = []
     g.night_pm_msgs = {}
+    g.night_pm_extra = []
     g.night_alive_at_start = len(_alive_seats(g))
     store.save()
 
@@ -7230,6 +7242,13 @@ async def end_night(ctx, chat_id, g):
                 await ctx.bot.edit_message_reply_markup(chat_id=u, message_id=mid, reply_markup=None)
             except Exception:
                 pass
+    for _u, _mid in list(getattr(g, "night_pm_extra", None) or []):
+        try:
+            await ctx.bot.edit_message_text(chat_id=_u, message_id=_mid,
+                                            text="⏰ شب تمام شد — فرصتِ این اکت گذشت.")
+        except Exception:
+            pass
+    g.night_pm_extra = []
     g.night_pm_msgs = {}
     g.night_sel = {}
     g.night_doc_sel = {}
@@ -10885,7 +10904,11 @@ async def _hb_open_shadow(ctx, chat_id, g):
 
 
 async def _hb_open_mafia(ctx, chat_id, g):
-    if "hb_mafia_opened" in (g.night_done or set()):
+    # 🔁 تا وقتی شاتِ امشب زده نشده، هر بار که صدا زده شویم منوی شات دوباره برای
+    #    تصمیم‌گیرِ فعلی می‌رود (مثلاً سایه که تازه اکتِ خودش را زده). اگر شات زده
+    #    شده باشد، دیگر کاری نداریم.
+    _again = "hb_mafia_opened" in (g.night_done or set())
+    if _again and "mafia" in (g.night_done or set()):
         return
     g.night_done.add("hb_mafia_opened")
     store.save()
@@ -10894,21 +10917,24 @@ async def _hb_open_mafia(ctx, chat_id, g):
         await _room_set_locked(ctx, g, False)
     except Exception:
         pass
-    # 🧬 بافتِ هانیبال
+    # 🧬 بافتِ هانیبال — پرامپتش فقط بارِ اول می‌رود
     hb = _find_seat_by_role(g, _R_HB_HANIBAL)
-    if hb is None:
-        g.night_done.add("bond")
-    else:
-        huid = g.seats[hb][0]
-        targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
-        m = await _safe_pm(ctx, huid, "🧬 امشب خودت را به چه کسی بافت می‌زنی؟",
-                           _kb_night_seats(targets, g, "hb_bond_",
-                                           selected=g.night_sel.get(huid), confirm_cb="hb_bond_ok"))
-        if m:
-            g.night_pm_msgs[huid] = m.message_id
-    # 🔫 تصمیم‌گیرِ شات: رئیس → سایه → هانیبال → جذب‌شده
+    if not _again:
+        if hb is None:
+            g.night_done.add("bond")
+        else:
+            huid = g.seats[hb][0]
+            targets = [s for s in _alive_seats(g) if s not in _mafia_seats(g, alive_only=True)]
+            m = await _safe_pm(ctx, huid, "🧬 امشب خودت را به چه کسی بافت می‌زنی؟",
+                               _kb_night_seats(targets, g, "hb_bond_",
+                                               selected=g.night_sel.get(huid), confirm_cb="hb_bond_ok"))
+            if m:
+                g.night_pm_msgs[huid] = m.message_id
+    # 🔫 ترتیبِ تصمیم‌گیرِ شات: رئیس‌مافیا → سایه → هانیبال → هر مافیای دیگر (جذب‌شده).
+    #    رئیس که نباشد، شات دستِ سایه است و سایه دو اکته می‌شود (سایه + شات)؛
+    #    رئیس و سایه که نباشند، دستِ هانیبال و او دو اکته می‌شود (بافت + شات).
     boss = _find_seat_by_role(g, _R_HB_BOSS)
-    decider = (boss or _find_seat_by_role(g, _R_HB_SHADOW) or hb)
+    decider = boss or _find_seat_by_role(g, _R_HB_SHADOW) or hb
     if decider is None:
         converted = sorted(_mafia_seats(g, alive_only=True))
         decider = converted[0] if converted else None
@@ -10919,11 +10945,22 @@ async def _hb_open_mafia(ctx, chat_id, g):
         rows = [[InlineKeyboardButton("🔫 شات", callback_data="hb_act_shot")]]
         if decider == boss and not g.nato_used:
             rows.append([InlineKeyboardButton("🕵️ ناتویی", callback_data="hb_act_nato")])
-        m = await _safe_pm(ctx, g.seats[decider][0],
+        _duid = g.seats[decider][0]
+        _old_pm = (g.night_pm_msgs or {}).get(_duid)
+        m = await _safe_pm(ctx, _duid,
                            f"🌙 شب {g.night_number}\nاکت مافیا را انتخاب کن:",
                            InlineKeyboardMarkup(rows))
         if m:
-            g.night_pm_msgs[g.seats[decider][0]] = m.message_id
+            if _old_pm and _old_pm != m.message_id:
+                # 🧬 هانیبال دو اکته است (بافت + شات) — پرامپتِ اولش هم آخرِ شب بسته شود
+                g.night_pm_extra = list(getattr(g, "night_pm_extra", None) or []) + [[_duid, _old_pm]]
+            g.night_pm_msgs[_duid] = m.message_id
+        else:
+            await _night_report(
+                ctx, g,
+                f"⚠️ پیویِ تصمیم‌گیرِ شات ({decider}. "
+                f"{escape(g.seats[decider][1], quote=False)}) بسته بود — "
+                f"شات باز نشد؛ با «اکتِ دستی» بزن.")
     store.save()
     await _hb_check_open_citizens(ctx, chat_id, g)
 
@@ -20777,16 +20814,20 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "cleanup" and uid == g.god_id:
-        if g.last_seating_msg_id:
-            stop_id = g.shuffle_prompt_msg_id or None
-            # 📜 پیامِ لیستِ نقش‌های سناریو نباید پاک شود
-            _keep = {getattr(g, "last_roles_msg_id", None)}
-            asyncio.create_task(
-                cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep)
-            )
-            await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
-        else:
+        if not g.last_seating_msg_id:
             await ctx.bot.send_message(chat, "⚠️ لیست بازیکنان مشخص نیست، پاکسازی انجام نشد.")
+            return
+        if chat in _CLEANUP_RUNNING:
+            await safe_q_answer(q, "🧹 همین حالا در حال پاکسازی است…", show_alert=True)
+            return
+        _m = await ctx.bot.send_message(chat, "🧹 درحال پاکسازی پیام‌ها (در پس‌زمینه)...")
+        # 🎯 سقفِ واقعی: پیامِ همین حالا — بالاتر از آن اصلاً پیامی وجود ندارد
+        stop_id = g.shuffle_prompt_msg_id or _m.message_id
+        # 📜 پیامِ لیستِ نقش‌های سناریو و خودِ لیست نباید پاک شوند
+        _keep = {getattr(g, "last_roles_msg_id", None), _m.message_id, g.last_seating_msg_id}
+        asyncio.create_task(
+            cleanup_after(ctx, chat, g.last_seating_msg_id, stop_id, keep=_keep, g=g)
+        )
         return
 
 
