@@ -5905,7 +5905,7 @@ def kb_choose_scenarios_for(size: int) -> InlineKeyboardMarkup:
 _CLEANUP_RUNNING: set = set()   # 🧹 گروه‌هایی که پاکسازی‌شان همین حالا در جریان است
 CLEANUP_CHUNK = 25              # چند حذف هم‌زمان
 CLEANUP_PAUSE = 0.3             # مکثِ کوتاه بینِ دسته‌ها
-CLEANUP_MAX_IDS = 1500          # سقفِ هر اجرا — محافظِ ضدِ حلقهٔ طولانی
+CLEANUP_MAX_IDS = 5000          # سقفِ هر اجرا — محافظ، ولی به‌قدری بالا که چیزی جا نماند
 
 
 async def _cleanup_del_one(ctx, chat_id, mid):
@@ -5944,7 +5944,9 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
         done_upto = int(getattr(g, "cleanup_upto", 0) or 0) if g is not None else 0
         if done_upto >= start:
             start = done_upto + 1
-        ids = [i for i in range(start, limit) if i not in keep][:CLEANUP_MAX_IDS]
+        _all_ids = [i for i in range(start, limit) if i not in keep]
+        ids = _all_ids[:CLEANUP_MAX_IDS]
+        _cut = len(_all_ids) - len(ids)
         _cleanup_tally = {}
         for i in range(0, len(ids), CLEANUP_CHUNK):
             _res = await asyncio.gather(*[_cleanup_del_one(ctx, chat_id, m)
@@ -5952,16 +5954,22 @@ async def cleanup_after(ctx, chat_id: int, from_message_id: int, stop_message_id
             for _r in _res:
                 _cleanup_tally[_r] = _cleanup_tally.get(_r, 0) + 1
             await asyncio.sleep(CLEANUP_PAUSE)
-        # 📋 اگر حذفی به‌خاطرِ دسترسی یا خطای ناشناخته رد شد، گاد باید بداند
-        _bad = {k: v for k, v in _cleanup_tally.items() if k not in ("ok", "notfound")}
-        if _bad and g is not None:
+        # 📋 گزارشِ همیشگی به پیویِ گاد: دقیقاً چه محدوده‌ای گشته شد و نتیجه چه بود.
+        #    بدونِ این، پیامی که «بیرونِ محدوده» است هیچ خطایی نمی‌دهد و بی‌صدا می‌ماند.
+        if g is not None:
             _ok = _cleanup_tally.get("ok", 0)
-            _lines = [f"🧹 پاکسازی: {_ok} پیام پاک شد."]
-            for _k, _v in _bad.items():
+            _nf = _cleanup_tally.get("notfound", 0)
+            _lines = [f"🧹 پاکسازی: محدودهٔ {start} تا {limit} "
+                      f"({len(ids)} شماره) — {_ok} پاک شد، {_nf} پیامی نبود."]
+            if _cut:
+                _lines.append(f"✂️ {_cut} شماره از سقفِ {CLEANUP_MAX_IDS} جا ماند — دوباره «پاکسازی» را بزن.")
+            for _k, _v in _cleanup_tally.items():
+                if _k in ("ok", "notfound"):
+                    continue
                 if _k == "rights":
-                    _lines.append(f"⛔ {_v} پیام پاک نشد — بات اجازهٔ «حذف پیام‌ها» را ندارد.")
+                    _lines.append(f"⛔ {_v} پیام — اجازهٔ «حذف پیام‌ها» را ندارم.")
                 else:
-                    _lines.append(f"⚠️ {_v} پیام پاک نشد — خطای تلگرام: {_k}")
+                    _lines.append(f"⚠️ {_v} پیام — خطای تلگرام: {_k}")
             await _night_report(ctx, g, chr(10).join(_lines))
         if notice_id:
             # 🧹 پیامِ «درحال پاکسازی…» آخرِ کار خودش هم می‌رود
