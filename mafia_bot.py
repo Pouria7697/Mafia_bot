@@ -24889,6 +24889,14 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if await _can_unban(ctx, chat_id, uid):
             await _god_unban_from_reply(ctx, msg, by_uid=uid, arg=_uarg)
         return
+    # 🔄 «برد مافیا ۵۷» بدونِ ریپلای — وقتی لیستِ نتیجه پاک شده باشد.
+    #    مسیرِ ریپلایش در name_reply است؛ اینجا فقط حالتِ «با شماره» را می‌گیریم
+    #    تا متنِ عادیِ «برد شهر» وسطِ بازی دزدیده نشود.
+    if _is_full_admin(uid):
+        _fw = _parse_fix_winner_text(text)
+        if _fw is not None and _fw[2] is not None:
+            await _fix_winner_from_msg(ctx, msg, _fw)
+            return
 
     # 🗳 ثبت رأی — فقط «دولایک با هر رنگ» یا «..»؛ ملاک زمان = ساعت تلگرام
     # (قبل از هر شرط دیگری، تا هیچ هندلری پیامِ رأی را ندزدد)
