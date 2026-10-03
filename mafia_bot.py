@@ -2171,6 +2171,27 @@ _RESULT_RE = re.compile(r"^🏆\s*نتیجه بازی:.*$", re.M)
 _FIXW_PEND: dict[str, dict] = {}   # 📌 متنِ لیستِ نتیجه تا لحظهٔ تأیید
 
 
+def _forward_origin(m):
+    """📨 اگر این پیام فورواردِ یک پستِ کانال است: (آیدیِ کانال، شمارهٔ پیام).
+    هم شکلِ قدیمِ تلگرام (forward_from_chat) هم شکلِ تازه (forward_origin)."""
+    try:
+        _o = getattr(m, "forward_origin", None)
+        _c = getattr(_o, "chat", None) if _o is not None else None
+        _i = getattr(_o, "message_id", None) if _o is not None else None
+        if _c is not None and _i:
+            return int(_c.id), int(_i)
+    except Exception:
+        pass
+    try:
+        _c = getattr(m, "forward_from_chat", None)
+        _i = getattr(m, "forward_from_message_id", None)
+        if _c is not None and _i:
+            return int(_c.id), int(_i)
+    except Exception:
+        pass
+    return None, None
+
+
 def _parse_fix_winner_text(text):
     """«برد مافیا» / «برد شهر کلین‌شیت ۱۲» → (ساید، کلین‌شیت، شمارهٔ رویداد یا None)."""
     t = " ".join(str(text or "").replace(chr(0x200C), " ").split()).translate(_FA_DIGITS)
@@ -2191,24 +2212,34 @@ async def _fix_winner_from_msg(ctx, msg, parsed):
     """🔄 شمارهٔ رویداد را از ریپلای (یا از خودِ متن) پیدا می‌کند و پیش‌نمایش می‌دهد."""
     side, clean, ev = parsed
     rt = getattr(msg, "reply_to_message", None)
-    _html, _mid = None, None
+    _pend = {}
     if rt is not None:
         if ev is None:
             ev = _event_num_in_text(getattr(rt, "text", None) or getattr(rt, "caption", None))
-        _mid = rt.message_id
         try:
-            _html = rt.text_html      # 🔗 با لینکِ اسم‌ها، تا ویرایش خرابش نکند
+            _pend["html"] = rt.text_html      # 🔗 با لینکِ اسم‌ها، تا ویرایش خرابش نکند
         except Exception:
-            _html = None
+            pass
+        # ✏️ فقط پیامِ خودِ بات قابلِ ویرایش است (فورواردِ خودت را نمی‌تواند عوض کند)
+        try:
+            if rt.from_user is not None and rt.from_user.id == ctx.bot.id:
+                _pend["mid"] = rt.message_id
+        except Exception:
+            pass
+        # 📨 فورواردِ پستِ کانال: نشانیِ خودِ آن پست را هم داریم
+        _fch, _fmid = _forward_origin(rt)
+        if _fch and _fmid:
+            _pend["fch"], _pend["fmid"] = _fch, _fmid
     if ev is None:
         await msg.reply_text(
-            "ℹ️ شمارهٔ رویداد پیدا نشد — روی همان «لیستِ نتیجهٔ بازی» ریپلای کن، "
+            "ℹ️ شمارهٔ رویداد پیدا نشد — روی همان «لیستِ نتیجهٔ بازی» ریپلای کن "
+            "(یا پستِ کانال را در گروه فوروارد کن و رویش ریپلای بزن)، "
             "یا شماره را خودت بنویس: «برد مافیا ۱۲»")
         return
-    await _fix_winner_prompt(ctx, msg, side, clean, ev, _mid, _html)
+    await _fix_winner_prompt(ctx, msg, side, clean, ev, _pend)
 
 
-async def _fix_winner_prompt(ctx, msg, side, clean, event_num, list_mid=None, list_html=None):
+async def _fix_winner_prompt(ctx, msg, side, clean, event_num, pend=None):
     """🔄 پیش‌نمایشِ اصلاحِ برنده + دکمهٔ تأیید."""
     led = load_game_ledger()
     if led is None:
@@ -2228,8 +2259,8 @@ async def _fix_winner_prompt(ctx, msg, side, clean, event_num, list_mid=None, li
     n_up = sum(1 for r in rows if r.get("s") == side)
     n_dn = sum(1 for r in rows if r.get("w"))
     _key = f"{msg.chat.id}:{int(event_num)}"
-    if list_mid and list_html:
-        _FIXW_PEND[_key] = {"mid": int(list_mid), "html": list_html}
+    if pend:
+        _FIXW_PEND[_key] = dict(pend)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ اصلاح کن",
                              callback_data=f"fixw_ok_{int(event_num)}_"
@@ -2349,29 +2380,33 @@ async def _fix_winner_apply(ctx, q, chat_id, event_num, side, clean):
                 n_hist = 0
     except Exception as _he:
         print("❌ fix winner history:", _he)
-    # 📌 خطِ نتیجه در همان لیستِ پین‌شده هم اصلاح شود (اگر تلگرام اجازه بدهد)
+    # 📌 خطِ نتیجه در همان لیستِ پین‌شده هم اصلاح شود (اگر پیامِ خودِ بات باشد)
     _msg_note = ""
-    _pend = _FIXW_PEND.pop(f"{chat_id}:{int(event_num)}", None)
-    if _pend:
-        _m = _RESULT_RE.search(_pend["html"])
-        if _m:
-            _line = _fix_result_line(_m.group(0), side, clean)
-            try:
-                await ctx.bot.edit_message_text(
-                    chat_id=chat_id, message_id=_pend["mid"],
-                    text=_RESULT_RE.sub(lambda _mm: _line, _pend["html"], count=1),
-                    parse_mode="HTML", disable_web_page_preview=True)
-            except Exception as _ee:
-                print("⚠️ fix winner edit:", _ee)
-                _msg_note = chr(10) + ("⚠️ متنِ لیست ویرایش نشد (پیام قدیمی است) — "
-                                       "دستی اصلاحش کن.")
-        else:
-            _msg_note = chr(10) + "ℹ️ در آن پیام خطِ «نتیجه بازی» نبود، پس ویرایش نشد."
+    _pend = _FIXW_PEND.pop(f"{chat_id}:{int(event_num)}", None) or {}
+    _html = _pend.get("html")
+    _m = _RESULT_RE.search(_html) if _html else None
+    if _pend.get("mid") and _m:
+        _line = _fix_result_line(_m.group(0), side, clean)
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id, message_id=_pend["mid"],
+                text=_RESULT_RE.sub(lambda _mm: _line, _html, count=1),
+                parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as _ee:
+            print("⚠️ fix winner edit:", _ee)
+            _msg_note = chr(10) + ("⚠️ متنِ لیستِ قبلی ویرایش نشد (پیام قدیمی است) — "
+                                   "دستی اصلاحش کن.")
     # 📢 نسخهٔ آرشیوِ کانال هم همان‌جا اصلاح می‌شود
     try:
-        _msg_note += await _fix_winner_channel(ctx, q, ent, event_num, side, clean)
+        _msg_note += await _fix_winner_channel(ctx, q, ent, event_num, side, clean, _pend)
     except Exception as _ce:
         print("⚠️ fix winner channel:", _ce)
+    # 🧾 لیستِ تازه با ساید + کارنامهٔ امتیاز، وسطِ گروه و پین
+    try:
+        _msg_note += await _fix_winner_republish(ctx, chat_id, ent, event_num,
+                                                 side, clean, stats, _pend)
+    except Exception as _re:
+        print("⚠️ fix winner republish:", _re)
     try:
         await q.edit_message_text(
             f"✅ برندهٔ رویداد {event_num} شد «برد {side}»"
@@ -2394,11 +2429,26 @@ def _fix_result_line(old_line, side, clean):
     return _l + " ✏️ اصلاح‌شده"
 
 
-async def _fix_winner_channel(ctx, q, ent, event_num, side, clean):
+async def _fix_winner_channel(ctx, q, ent, event_num, side, clean, pend=None):
     """📢 اصلاحِ خطِ نتیجه در نسخهٔ آرشیوِ کانال — یک خط گزارش برمی‌گرداند.
-    متنِ آن پیام دستِ ما نیست، پس یک بار به پیویِ خودِ مدیر فوروارد می‌شود تا
-    خوانده شود و همان لحظه پاک. بازی‌های قدیمی نشانیِ آرشیو ندارند: برای آن‌ها
-    یادداشتِ اصلاح زیرِ کانال گذاشته می‌شود."""
+    سه راه، به همین ترتیب: فورواردِ پستِ کانال در گروه (متن و نشانی هر دو
+    دستمان است)، نشانیِ ثبت‌شده در سند (متن را با یک فورواردِ موقت به پیویِ
+    خودِ مدیر می‌خوانیم و همان لحظه پاک می‌کنیم)، و اگر هیچ‌کدام نبود یک
+    یادداشتِ اصلاح زیرِ کانال."""
+    pend = pend or {}
+    _fch, _fmid, _fhtml = pend.get("fch"), pend.get("fmid"), pend.get("html")
+    _fm = _RESULT_RE.search(_fhtml) if (_fch and _fmid and _fhtml) else None
+    if _fm:
+        try:
+            _nl = _fix_result_line(_fm.group(0), side, clean)
+            await ctx.bot.edit_message_text(
+                chat_id=int(_fch), message_id=int(_fmid),
+                text=_RESULT_RE.sub(lambda _mm: _nl, _fhtml, count=1),
+                parse_mode="HTML", disable_web_page_preview=True)
+            return chr(10) + "📢 پستِ کانال هم اصلاح شد."
+        except Exception as _e:
+            print("⚠️ fix winner fwd edit:", _e)
+            return chr(10) + "⚠️ پستِ کانال ویرایش نشد — دستی اصلاحش کن."
     _cc, _cm = ent.get("cc"), list(ent.get("cm") or [])
     if not (_cc and _cm):
         _ch = get_archive_channel()
@@ -2447,6 +2497,75 @@ async def _fix_winner_channel(ctx, q, ent, event_num, side, clean):
     if _rerr:
         return chr(10) + "⚠️ نسخهٔ کانال خوانده نشد — دستی اصلاحش کن."
     return chr(10) + "ℹ️ در لیستِ کانال خطِ «نتیجه بازی» پیدا نشد."
+
+
+_FIXW_MARK = {"مافیا": "◾️", "مستقل": "♦️"}
+
+
+async def _fix_winner_republish(ctx, chat_id, ent, event_num, side, clean,
+                                stats=None, pend=None):
+    """🧾 بعد از اصلاح: لیستِ تازه وسطِ گروه + پین، و کارنامهٔ امتیازِ اصلاح‌شده.
+    اگر متنِ لیستِ واقعی دستمان باشد (ریپلای روی لیست یا فورواردِ پستِ کانال)
+    همان با نقش‌ها دوباره فرستاده می‌شود؛ وگرنه از سند بازسازی می‌شود و جای
+    نقش، ساید می‌آید — چون سندِ رویداد نقش‌ها را ذخیره نمی‌کند."""
+    rows = ent.get("p", []) or []
+    stats = stats if stats is not None else (load_player_stats() or {})
+
+    def _nm(r):
+        _p = stats.get(str(r.get("u"))) or {}
+        return escape(_p.get("name") or "بازیکن", quote=False)
+
+    _html = (pend or {}).get("html")
+    _hm = _RESULT_RE.search(_html) if _html else None
+    if _hm:
+        # 📋 همان لیستِ اصل، فقط با خطِ نتیجهٔ درست
+        _line = _fix_result_line(_hm.group(0), side, clean)
+        _txt = _RESULT_RE.sub(lambda _mm: _line, _html, count=1)
+        _kind = ""
+    elif rows:
+        lines = [f"🧾 <b>لیستِ اصلاح‌شدهٔ رویداد {event_num}</b>",
+                 f"░⚜️📅 {ent.get('d') or '—'}", ""]
+        for i, r in enumerate(rows, 1):
+            _s = r.get("s") or "شهر"
+            lines.append(f"░⚜️{_FIXW_MARK.get(_s, '◽️')}{i}- "
+                         f"<a href='tg://user?id={r.get('u')}'>{_nm(r)}</a>"
+                         f"{medal_tag(r.get('u'))} ⇦ {_s}")
+        lines += ["", _fix_result_line(None, side, clean)]
+        _txt = chr(10).join(lines)
+        _kind = " (جای نقش، ساید)"
+    else:
+        return ""
+    _note = ""
+    try:
+        _m = await ctx.bot.send_message(chat_id, _txt, parse_mode="HTML",
+                                        disable_web_page_preview=True)
+        _note = chr(10) + f"🧾 لیستِ تازه در گروه آمد{_kind}."
+        try:
+            await ctx.bot.pin_chat_message(chat_id=chat_id, message_id=_m.message_id)
+            _note = chr(10) + f"🧾 لیستِ تازه در گروه آمد و پین شد{_kind}."
+        except Exception as _pe:
+            print("⚠️ fix winner pin:", _pe)
+            _note += chr(10) + "⚠️ پین نشد — دسترسیِ پین را به بات بده."
+    except Exception as _se:
+        print("⚠️ fix winner list send:", _se)
+        return chr(10) + "⚠️ لیستِ تازه در گروه فرستاده نشد."
+    # 🏅 کارنامهٔ امتیاز — در سند فقط مجموعِ هر نفر هست، نه تفکیکِ اجزا
+    if any(float(r.get("sc") or 0) > 0 for r in rows):
+        _sc_lines = [f"🏅 <b>امتیازِ اصلاح‌شدهٔ رویداد {event_num}</b>"]
+        for i, r in enumerate(rows, 1):
+            _s = r.get("s") or "شهر"
+            _sc_lines.append(f"{_FIXW_MARK.get(_s, '◽️')}{i}- {_nm(r)} — "
+                             f"{_sc_fmt(float(r.get('sc') or 0))}")
+        _sc_lines.append("")
+        _sc_lines.append(f"(سهمِ برد {_sc_fmt(WIN_SCORE_PTS)} جابه‌جا شد؛ بقیهٔ "
+                         f"امتیازها همان قبلی است)")
+        try:
+            await ctx.bot.send_message(chat_id, chr(10).join(_sc_lines), parse_mode="HTML")
+            _note += chr(10) + "🏅 کارنامهٔ امتیاز هم آمد."
+        except Exception as _ce:
+            print("⚠️ fix winner score send:", _ce)
+            _note += chr(10) + "⚠️ کارنامهٔ امتیاز فرستاده نشد."
+    return _note
 
 
 async def handle_fix_winner_callback(update, ctx):
