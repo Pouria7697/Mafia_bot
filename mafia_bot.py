@@ -24897,6 +24897,12 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if _fw is not None and _fw[2] is not None:
             await _fix_winner_from_msg(ctx, msg, _fw)
             return
+        # 🗑 «حذف رویداد ۵» هم بی‌ریپلای کار کند — راهنمای خودِ بات همین را
+        #    می‌گوید، ولی تا حالا فقط در مسیرِ ریپلای بود.
+        _ev_del = _parse_del_event_text(text)
+        if _ev_del is not None:
+            await _del_event_prompt(ctx, msg, _ev_del)
+            return
 
     # 🗳 ثبت رأی — فقط «دولایک با هر رنگ» یا «..»؛ ملاک زمان = ساعت تلگرام
     # (قبل از هر شرط دیگری، تا هیچ هندلری پیامِ رأی را ندزدد)
