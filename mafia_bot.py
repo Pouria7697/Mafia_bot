@@ -2165,7 +2165,7 @@ async def handle_del_event_callback(update, ctx):
 WIN_SCORE_PTS = 25.0     # 🏅 سهمِ «برد» در امتیاز (همان ۲۵ در _score_compute)
 _FIXW_SIDES = {"شهر": "c", "مافیا": "m", "مستقل": "i"}
 _FIXW_CODES = {v: k for k, v in _FIXW_SIDES.items()}
-_FIXW_RE = re.compile(r"^(?:برد|برنده)\s+(شهر|مافیا|مستقل)(\s+کلین\s*شیت)?(?:\s+(\d{1,7}))?$")
+_FIXW_RE = re.compile(r"^(?:برد|برنده)\s*(شهر|مافیا|مستقل)(\s+کلین\s*شیت)?(?:\s+(\d{1,7}))?$")
 _EVNUM_RE = re.compile(r"شماره\s*رویداد\s*:?\s*(\d{1,7})")
 _RESULT_RE = re.compile(r"^🏆\s*نتیجه بازی:.*$", re.M)
 _FIXW_PEND: dict[str, dict] = {}   # 📌 متنِ لیستِ نتیجه تا لحظهٔ تأیید
