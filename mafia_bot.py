@@ -287,6 +287,8 @@ class GameState:
         self.status_counts = self.status_counts or {"citizen": 0, "mafia": 0}
         self.status_mode = False
         self.preview_uid_to_role = getattr(self, "preview_uid_to_role", None)
+        # 🎲 تصمیمِ سایدِ همین بازی (جایزهٔ دو طلا) — برای رندومِ مجدد
+        self.side_pick_mem = getattr(self, "side_pick_mem", None)
         self.shuffle_repeats = getattr(self, "shuffle_repeats", None) 
         self.chaos_mode = False
         self.chaos_selected = set()
@@ -1976,6 +1978,26 @@ def _stat_dec(p: dict, key: str, amt=1, fl=False):
         pass
 
 
+def _ledger_set_archive(chat_id, event_num, ch_id, mids):
+    """📌 نشانیِ پیامِ آرشیو را در سندِ رویداد می‌نویسد — تا «اصلاحِ برنده» بعداً
+    بتواند نسخهٔ کانال را هم عوض کند."""
+    try:
+        if not (ch_id and mids) or event_num is None:
+            return False
+        led = load_game_ledger()
+        if led is None:
+            return False
+        ent = (led.get(str(chat_id)) or {}).get(str(int(event_num)))
+        if not ent:
+            return False
+        ent["cc"] = int(ch_id)
+        ent["cm"] = [int(m) for m in mids][:4]
+        return bool(save_game_ledger(led))
+    except Exception as e:
+        print("⚠️ ledger archive ids:", e)
+        return False
+
+
 async def _del_event_prompt(ctx, msg, event_num: int):
     """🗑 پیش‌نمایش و دکمهٔ تأیید برای حذفِ آمار/امتیاز/تاریخچهٔ یک رویدادِ همین گروه."""
     led = load_game_ledger()
@@ -2134,6 +2156,325 @@ async def handle_del_event_callback(update, ctx):
         except Exception:
             return
         await _del_event_apply(ctx, q, q.message.chat.id, _ev)
+
+
+# ─── 🔄 اصلاحِ سایدِ برنده — «برد مافیا» با ریپلای روی لیستِ نتیجه ──────────────
+#  گاد اشتباهی برندهٔ دیگری زده؟ مدیرِ اصلی روی همان لیستِ بسته‌شده ریپلای می‌کند
+#  و می‌نویسد «برد مافیا». بردها، سهمِ ۲۵ امتیازیِ برد و «بازی من»ِ همه اصلاح
+#  می‌شود. 📌 روی بازی‌های قدیمی هم کار می‌کند، چون سندِ رویداد از قبل ذخیره بوده.
+WIN_SCORE_PTS = 25.0     # 🏅 سهمِ «برد» در امتیاز (همان ۲۵ در _score_compute)
+_FIXW_SIDES = {"شهر": "c", "مافیا": "m", "مستقل": "i"}
+_FIXW_CODES = {v: k for k, v in _FIXW_SIDES.items()}
+_FIXW_RE = re.compile(r"^(?:برد|برنده)\s+(شهر|مافیا|مستقل)(\s+کلین\s*شیت)?(?:\s+(\d{1,7}))?$")
+_EVNUM_RE = re.compile(r"شماره\s*رویداد\s*:?\s*(\d{1,7})")
+_RESULT_RE = re.compile(r"^🏆\s*نتیجه بازی:.*$", re.M)
+_FIXW_PEND: dict[str, dict] = {}   # 📌 متنِ لیستِ نتیجه تا لحظهٔ تأیید
+
+
+def _parse_fix_winner_text(text):
+    """«برد مافیا» / «برد شهر کلین‌شیت ۱۲» → (ساید، کلین‌شیت، شمارهٔ رویداد یا None)."""
+    t = " ".join(str(text or "").replace(chr(0x200C), " ").split()).translate(_FA_DIGITS)
+    m = _FIXW_RE.match(t)
+    if not m:
+        return None
+    return m.group(1), bool(m.group(2)), (int(m.group(3)) if m.group(3) else None)
+
+
+def _event_num_in_text(text):
+    """شمارهٔ رویداد را از متنِ لیستِ نتیجه بیرون می‌کشد."""
+    t = str(text or "").replace(chr(0x200C), " ").translate(_FA_DIGITS)
+    m = _EVNUM_RE.search(t)
+    return int(m.group(1)) if m else None
+
+
+async def _fix_winner_from_msg(ctx, msg, parsed):
+    """🔄 شمارهٔ رویداد را از ریپلای (یا از خودِ متن) پیدا می‌کند و پیش‌نمایش می‌دهد."""
+    side, clean, ev = parsed
+    rt = getattr(msg, "reply_to_message", None)
+    _html, _mid = None, None
+    if rt is not None:
+        if ev is None:
+            ev = _event_num_in_text(getattr(rt, "text", None) or getattr(rt, "caption", None))
+        _mid = rt.message_id
+        try:
+            _html = rt.text_html      # 🔗 با لینکِ اسم‌ها، تا ویرایش خرابش نکند
+        except Exception:
+            _html = None
+    if ev is None:
+        await msg.reply_text(
+            "ℹ️ شمارهٔ رویداد پیدا نشد — روی همان «لیستِ نتیجهٔ بازی» ریپلای کن، "
+            "یا شماره را خودت بنویس: «برد مافیا ۱۲»")
+        return
+    await _fix_winner_prompt(ctx, msg, side, clean, ev, _mid, _html)
+
+
+async def _fix_winner_prompt(ctx, msg, side, clean, event_num, list_mid=None, list_html=None):
+    """🔄 پیش‌نمایشِ اصلاحِ برنده + دکمهٔ تأیید."""
+    led = load_game_ledger()
+    if led is None:
+        await msg.reply_text("⚠️ سندِ رویدادها از گیست خوانده نشد — کمی بعد دوباره امتحان کن.")
+        return
+    ent = (led.get(str(msg.chat.id)) or {}).get(str(int(event_num)))
+    if not ent:
+        await msg.reply_text(
+            f"ℹ️ برای رویداد {event_num} در این گروه سندی نیست — یا حذف شده، "
+            f"یا مالِ قبل از ثبتِ سند است.")
+        return
+    rows = ent.get("p", []) or []
+    old = next((r.get("s") for r in rows if r.get("w")), None)
+    if old == side:
+        await msg.reply_text(f"ℹ️ برندهٔ رویداد {event_num} همین حالا هم «{side}» است.")
+        return
+    n_up = sum(1 for r in rows if r.get("s") == side)
+    n_dn = sum(1 for r in rows if r.get("w"))
+    _key = f"{msg.chat.id}:{int(event_num)}"
+    if list_mid and list_html:
+        _FIXW_PEND[_key] = {"mid": int(list_mid), "html": list_html}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ اصلاح کن",
+                             callback_data=f"fixw_ok_{int(event_num)}_"
+                                           f"{_FIXW_SIDES[side]}_{1 if clean else 0}"),
+        InlineKeyboardButton("❌ بی‌خیال", callback_data="fixw_no"),
+    ]])
+    _dt = ent.get("d") or "—"
+    _cl = " (کلین‌شیت)" if clean else ""
+    await msg.reply_text(chr(10).join([
+        f"🔄 اصلاحِ برندهٔ <b>رویداد {event_num}</b>؟",
+        f"📅 {_dt} | 👥 {len(rows)} بازیکن",
+        f"🏆 ثبت‌شده: برد {old or '—'} ← جدید: برد {side}{_cl}",
+        f"🔺 {n_up} نفر برنده می‌شوند | 🔻 {n_dn} نفر بازنده",
+        f"بردها، امتیازِ برد ({_sc_fmt(WIN_SCORE_PTS)}) و «بازی من» اصلاح می‌شود "
+        f"(تعدادِ بازی‌ها دست نمی‌خورد).",
+        "(اگر با این بازی فصلی بسته شده باشد، مدال‌هایش عوض نمی‌شود)",
+    ]), parse_mode="HTML", reply_markup=kb)
+
+
+async def _fix_winner_apply(ctx, q, chat_id, event_num, side, clean):
+    """🔄 اجرا: فقط بردها و سهمِ ۲۵ امتیازیِ برد جابه‌جا می‌شود — بقیهٔ امتیاز
+    (فریب/تشخیص/پوش/انضباط) به برنده بند نیست، پس دست نمی‌خورد."""
+    led = load_game_ledger()
+    if led is None:
+        await safe_q_answer(q, "⚠️ گیست خوانده نشد — دوباره امتحان کن.", show_alert=True)
+        return
+    ck = str(chat_id)
+    ent = (led.get(ck) or {}).get(str(int(event_num)))
+    if not ent:
+        try:
+            await q.edit_message_text(
+                f"ℹ️ رویداد {event_num} سندی ندارد (شاید همین حالا حذف شد).")
+        except Exception:
+            pass
+        return
+    stats = load_player_stats()
+    if stats is None:
+        await safe_q_answer(q, "⚠️ آمار از گیست خوانده نشد — هیچ‌چیز عوض نشد.", show_alert=True)
+        return
+    rows = ent.get("p", []) or []
+    n_up = n_dn = n_miss = 0
+    for row in rows:
+        s = row.get("s")
+        was, now = bool(row.get("w")), (s == side)
+        if was == now:
+            continue
+        if now:
+            n_up += 1
+        else:
+            n_dn += 1
+        # 📄 سند هم اصلاح شود تا «حذف رویداد»ِ بعدی درست برگرداند
+        _sc = float(row.get("sc") or 0) if "sc" in row else None
+        # 🏅 حقِ ۲۵ امتیازِ برد: یا امتیازی دارد، یا نشانِ wb دارد (همین ۲۵ قبلاً
+        #    از او کم شده). امتیازِ صفرِ بی‌نشان = کیک‌شده یا لیستِ بی‌امتیاز → ۲۵ ندارد.
+        _elig = _sc is not None and (_sc > 0 or bool(row.get("wb")))
+        row["w"] = 1 if now else 0
+        if _sc is not None:
+            if now and _elig:
+                row["sc"] = round(_sc + WIN_SCORE_PTS, 1)
+                row.pop("wb", None)
+            elif (not now) and _sc >= WIN_SCORE_PTS:
+                row["sc"] = round(_sc - WIN_SCORE_PTS, 1)
+                row["wb"] = 1       # 🔖 ۲۵ را از او گرفتیم — اگر برگشت، پسش بده
+        p = stats.get(str(row.get("u")))
+        if p is None:
+            n_miss += 1
+            continue
+        _wcol = ("mafia_wins" if s == "مافیا" else
+                 "indep_wins" if s == "مستقل" else "citizen_wins")
+        # 🏅 ستونِ امتیازِ تفکیکی — مستقل ستونِ جدا ندارد (مثلِ ثبتِ اولیه)
+        _scol = "score_mafia" if s == "مافیا" else ("score_citizen" if s == "شهر" else None)
+        if now:
+            p["wins"] = int(p.get("wins", 0) or 0) + 1
+            p[_wcol] = int(p.get(_wcol, 0) or 0) + 1
+            if _sc is not None:
+                p["score_wins"] = int(p.get("score_wins", 0) or 0) + 1
+                if _scol:
+                    p[_scol + "_wins"] = int(p.get(_scol + "_wins", 0) or 0) + 1
+                if _elig:
+                    p["score_total"] = round(
+                        float(p.get("score_total", 0) or 0) + WIN_SCORE_PTS, 1)
+                    if _scol:
+                        p[_scol] = round(float(p.get(_scol, 0) or 0) + WIN_SCORE_PTS, 1)
+        else:
+            _stat_dec(p, "wins")
+            _stat_dec(p, _wcol)
+            if _sc is not None:
+                _stat_dec(p, "score_wins")
+                if _scol:
+                    _stat_dec(p, _scol + "_wins")
+                if _sc >= WIN_SCORE_PTS:
+                    _stat_dec(p, "score_total", WIN_SCORE_PTS, fl=True)
+                    if _scol:
+                        _stat_dec(p, _scol, WIN_SCORE_PTS, fl=True)
+    if not save_player_stats(stats):
+        await safe_q_answer(q, "⚠️ نوشتنِ آمار روی گیست ناموفق بود — هیچ‌چیز عوض نشد.",
+                            show_alert=True)
+        return
+    ent["win"] = side
+    _led_warn = ""
+    if not save_game_ledger(led):
+        _led_warn = chr(10) + "⚠️ سند اصلاح نشد — دیگر برای همین رویداد «برد …» را نزن!"
+    # 🎮 «بازی من»: ردِ همین رویداد برای هر بازیکن اصلاح شود
+    n_hist = 0
+    try:
+        hist = load_game_history()
+        if hist:
+            for row in rows:
+                lst = hist.get(str(row.get("u"))) or []
+                for r in reversed(lst):
+                    if (r.get("c") == chat_id
+                            and str(r.get("e", "")) == str(int(event_num))):
+                        r["w"] = 1 if r.get("s") == side else 0
+                        n_hist += 1
+                        break
+            if n_hist and not save_game_history(hist):
+                n_hist = 0
+    except Exception as _he:
+        print("❌ fix winner history:", _he)
+    # 📌 خطِ نتیجه در همان لیستِ پین‌شده هم اصلاح شود (اگر تلگرام اجازه بدهد)
+    _msg_note = ""
+    _pend = _FIXW_PEND.pop(f"{chat_id}:{int(event_num)}", None)
+    if _pend:
+        _m = _RESULT_RE.search(_pend["html"])
+        if _m:
+            _line = _fix_result_line(_m.group(0), side, clean)
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id, message_id=_pend["mid"],
+                    text=_RESULT_RE.sub(lambda _mm: _line, _pend["html"], count=1),
+                    parse_mode="HTML", disable_web_page_preview=True)
+            except Exception as _ee:
+                print("⚠️ fix winner edit:", _ee)
+                _msg_note = chr(10) + ("⚠️ متنِ لیست ویرایش نشد (پیام قدیمی است) — "
+                                       "دستی اصلاحش کن.")
+        else:
+            _msg_note = chr(10) + "ℹ️ در آن پیام خطِ «نتیجه بازی» نبود، پس ویرایش نشد."
+    # 📢 نسخهٔ آرشیوِ کانال هم همان‌جا اصلاح می‌شود
+    try:
+        _msg_note += await _fix_winner_channel(ctx, q, ent, event_num, side, clean)
+    except Exception as _ce:
+        print("⚠️ fix winner channel:", _ce)
+    try:
+        await q.edit_message_text(
+            f"✅ برندهٔ رویداد {event_num} شد «برد {side}»"
+            + (" (کلین‌شیت)" if clean else "") + "." + chr(10)
+            + f"🔺 {n_up} برد اضافه | 🔻 {n_dn} برد کم شد"
+            + (f" | 🎮 {n_hist} ردِ «بازی من»" if n_hist else "")
+            + (f" | ℹ️ {n_miss} نفر در آمار نبودند" if n_miss else "")
+            + _msg_note + _led_warn)
+    except Exception:
+        pass
+
+
+def _fix_result_line(old_line, side, clean):
+    """🏆 خطِ تازهٔ «نتیجه بازی» — نشانِ کی‌آسِ قبلی حفظ می‌شود."""
+    _l = f"🏆 نتیجه بازی: برد {side}"
+    if clean:
+        _l += " (کلین‌شیت)"
+    if old_line and "آس" in old_line:
+        _l += " (کی‌آس)"
+    return _l + " ✏️ اصلاح‌شده"
+
+
+async def _fix_winner_channel(ctx, q, ent, event_num, side, clean):
+    """📢 اصلاحِ خطِ نتیجه در نسخهٔ آرشیوِ کانال — یک خط گزارش برمی‌گرداند.
+    متنِ آن پیام دستِ ما نیست، پس یک بار به پیویِ خودِ مدیر فوروارد می‌شود تا
+    خوانده شود و همان لحظه پاک. بازی‌های قدیمی نشانیِ آرشیو ندارند: برای آن‌ها
+    یادداشتِ اصلاح زیرِ کانال گذاشته می‌شود."""
+    _cc, _cm = ent.get("cc"), list(ent.get("cm") or [])
+    if not (_cc and _cm):
+        _ch = get_archive_channel()
+        if not _ch:
+            return ""
+        try:
+            await ctx.bot.send_message(
+                _ch,
+                f"✏️ <b>اصلاحِ نتیجه — رویداد {event_num}</b>" + chr(10)
+                + f"🏆 نتیجهٔ درست: برد {side}" + (" (کلین‌شیت)" if clean else "") + chr(10)
+                + "(در لیستِ آرشیوِ همین رویداد اشتباه ثبت شده بود)",
+                parse_mode="HTML")
+            return chr(10) + "📢 در کانال یادداشتِ اصلاح گذاشته شد (لیستِ قدیمی نشانی ندارد)."
+        except Exception as _e:
+            print("⚠️ fix winner channel note:", _e)
+            return chr(10) + "⚠️ در کانال نه ویرایش شد نه یادداشت گذاشته شد."
+    _to = q.from_user.id
+    _rerr = False
+    for _mid in _cm:
+        _txt, _fw = None, None
+        try:
+            _fw = await ctx.bot.forward_message(chat_id=_to, from_chat_id=_cc,
+                                                message_id=int(_mid))
+            _txt = _fw.text_html
+        except Exception as _e:
+            print("⚠️ fix winner channel read:", _e)
+            _rerr = True
+        if _fw is not None:
+            try:
+                await ctx.bot.delete_message(_to, _fw.message_id)
+            except Exception:
+                pass
+        _m = _RESULT_RE.search(_txt or "")
+        if not _m:
+            continue
+        try:
+            _nl = _fix_result_line(_m.group(0), side, clean)
+            await ctx.bot.edit_message_text(
+                chat_id=_cc, message_id=int(_mid),
+                text=_RESULT_RE.sub(lambda _mm: _nl, _txt, count=1),
+                parse_mode="HTML", disable_web_page_preview=True)
+            return chr(10) + "📢 لیستِ کانال هم اصلاح شد."
+        except Exception as _e:
+            print("⚠️ fix winner channel edit:", _e)
+            return chr(10) + "⚠️ لیستِ کانال ویرایش نشد — دستی اصلاحش کن."
+    if _rerr:
+        return chr(10) + "⚠️ نسخهٔ کانال خوانده نشد — دستی اصلاحش کن."
+    return chr(10) + "ℹ️ در لیستِ کانال خطِ «نتیجه بازی» پیدا نشد."
+
+
+async def handle_fix_winner_callback(update, ctx):
+    """🔄 دکمه‌های تأیید/انصرافِ «اصلاحِ برنده» — فقط مدیرانِ اصلیِ بات."""
+    q = update.callback_query
+    if not q or not q.message:
+        return
+    if not _is_full_admin(q.from_user.id):
+        await safe_q_answer(q, "⛔ فقط مدیرِ اصلیِ بات.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    if q.data == "fixw_no":
+        try:
+            await q.edit_message_text("❌ اصلاحِ برنده منتفی شد.")
+        except Exception:
+            pass
+        return
+    _p = (q.data or "").split("_")
+    if len(_p) != 5 or _p[1] != "ok":
+        return
+    try:
+        _ev = int(_p[2])
+    except Exception:
+        return
+    _side = _FIXW_CODES.get(_p[3])
+    if not _side:
+        return
+    await _fix_winner_apply(ctx, q, q.message.chat.id, _ev, _side, _p[4] == "1")
 
 
 # ═══════════ 🔀 انتقالِ آمارِ یک بازیکن به آیدیِ جدید ═══════════
@@ -3029,17 +3370,18 @@ async def archive_game_to_channel(bot, header, final_text, report_text=None, sco
     """📢 لیست پایانی + گزارش شب‌به‌شب + کارنامه‌ی امتیاز → چنلِ آرشیو."""
     ch = get_archive_channel()
     if not ch:
-        return False
+        return None, []
     try:
-        await _send_chunked(bot, ch, header + "\n" + final_text)
+        # 📌 شناسهٔ پیامِ لیست لازم است: «اصلاحِ برنده» با آن کانال را عوض می‌کند
+        _sent = await _send_chunked(bot, ch, header + "\n" + final_text)
         if report_text:
             await _send_chunked(bot, ch, report_text)
         if score_text:
             await _send_chunked(bot, ch, score_text)
-        return True
+        return ch, [m.message_id for m in (_sent or []) if m]
     except Exception as e:
         print("⚠️ archive_game_to_channel:", e)
-        return False
+        return None, []
 
 
 def load_selected_list() -> dict:
@@ -5838,7 +6180,9 @@ async def announce_winner(ctx, update, g: GameState):
                 f"🎮 گروه: {escape(group_title or '—', quote=False)}\n"
                 f"📅 {date_str} | 🎯 رویداد {event_num}\n"
                 f"━━━━━━━━━━━━")
-        await archive_game_to_channel(ctx.bot, _hdr, "\n".join(lines), report, score_text)
+        _cc, _cids = await archive_game_to_channel(
+            ctx.bot, _hdr, "\n".join(lines), report, score_text)
+        _ledger_set_archive(chat.id, event_num, _cc, _cids)
     except Exception as e:
         print("⚠️ archive to channel:", e)
 
@@ -19405,6 +19749,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_del_event_callback(update, ctx)
         return
 
+    # 🔄 تأیید/انصرافِ «اصلاحِ برنده» (مدیرانِ اصلی — داخلِ گروه)
+    if _q and _q.data and _q.data.startswith("fixw_"):
+        await handle_fix_winner_callback(update, ctx)
+        return
+
     # 👢 کیک شب (گاد در پیوی) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith("nkick_"):
         await handle_night_kick_callback(update, ctx)
@@ -21501,25 +21850,47 @@ async def handle_side_pick_callback(update, ctx):
         pass
 
 
+def _side_swap(g, uid_to_role, uid, side) -> bool:
+    """نقشِ uid را با نقشی تصادفی از همان ساید عوض می‌کند.
+    False یعنی در این سناریو هیچ نقشی از آن ساید نبود."""
+    cands = [u for u, r in uid_to_role.items() if _role_side_name(g, r) == side]
+    if not cands:
+        return False
+    if _role_side_name(g, uid_to_role.get(uid)) != side:
+        _pick = random.choice(cands)
+        uid_to_role[uid], uid_to_role[_pick] = uid_to_role[_pick], uid_to_role[uid]
+    return True
+
+
 async def _side_pick_apply(ctx, g, uid_to_role):
     """🎲 اگر صاحبِ جایزه در این بازی است و «بله» بزند، نقشی تصادفی از سایدِ انتخابی‌اش
     می‌گیرد و نقشِ خودش به همان کسی می‌رسد که آن نقش را داشت (استخرِ نقش‌ها عوض نمی‌شود).
-    هیچ‌کس خبردار نمی‌شود؛ فقط آخرِ بازی در «گزارش بازی» می‌آید."""
+    هیچ‌کس خبردار نمی‌شود — نه گاد، نه بقیه؛ فقط خودش.
+    🔁 رندومِ مجدد: تصمیمِ همین بازی در g.side_pick_mem می‌ماند و دوباره پرسیده
+       نمی‌شود. اگر سایدی گرفته بود، بی‌صدا نقشی تازه از همان ساید می‌گیرد؛ اگر «خیر»
+       زده بود یا جواب نداده بود، اصلاً در نظر گرفته نمی‌شود و حقی هم نمی‌سوزد."""
     try:
+        # 🧠 همین بازی یک بار تصمیم گرفته شده؟ پس فقط اعمالش کن و برگرد.
+        _mem = getattr(g, "side_pick_mem", None)
+        if isinstance(_mem, dict) and _mem.get("uid"):
+            _muid = int(_mem.get("uid") or 0)
+            _mside = _mem.get("side") or None
+            if _mside and _muid in uid_to_role:
+                _side_swap(g, uid_to_role, _muid, _mside)
+            return
         stats = load_player_stats() or {}
         uid, d = _side_pick_candidate(g, stats)
         if uid is None:
             return
         side = await _side_pick_ask(ctx, uid, d.get("side_pick_last"))
+        # 🧠 جوابش هرچه بود (ساید / خیر / بی‌جواب) برای همین بازی ثبت می‌شود
+        g.side_pick_mem = {"uid": uid, "side": side}
         if not side:
             return
-        cands = [u for u, r in uid_to_role.items() if _role_side_name(g, r) == side]
-        if not cands:
+        if not _side_swap(g, uid_to_role, uid, side):
+            g.side_pick_mem = {"uid": uid, "side": None}
             await _safe_pm(ctx, uid, "⚠️ در این سناریو نقشی از آن ساید نبود — ساید عوض نشد.")
             return
-        if _role_side_name(g, uid_to_role.get(uid)) != side:
-            _pick = random.choice(cands)
-            uid_to_role[uid], uid_to_role[_pick] = uid_to_role[_pick], uid_to_role[uid]
         d["side_picks_left"] = max(0, int(d.get("side_picks_left", 0) or 0) - 1)
         d["side_pick_last"] = side
         stats[str(uid)] = d
@@ -22184,6 +22555,14 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _ev_del = _parse_del_event_text(text)
         if _ev_del is not None:
             await _del_event_prompt(ctx, msg, _ev_del)
+            return
+
+        # 🔄 «برد شهر» / «برد مافیا» با ریپلای روی لیستِ نتیجه → اصلاحِ سایدِ برنده
+        #    (بی‌ریپلای و بی‌شماره رد می‌شود تا متنِ عادیِ «برد شهر» مزاحم نشود)
+        _fw = _parse_fix_winner_text(text)
+        if _fw is not None and (getattr(msg, "reply_to_message", None) is not None
+                                or _fw[2] is not None):
+            await _fix_winner_from_msg(ctx, msg, _fw)
             return
 
     # 🗳 ثبت رأی حتی اگر ریپلای فرستاده شده باشد (قبلاً این رأی‌ها گم می‌شدند)
@@ -23335,7 +23714,13 @@ _ADM_GUIDE = (
     "می‌گیرند (اسمِ سناریو، آیدی و …).\n\n"
     "🗑 <b>حذفِ رویداد</b> — دکمه ندارد: داخلِ گروه بنویس <code>حذف رویداد ۵</code> "
     "تا آمار و امتیاز و تاریخچهٔ آن رویداد از همان گروه پاک شود و شمارهٔ رویداد "
-    "یکی برگردد عقب. ⚠️ برگشت‌ناپذیر."
+    "یکی برگردد عقب. ⚠️ برگشت‌ناپذیر.\n\n"
+    "🔄 <b>اصلاحِ برندهٔ بازی</b> — دکمه ندارد: روی همان «لیستِ نتیجهٔ بازی» "
+    "در گروه ریپلای کن و بنویس <code>برد مافیا</code> (یا <code>برد شهر</code>). "
+    "بردها، سهمِ ۲۵ امتیازیِ برد و «بازی من»ِ همه اصلاح می‌شود و خطِ نتیجهٔ همان "
+    "لیست هم عوض می‌شود — تعدادِ بازی‌ها و بقیهٔ امتیاز دست نمی‌خورد. اگر لیست "
+    "گم شده، شماره را خودت بده: <code>برد مافیا ۱۲</code>. برگشت‌پذیر است: "
+    "دوباره سایدِ درست را بزن."
 )
 
 
