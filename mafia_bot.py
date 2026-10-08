@@ -8262,7 +8262,16 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
                 side = "مافیا" if s in mafia_all else "شهر"
                 lines.append(f"• {s}. {escape(g.seats[s][1], quote=False)} ({side})")
         await _night_report(ctx, g, "\n".join(lines))
-        await ctx.bot.send_message(chat_id, f"💀 {len(dead)} نفر امشب از لیست خط خوردند.")
+        # 💀 در گروه اسمِ کشته‌ها می‌آید، نه تعدادشان — بی‌ساید و بی‌علتِ مرگ،
+        #    چون هر دو نقش را لو می‌دهند. کیک‌شده‌ها بالاتر یکی‌یکی اعلام شده‌اند.
+        _shot = [s for s in sorted(dead) if "کیک" not in str(_why(s))]
+        if _shot:
+            await ctx.bot.send_message(
+                chat_id,
+                "💀 <b>کشته‌های امشب</b>:" + chr(10)
+                + chr(10).join(f"• {s}. {escape(g.seats[s][1], quote=False)}"
+                               for s in _shot),
+                parse_mode="HTML")
     else:
         await _night_report(ctx, g, "💀 امشب کسی کشته نشد.")
         await ctx.bot.send_message(chat_id, "🕊 امشب کسی کشته نشد.")
