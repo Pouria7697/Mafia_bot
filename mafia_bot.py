@@ -8264,8 +8264,10 @@ async def _apply_deaths(ctx, chat_id, g, dead, reasons, zereh_warn=None):
         await _night_report(ctx, g, "\n".join(lines))
         # 💀 در گروه اسمِ کشته‌ها می‌آید، نه تعدادشان — بی‌ساید و بی‌علتِ مرگ،
         #    چون هر دو نقش را لو می‌دهند. کیک‌شده‌ها بالاتر یکی‌یکی اعلام شده‌اند.
+        #    🏛 میتیک خودش مرگ‌ها را با اسم و علت در گروه اعلام می‌کند
+        #       («خداحافظی می‌کنیم با …») — پس آنجا تکرارش نمی‌کنیم.
         _shot = [s for s in sorted(dead) if "کیک" not in str(_why(s))]
-        if _shot:
+        if _shot and not _is_mythic_scenario(g):
             await ctx.bot.send_message(
                 chat_id,
                 "💀 <b>کشته‌های امشب</b>:" + chr(10)
