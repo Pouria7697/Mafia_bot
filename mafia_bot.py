@@ -1580,7 +1580,7 @@ def god_rating_text(p: dict) -> str:
     return f"{avg}/5 از {c} رأی"
 
 
-def record_god_rating(god_uid, score) -> bool:
+def record_god_rating(god_uid, score, name=None) -> bool:
     """ثبتِ یک رأی برای گاد در آمارِ دائمی."""
     try:
         stats = load_player_stats()
@@ -1588,7 +1588,14 @@ def record_god_rating(god_uid, score) -> bool:
             print("⛔ record_god_rating: خواندنِ آمار ناموفق")
             return False
         key = str(god_uid)
-        p = stats.get(key) or {"name": "بازیکن", "games": 0, "wins": 0}
+        p = stats.get(key)
+        if not p:
+            # 🏷 ردیفِ تازه با اسمِ واقعی ساخته شود؛ وگرنه در جدولِ گادها
+            #    «بازیکن» می‌افتد — مهم شد از وقتی لیستِ زیرِ ۱۰ نفر آمار ثبت
+            #    نمی‌کند و این تابع ممکن است اولین نویسندهٔ ردیفِ گاد باشد.
+            _nm = (name or (usernames or {}).get(key)
+                   or (load_usernames_from_gist() or {}).get(key) or "بازیکن")
+            p = {"name": _nm, "games": 0, "wins": 0}
         p["god_rating_sum"] = round(float(p.get("god_rating_sum", 0) or 0) + float(score), 1)
         p["god_rating_count"] = int(p.get("god_rating_count", 0) or 0) + 1
         stats[key] = p
@@ -6204,18 +6211,19 @@ async def announce_winner(ctx, update, g: GameState):
     if not ok:
         print(f"⚠️ save_event_numbers failed for chat {key}")
 
-    # 🏅 محاسبه‌ی امتیازِ این بازی (بعد از تعیینِ برنده، قبل از ثبتِ آمار)
-    #    ⛔ لیستِ زیرِ ۱۰ نفر اصلاً امتیاز ندارد — بازی/برد ثبت می‌شود ولی امتیاز صفر
-    if len(g.seats or {}) < MIN_SCORED_SEATS:
+    # 🏅 امتیازِ این بازی (بعد از تعیینِ برنده، قبل از ثبتِ آمار)
+    #    ⛔ لیستِ زیرِ ۱۰ نفر هیچ اثری در آمار ندارد: نه امتیاز، نه بازی و برد،
+    #       نه «بازی من». سندِ رویداد هم ثبت نمی‌شود، چون چیزی برای برگرداندن نیست.
+    _unranked = len(g.seats or {}) < MIN_SCORED_SEATS
+    if _unranked:
         game_scores = {}
-        # 🧾 در آمار «صفر» ثبت می‌شود، نه «ثبت‌نشده» — وگرنه بازیِ قدیمی حساب
-        #    می‌شد و پایهٔ ۱۵+۲۵ امتیاز می‌گرفت
-        stats_scores = {s: {"total": 0.0} for s in (g.seats or {})}
+        stats_scores = {}
+        g.stats_save_error = None
         try:
             await ctx.bot.send_message(
                 chat.id,
-                f"ℹ️ این لیست زیرِ {MIN_SCORED_SEATS} نفر بود — برای این بازی امتیازی ثبت نشد "
-                f"(بازی و برد ثبت شد).")
+                f"ℹ️ این لیست زیرِ {MIN_SCORED_SEATS} نفر بود — این بازی در آمار "
+                f"ثبت نشد: نه امتیاز، نه بازی و برد، نه «بازی من».")
         except Exception:
             pass
     else:
@@ -6227,9 +6235,12 @@ async def announce_winner(ctx, update, g: GameState):
         stats_scores = game_scores
 
     # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل + چکِ پایانِ فصل)
-    season_msg = update_player_stats(g, mafia_roles, indep_for_this, scores=stats_scores,
-                                     group_title=group_title, date_str=date_str,
-                                     chat_id=chat.id, event_num=event_num)
+    season_msg = None
+    if not _unranked:
+        season_msg = update_player_stats(g, mafia_roles, indep_for_this,
+                                        scores=stats_scores,
+                                        group_title=group_title, date_str=date_str,
+                                        chat_id=chat.id, event_num=event_num)
 
     # ⚠️ اگر ثبتِ آمار شکست خورد، بی‌صدا رد نشو — به گاد و سازندهٔ بات خبر بده
     _serr = getattr(g, "stats_save_error", None)
@@ -6301,7 +6312,8 @@ async def announce_winner(ctx, update, g: GameState):
                 f"━━━━━━━━━━━━")
         _cc, _cids = await archive_game_to_channel(
             ctx.bot, _hdr, "\n".join(lines), report, score_text)
-        _ledger_set_archive(chat.id, event_num, _cc, _cids)
+        if not _unranked:   # ⛔ بازیِ زیرِ ۱۰ نفر سندی ندارد که نشانی بگیرد
+            _ledger_set_archive(chat.id, event_num, _cc, _cids)
     except Exception as e:
         print("⚠️ archive to channel:", e)
 
