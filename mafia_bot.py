@@ -456,6 +456,7 @@ class GameState:
         self.god_act_tmp = getattr(self, "god_act_tmp", None)              # انتخابِ تأییدنشده
         self.god_acted_seats = getattr(self, "god_acted_seats", set()) or set()   # اکتِ دستی ← اولویت بر کیک
         self.night_prompt_cache = getattr(self, "night_prompt_cache", {}) or {}   # uid → (متن, کیبورد)
+        self.night_prompt_first = getattr(self, "night_prompt_first", {}) or {}   # uid → پرامپتِ اولِ اکت (تمیز، بی‌تیک)
         # 🎯 حدسِ ۳ مافیا توسط شهروندِ خروجیِ روز ۱
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
@@ -6753,6 +6754,14 @@ async def _safe_pm(ctx, uid, text, kb=None):
         _g = _pm_game(uid)
         if _g is not None:
             _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
+            # 🆕 پرامپتی که «موتور» می‌فرستد (نه خودِ بازیکن وسطِ اکتش) = شروعِ یک اکتِ تازه:
+            #    نسخهٔ تمیزش برای «اکت مجدد» نگه داشته می‌شود و حسابِ اکتِ قبلی پاک.
+            if kb is not None and _ACT_UID.get() != uid:
+                _pf = getattr(_g, "night_prompt_first", None)
+                if _pf is None:
+                    _pf = _g.night_prompt_first = {}
+                _pf[uid] = (text, _kb_dump(kb))
+                _act_keep_clear(uid=uid)
     except Exception:
         pass
     # 🔥 اکتِ سوخته: مثل بازیکنِ با پیویِ بسته رفتار می‌شود — هیچ پرامپتی نمی‌گیرد
@@ -6791,6 +6800,14 @@ async def _edit_pm(ctx, uid, msg_id, text, kb):
         _g = _pm_game(uid)
         if _g is not None:
             _g.night_prompt_cache[uid] = (text, _kb_dump(kb))
+            # 🆕 پرامپتی که «موتور» می‌فرستد (نه خودِ بازیکن وسطِ اکتش) = شروعِ یک اکتِ تازه:
+            #    نسخهٔ تمیزش برای «اکت مجدد» نگه داشته می‌شود و حسابِ اکتِ قبلی پاک.
+            if kb is not None and _ACT_UID.get() != uid:
+                _pf = getattr(_g, "night_prompt_first", None)
+                if _pf is None:
+                    _pf = _g.night_prompt_first = {}
+                _pf[uid] = (text, _kb_dump(kb))
+                _act_keep_clear(uid=uid)
     except Exception:
         pass
     try:
@@ -6816,6 +6833,77 @@ _REDO_WAIT: dict[int, dict] = {}                             # uid → {"evt", "
 
 _ACT_OUTBOX: dict[int, list] = {}    # uid → پیام‌هایی که تا پایانِ مهلت صبر می‌کنند
 _ACT_SNAP: dict[int, tuple] = {}     # uid → (بازی، night_done، مقادیرِ سادهٔ قبل از اکت)
+
+# 🧷 حسابِ تجمعیِ یک اکتِ چندمرحله‌ای — هر فشارِ دکمه (مرحله) سهمِ خودش را اینجا می‌ریزد
+#    تا «اکت مجدد» در مرحلهٔ آخر، کلِ اکت را برگرداند نه فقط مرحلهٔ آخر را (هکر: فاعل +
+#    مفعول). سهمِ هر مرحله زیرِ قفل حساب می‌شود، پس اکتِ بازیکنِ دیگری که بینِ دو مرحله
+#    ثبت شده هرگز قاطی نمی‌شود. برای هر فیلد قدیمی‌ترین مقدار نگه داشته می‌شود.
+_ACT_KEEP: dict[int, dict] = {}      # uid → {"g", "night", "added", "vals"}
+_ACT_DONE: set = set()               # uid هایی که اکتشان همین حالا با _close_pm تمام شد
+
+
+def _act_keep_absorb(uid):
+    """📥 سهمِ همین فشار را به حسابِ کلِ اکت اضافه می‌کند (زیرِ قفل صدا زده شود)."""
+    snap = _ACT_SNAP.get(uid)
+    if not snap:
+        return
+    g, snap_done, snap_vals = snap
+    try:
+        added, vals = _act_diff(g, snap_done, snap_vals)
+        _night = getattr(g, "night_number", None)
+        k = _ACT_KEEP.get(uid)
+        if not k or k.get("g") is not g or k.get("night") != _night:
+            k = _ACT_KEEP[uid] = {"g": g, "night": _night, "added": set(), "vals": {}}
+        k["added"] |= set(added or ())
+        for key, old in (vals or {}).items():
+            k["vals"].setdefault(key, old)      # قدیمی‌ترین مقدار می‌ماند
+    except Exception as e:
+        print("⚠️ act keep:", e)
+
+
+def _act_keep_take(uid, g):
+    """📤 سهمِ مراحلِ قبلیِ همین اکت — فقط اگر مالِ همین بازی و همین شب باشد."""
+    k = _ACT_KEEP.get(uid)
+    if not k or k.get("g") is not g or k.get("night") != getattr(g, "night_number", None):
+        return set(), {}
+    return set(k.get("added") or ()), dict(k.get("vals") or {})
+
+
+def _act_keep_clear(g=None, uid=None):
+    """🧹 پایانِ اکت / شبِ تازه / سوختنِ اکت / پرامپتِ تازه از موتور → حساب پاک شود."""
+    if uid is not None:
+        _ACT_KEEP.pop(uid, None)
+        return
+    for u in [u for u, k in list(_ACT_KEEP.items()) if g is None or k.get("g") is g]:
+        _ACT_KEEP.pop(u, None)
+
+
+def _act_clear_selection(g, uid):
+    """☐ انتخابِ نیمه‌کارهٔ همین بازیکن در همهٔ دیکشنری‌های انتخاب پاک شود."""
+    for _d in ("night_sel", "night_doc_sel", "night_baz_sel", "night_guard_sel"):
+        try:
+            (getattr(g, _d, None) or {}).pop(uid, None)
+        except Exception:
+            pass
+
+
+def _kb_untick(kb):
+    """☐ تیکِ انتخابِ قبلی از دکمه‌های صندلی برداشته شود؛ «✅ تأیید» دست نمی‌خورد."""
+    if not kb:
+        return kb
+    try:
+        rows = []
+        for row in kb.inline_keyboard:
+            new = []
+            for b in row:
+                t = b.text or ""
+                if re.match(r"✅ \d+", t):
+                    t = t[2:]
+                new.append(InlineKeyboardButton(t, callback_data=b.callback_data))
+            rows.append(new)
+        return InlineKeyboardMarkup(rows)
+    except Exception:
+        return kb
 
 # 🔐 قفلِ اکتِ هر بازی — از «عکسِ قبل از اکت» تا بازشدنِ پنجرهٔ ۷ ثانیه، اکتِ بازیکنِ
 #    دیگری وسطش نمی‌پرد. وگرنه «اکت مجدد»ِ یک نفر تغییرِ نفرِ دیگر را هم (مثلاً تیرِ
@@ -6971,6 +7059,10 @@ async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
         snap_done = set(getattr(g, "night_done", set()) or set())
         snap_vals = _act_snapshot(g)
     own_added, own_vals = _act_diff(g, snap_done, snap_vals)   # 🔍 سهمِ همین اکت
+    # 🧷 + سهمِ مراحلِ قبلیِ همین اکت (اکتِ چندمرحله‌ای مثلِ هکر: فاعل، بعد مفعول)
+    _k_added, _k_vals = _act_keep_take(uid, g)
+    own_added = set(own_added or ()) | _k_added
+    own_vals = {**(own_vals or {}), **_k_vals}      # قدیمی‌ترین مقدار برنده است
     _lock_tok = _act_lock_release()   # 🔓 در طولِ ۷ ثانیه بقیه معطل نمانند
     try:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 اکت مجدد", callback_data=f"redo_{token}")]])
@@ -6999,7 +7091,10 @@ async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
         await _act_lock_reacquire(_lock_tok)   # ⏪ برگرداندن هم زیرِ قفل
         _lock_tok = None
         _act_restore(g, own_added, own_vals)
-        await _edit_pm(ctx, uid, msg_id, prompt[0], _kb_load(prompt[1]))
+        # ☐ انتخابِ قبلی پاک، و همان پرامپتِ اولِ اکت بی‌تیک برگردد — نه مرحلهٔ آخر با تیک
+        _act_clear_selection(g, uid)
+        _first = (getattr(g, "night_prompt_first", None) or {}).get(uid) or prompt
+        await _edit_pm(ctx, uid, msg_id, _first[0], _kb_untick(_kb_load(_first[1])))
         return True
     finally:
         await _act_lock_reacquire(_lock_tok)   # بقیهٔ اکت (گزارش/اثر) هم زیرِ قفل
@@ -7034,6 +7129,7 @@ async def _close_pm(ctx, uid, msg_id, text):
     # ⏪ مهلتِ «اکت مجدد» — فقط برای صاحبِ همین اکت، و فقط وقتی پرامپتِ دکمه‌داری
     #    باز بوده (پس بستن‌های خودکار/پیام‌های بی‌دکمه دست‌نخورده می‌مانند)
     if msg_id and _ACT_UID.get() == uid:
+        _ACT_DONE.add(uid)      # 🧷 این اکت تمام می‌شود؛ حسابِ تجمعی در پایانِ همین فشار پاک می‌شود
         _gr, _prompt = None, None
         try:
             _gr = _pm_game(uid)
@@ -7736,6 +7832,8 @@ async def end_night(ctx, chat_id, g):
     g.god_act_tmp = None
     g.god_acted_seats = set()
     g.night_prompt_cache = {}
+    g.night_prompt_first = {}
+    _act_keep_clear(g)        # 🧷 حسابِ اکت‌های چندمرحله‌ایِ شبِ قبل
     # 🎛 دکمه‌های پنلِ شبِ گاد حذف شوند (اشتباهی در روز دستش نخورد)
     _pmid = getattr(g, "night_god_panel_mid", None)
     if _pmid:
@@ -7913,6 +8011,7 @@ def _burn_seat_acts(g, seat, force=False):
             (getattr(g, d, None) or {}).pop(_u, None)
         except Exception:
             pass
+    _act_keep_clear(uid=_u)   # 🧷 اکتِ نیمه‌کاره‌اش هم از حساب برود
 
     store.save()
     return cleared
@@ -19836,6 +19935,11 @@ async def _run_night_act(update, ctx):
         # 🕸 تورِ ایمنی: اگر مسیری پیامِ معوق داشت ولی به _close_pm نرسید، جا نماند
         _ACT_UID.set(None)
         if _owner is not None:
+            if _owner in _ACT_DONE:
+                _ACT_DONE.discard(_owner)      # 🧷 اکت تمام شد (یا پس گرفته شد) → حساب بسته
+                _ACT_KEEP.pop(_owner, None)
+            else:
+                _act_keep_absorb(_owner)       # 🧷 سهمِ این مرحله، برای «اکت مجدد»ِ مرحلهٔ آخر
             _ACT_SNAP.pop(_owner, None)
             if _ACT_OUTBOX.get(_owner):
                 try:
