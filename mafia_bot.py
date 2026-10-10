@@ -457,6 +457,7 @@ class GameState:
         self.god_acted_seats = getattr(self, "god_acted_seats", set()) or set()   # اکتِ دستی ← اولویت بر کیک
         self.night_prompt_cache = getattr(self, "night_prompt_cache", {}) or {}   # uid → (متن, کیبورد)
         self.night_prompt_first = getattr(self, "night_prompt_first", {}) or {}   # uid → پرامپتِ اولِ اکت (تمیز، بی‌تیک)
+        self.night_prompt_first_mid = getattr(self, "night_prompt_first_mid", {}) or {}   # (uid, msg_id) → همان، به ازای هر پیام
         # 🎯 حدسِ ۳ مافیا توسط شهروندِ خروجیِ روز ۱
         self.d1_guess_seat = getattr(self, "d1_guess_seat", None)
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
@@ -5131,11 +5132,19 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
 
 # ═══════════════ 🏅 موتورِ امتیازدهی (تستی) ═══════════════
 def _sc_add(g, seat, cat, pts, reason):
-    """ثبتِ یک رویدادِ امتیازی برای صندلی."""
+    """ثبتِ یک رویدادِ امتیازی برای صندلی.
+    ⏪ وسطِ یک اکتِ شب تا بسته‌شدنِ اکت معوق می‌ماند — تا «اکت مجدد»/«بازگشت» امتیازِ
+       استعلام/بازپرسی را دوباره حساب نکند (score_events با عکسِ وضعیت برنمی‌گردد)."""
     if seat is None or seat not in (g.seats or {}):
         return
-    ev = g.score_events.setdefault(seat, [])
-    ev.append((cat, float(pts), reason))
+    if _act_defer(_sc_add_now, g, seat, cat, pts, reason):
+        return
+    g.score_events.setdefault(seat, []).append((cat, float(pts), reason))
+
+
+async def _sc_add_now(g, seat, cat, pts, reason):
+    """📦 نسخهٔ معوق — بعد از قطعی‌شدنِ اکت اجرا می‌شود."""
+    g.score_events.setdefault(seat, []).append((cat, float(pts), reason))
 
 
 def _sc_side(g, seat):
@@ -6748,6 +6757,7 @@ def _pm_game(uid):
 
 
 async def _safe_pm(ctx, uid, text, kb=None):
+    _g, _new = None, False
     # 📥 پرامپت را همیشه کش کن — حتی اگر ارسال نشود (گوشی خاموش/پیوی بسته)،
     #    تا گاد بتواند با «اکتِ دستی» همین سؤال را جای بازیکن جواب بدهد
     try:
@@ -6757,11 +6767,13 @@ async def _safe_pm(ctx, uid, text, kb=None):
             # 🆕 پرامپتی که «موتور» می‌فرستد (نه خودِ بازیکن وسطِ اکتش) = شروعِ یک اکتِ تازه:
             #    نسخهٔ تمیزش برای «اکت مجدد» نگه داشته می‌شود و حسابِ اکتِ قبلی پاک.
             if kb is not None and _ACT_UID.get() != uid:
+                _new = True
                 _pf = getattr(_g, "night_prompt_first", None)
                 if _pf is None:
                     _pf = _g.night_prompt_first = {}
                 _pf[uid] = (text, _kb_dump(kb))
                 _act_keep_clear(uid=uid)
+                _act_drop(uid)            # 📦 معوق‌های اکتِ نیمه‌کارهٔ قبلی نمی‌روند
     except Exception:
         pass
     # 🔥 اکتِ سوخته: مثل بازیکنِ با پیویِ بسته رفتار می‌شود — هیچ پرامپتی نمی‌گیرد
@@ -6772,9 +6784,18 @@ async def _safe_pm(ctx, uid, text, kb=None):
     except Exception:
         pass
     try:
-        return await ctx.bot.send_message(_pm_target(uid), text, reply_markup=kb)
+        m = await ctx.bot.send_message(_pm_target(uid), text, reply_markup=kb)
     except Exception:
         return None
+    if _new and m is not None and _g is not None:
+        try:
+            _pfm = getattr(_g, "night_prompt_first_mid", None)
+            if _pfm is None:
+                _pfm = _g.night_prompt_first_mid = {}
+            _pfm[(uid, m.message_id)] = (text, _kb_dump(kb))
+        except Exception:
+            pass
+    return m
 
 
 async def _report_unreachable(ctx, chat_id, g):
@@ -6796,6 +6817,8 @@ async def _report_unreachable(ctx, chat_id, g):
     return unreachable
 
 async def _edit_pm(ctx, uid, msg_id, text, kb):
+    kb = _kb_maybe_back(uid, text, kb)     # ↩️ بازگشتِ عمومی زیرِ پرامپتِ وسطِ اکت
+    _new = False
     try:
         _g = _pm_game(uid)
         if _g is not None:
@@ -6803,11 +6826,18 @@ async def _edit_pm(ctx, uid, msg_id, text, kb):
             # 🆕 پرامپتی که «موتور» می‌فرستد (نه خودِ بازیکن وسطِ اکتش) = شروعِ یک اکتِ تازه:
             #    نسخهٔ تمیزش برای «اکت مجدد» نگه داشته می‌شود و حسابِ اکتِ قبلی پاک.
             if kb is not None and _ACT_UID.get() != uid:
+                _new = True
                 _pf = getattr(_g, "night_prompt_first", None)
                 if _pf is None:
                     _pf = _g.night_prompt_first = {}
                 _pf[uid] = (text, _kb_dump(kb))
                 _act_keep_clear(uid=uid)
+                _act_drop(uid)            # 📦 معوق‌های اکتِ نیمه‌کارهٔ قبلی نمی‌روند
+                if _new and msg_id:
+                    _pfm = getattr(_g, "night_prompt_first_mid", None)
+                    if _pfm is None:
+                        _pfm = _g.night_prompt_first_mid = {}
+                    _pfm[(uid, msg_id)] = (text, _kb_dump(kb))
     except Exception:
         pass
     try:
@@ -6998,6 +7028,9 @@ def _act_snapshot(g):
         return {}
 
 
+_ABSENT = object()     # 🆕 نشانِ «این فیلد قبل از اکت وجود نداشت»
+
+
 def _act_diff(g, snap_done, snap_vals):
     """🔍 دقیقاً چیزی که «همین اکت» عوض کرد — همان لحظهٔ ثبت حساب می‌شود، نه بعدتر،
     تا اکتِ بازیکنِ دیگری که وسطِ مهلت قطعی می‌شود قاطی نشود."""
@@ -7005,6 +7038,11 @@ def _act_diff(g, snap_done, snap_vals):
     now = _act_snapshot(g)
     vals = {k: v for k, v in (snap_vals or {}).items()
             if k in now and now[k] != v}
+    # 🆕 فیلدی که همین اکت برای اولین بار ساخته (مثلِ hb_card_chosen) — در برگشت
+    #    باید پاک شود، وگرنه حالتی می‌ماند که موتور دیگر قبولش ندارد
+    for k in now:
+        if k not in (snap_vals or {}):
+            vals[k] = _ABSENT
     return added, vals
 
 
@@ -7014,7 +7052,13 @@ def _act_restore(g, own_added, own_vals):
         if own_added:
             g.night_done = (getattr(g, "night_done", set()) or set()) - own_added
         for k, old in (own_vals or {}).items():
-            setattr(g, k, old)
+            if old is _ABSENT:
+                try:
+                    delattr(g, k)
+                except Exception:
+                    setattr(g, k, None)
+            else:
+                setattr(g, k, old)
         store.save()
     except Exception as e:
         print("⚠️ act restore:", e)
@@ -7046,6 +7090,86 @@ async def _act_flush(uid):
 def _act_drop(uid):
     """🗑 اکت پس گرفته شد → پیام‌های معوقش اصلاً فرستاده نمی‌شوند."""
     _ACT_OUTBOX.pop(uid, None)
+
+
+# ↩️ دکمهٔ بازگشتِ عمومی زیرِ اکت‌ها — زیرِ هر پرامپتی که از نسخهٔ اولِ تمیزش فاصله گرفته
+#    (تیک خورده یا به مرحلهٔ بعد رفته). زدنش همان کارِ «اکت مجدد» را می‌کند، فقط وسطِ اکت:
+#    سهمِ مراحلِ قبلی برمی‌گردد، انتخاب پاک می‌شود و پرامپتِ اول بی‌تیک می‌آید.
+_ACT_BACK_SKIP: tuple = (
+    # 🚫 از نقشهٔ پنج موتور: جایی که بازگشت اطلاعاتِ پنهان را لو می‌دهد یا زنجیره را می‌شکند
+    "nem_defuse_",    # ناتو: گزارشِ حدس به گاد رفته و پس‌گرفتنی نیست
+    "gm_thm_",        # تانوس: متنِ پرامپت نقشِ خوانده‌شده را نشان می‌دهد
+    "sh_cd_",         # شورای شهنامه: تیکِ دوئل‌ها
+    "hb_mms_", "hb_mmd_",   # کارتِ معمار: به گاد گزارش شده
+    "kp_anti_", "kp_ag_", "gm_gift_", "gm_sm_",      # تک‌فشار / زنجیرهٔ چندنفره
+    "kpc_", "kpg_", "kpd_", "kpf_", "kpv_",          # پنل‌های گاد / گروه
+)
+
+
+def _kb_maybe_back(uid, text, kb):
+    """↩️ اگر این پرامپت وسطِ اکتِ خودِ بازیکن است و با پرامپتِ اول فرق دارد، بازگشت بگیرد."""
+    try:
+        if not kb or _ACT_UID.get() != uid:
+            return kb
+        _g = _pm_game(uid)
+        if _g is None:
+            return kb
+        btns = [b for row in kb.inline_keyboard for b in row]
+        if any("back" in (b.callback_data or "") for b in btns):
+            return kb                              # خودش دکمهٔ بازگشت دارد
+        if _ACT_BACK_SKIP and any((b.callback_data or "").startswith(_ACT_BACK_SKIP)
+                                  for b in btns):
+            return kb
+        _first = (getattr(_g, "night_prompt_first", None) or {}).get(uid)
+        ticked = any(re.match(r"✅ \d+", b.text or "") for b in btns)
+        if _first and _first[0] == text and not ticked:
+            return kb                              # همان پرامپتِ اول — جایی برای برگشتن نیست
+        return _kb_add_back(kb, f"actback_{uid}")
+    except Exception:
+        return kb
+
+
+async def handle_act_back_callback(update, ctx):
+    """↩️ «بازگشت» زیرِ اکت: کلِ اکتِ نیمه‌کاره پس گرفته می‌شود و پرامپتِ اول برمی‌گردد."""
+    q = update.callback_query
+    try:
+        uid = int((q.data or "")[len("actback_"):])
+    except Exception:
+        await safe_q_answer(q)
+        return
+    if _q_uid(q) != uid:
+        await safe_q_answer(q, "این دکمه مالِ تو نیست.", show_alert=True)
+        return
+    # ⏳ اگر همین حالا پنجرهٔ «اکت مجدد» باز است، بازگشت همان را بیدار می‌کند
+    st = _REDO_WAIT.get(uid)
+    if st:
+        await safe_q_answer(q)
+        try:
+            st["evt"].set()
+        except Exception:
+            pass
+        return
+    g = _pm_game(uid)
+    if g is None or not (getattr(g, "night_active", False)
+                         or getattr(g, "maarefe_active", False)):
+        await safe_q_answer(q, "⏰ این دکمه دیگر فعال نیست.", show_alert=True)
+        return
+    mid = q.message.message_id if q.message else None
+    await safe_q_answer(q)
+    await _act_lock_acquire(g)        # 🔐 فشارِ نیمه‌کارهٔ همین بازیکن اول تمام شود
+    try:
+        _k_added, _k_vals = _act_keep_take(uid, g)
+        _act_restore(g, _k_added, _k_vals)
+        _act_clear_selection(g, uid)
+        _act_keep_clear(uid=uid)
+        _act_drop(uid)
+        _first = ((getattr(g, "night_prompt_first_mid", None) or {}).get((uid, mid))
+                  or (getattr(g, "night_prompt_first", None) or {}).get(uid)
+                  or (getattr(g, "night_prompt_cache", None) or {}).get(uid))
+        if _first and mid:
+            await _edit_pm(ctx, uid, mid, _first[0], _kb_untick(_kb_load(_first[1])))
+    finally:
+        _act_lock_release()
 
 
 async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
@@ -7093,7 +7217,8 @@ async def _redo_window(ctx, g, uid, msg_id, prompt) -> bool:
         _act_restore(g, own_added, own_vals)
         # ☐ انتخابِ قبلی پاک، و همان پرامپتِ اولِ اکت بی‌تیک برگردد — نه مرحلهٔ آخر با تیک
         _act_clear_selection(g, uid)
-        _first = (getattr(g, "night_prompt_first", None) or {}).get(uid) or prompt
+        _first = ((getattr(g, "night_prompt_first_mid", None) or {}).get((uid, msg_id))
+                  or (getattr(g, "night_prompt_first", None) or {}).get(uid) or prompt)
         await _edit_pm(ctx, uid, msg_id, _first[0], _kb_untick(_kb_load(_first[1])))
         return True
     finally:
@@ -7833,7 +7958,10 @@ async def end_night(ctx, chat_id, g):
     g.god_acted_seats = set()
     g.night_prompt_cache = {}
     g.night_prompt_first = {}
+    g.night_prompt_first_mid = {}
     _act_keep_clear(g)        # 🧷 حسابِ اکت‌های چندمرحله‌ایِ شبِ قبل
+    for _sv in (g.seats or {}).values():   # 📦 معوق‌های شبِ قبل هم نروند
+        _ACT_OUTBOX.pop(_sv[0], None)
     # 🎛 دکمه‌های پنلِ شبِ گاد حذف شوند (اشتباهی در روز دستش نخورد)
     _pmid = getattr(g, "night_god_panel_mid", None)
     if _pmid:
@@ -10898,8 +11026,9 @@ async def handle_night_callback(update, ctx):
         store.save()
         # 🦷 دنتیست: منوی مافیا مالِ موتورِ تکاور است (tk_decider_seat) — همان دوباره باز شود،
         #    نه منوی «مذاکره یا شات»ِ سناریوی مذاکره (که شب را در مسیرِ اشتباه قفل می‌کرد)
+        _ACT_UID.set(None)          # ↩️ «بازگشت» اکت نیست — در هر دو شاخه، وگرنه
+        #    _close_pm پنجرهٔ «اکت مجدد» را روی یک غیراکت باز می‌کرد
         if _is_dentist_scenario(g):
-            _ACT_UID.set(None)          # «بازگشت» اکت نیست → پنجرهٔ «اکت مجدد» نمی‌خواهد
             await _close_pm(ctx, uid, mid, "↩️ برگشت به منوی مافیا.")
             await _tk_open_mafia(ctx, chat_id, g)
             return
@@ -12049,6 +12178,7 @@ async def handle_hanibal_callback(update, ctx):
 
     # ── اکتِ مافیا (رئیس) ──
     if data == "hb_act_back":
+        _ACT_UID.set(None)          # ↩️ «بازگشت» اکت نیست — نه پنجرهٔ «اکت مجدد»، نه سهم در حساب
         g.night_sel.pop(uid, None)
         store.save()
         boss = _find_seat_by_role(g, _R_HB_BOSS)
@@ -12681,6 +12811,7 @@ async def handle_baazpors_callback(update, ctx):
 
     # ── تصمیم گادفادر ──
     if data == "bzp_act_back":
+        _ACT_UID.set(None)          # ↩️ «بازگشت» اکت نیست — نه پنجرهٔ «اکت مجدد»، نه سهم در حساب
         # ↩️ برگشت به منوی اکتِ مافیا — یاکوزاییِ تأییدنشده آزاد می‌شود
         g.night_sel.pop(uid, None)
         if getattr(g, "bzp_yak_tmp", False):
@@ -14922,6 +15053,7 @@ async def handle_takavar_callback(update, ctx):
 
     # ── تصمیم مافیا ──
     if data == "tk_act_back":
+        _ACT_UID.set(None)          # ↩️ «بازگشت» اکت نیست — نه پنجرهٔ «اکت مجدد»، نه سهم در حساب
         # ↩️ برگشت به منوی اکتِ مافیای تکاور
         g.night_sel.pop(uid, None)
         store.save()
@@ -19933,15 +20065,20 @@ async def _run_night_act(update, ctx):
         return
     finally:
         # 🕸 تورِ ایمنی: اگر مسیری پیامِ معوق داشت ولی به _close_pm نرسید، جا نماند
+        _was_act = _ACT_UID.get() is not None   # ↩️ هندلری که خودش «اکت نیست» گفته (بازگشت)
         _ACT_UID.set(None)
         if _owner is not None:
-            if _owner in _ACT_DONE:
+            _closed = _owner in _ACT_DONE or not _was_act
+            if _closed:
                 _ACT_DONE.discard(_owner)      # 🧷 اکت تمام شد (یا پس گرفته شد) → حساب بسته
                 _ACT_KEEP.pop(_owner, None)
             else:
                 _act_keep_absorb(_owner)       # 🧷 سهمِ این مرحله، برای «اکت مجدد»ِ مرحلهٔ آخر
             _ACT_SNAP.pop(_owner, None)
-            if _ACT_OUTBOX.get(_owner):
+            # 📦 پیامِ معوقِ مرحلهٔ میانی (مثلاً «ناتویی روی X» پیش از حدسِ نقش) تا بستنِ
+            #    کلِ اکت می‌ماند — وگرنه اتاقِ مافیا چیزی را می‌شنود که «اکت مجدد» یا
+            #    «بازگشت» دیگر نمی‌تواند پس بگیرد. تورِ ایمنی فقط برای اکتِ بسته‌شده.
+            if _closed and _ACT_OUTBOX.get(_owner):
                 try:
                     await _act_flush(_owner)
                 except Exception:
@@ -20135,6 +20272,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # ↩️ «بازگشت» زیرِ اکت (پیویِ بازیکن / پیویِ گاد در اکتِ دستی)
+    if _q and _q.data and _q.data.startswith("actback_"):
+        await handle_act_back_callback(update, ctx)
+        return
     if _q and _q.data and _q.data.startswith("redo_"):
         await handle_redo_callback(update, ctx)
         return
