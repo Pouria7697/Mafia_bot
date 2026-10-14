@@ -2314,6 +2314,7 @@ async def _fix_winner_apply(ctx, q, chat_id, event_num, side, clean):
         await safe_q_answer(q, "⚠️ آمار از گیست خوانده نشد — هیچ‌چیز عوض نشد.", show_alert=True)
         return
     rows = ent.get("p", []) or []
+    _old_side = next((r.get("s") for r in rows if r.get("w")), None)
     n_up = n_dn = n_miss = 0
     for row in rows:
         s = row.get("s")
@@ -2414,6 +2415,11 @@ async def _fix_winner_apply(ctx, q, chat_id, event_num, side, clean):
         _msg_note += await _fix_winner_channel(ctx, q, ent, event_num, side, clean, _pend)
     except Exception as _ce:
         print("⚠️ fix winner channel:", _ce)
+    # 🏆 بازیِ تورنومنت: کارنامهٔ معلقِ داوران هم
+    try:
+        _msg_note += await _tourn_winner_fix(ctx, chat_id, event_num, _old_side, side)
+    except Exception as _te:
+        print("⚠️ fix winner tourn:", _te)
     # 🧾 لیستِ تازه با ساید + کارنامهٔ امتیاز، وسطِ گروه و پین
     try:
         _msg_note += await _fix_winner_republish(ctx, chat_id, ent, event_num,
@@ -3408,13 +3414,19 @@ def save_bot_settings(data: dict):
 # ═════════════════════════════════════════════════════════════
 TOURN_FILENAME = "tournament.json"
 TOURN_GAMES_PER_SEASON = 10
-_TOURN_CACHE = {"data": None}
+_TOURN_CACHE = {"data": None, "ok": False, "fail_ts": 0.0}
 _TOURN_EDIT: dict[int, tuple] = {}     # داور/گاد → (chat_id, شمارهٔ بازی) که در حالِ اصلاحش است
 
 
 def load_tournaments(force=False) -> dict:
+    """⚠️ خطا ≠ «خالی»: خواندنِ ناموفق کش نمی‌شود (وگرنه تا ری‌استارت تورنومنت خاموش می‌ماند
+    و ذخیرهٔ بعدی بقیهٔ گروه‌ها را پاک می‌کرد). بعد از خطا تا یک دقیقه دوباره امتحان نمی‌شود
+    تا هر پیامِ گروه منتظرِ گیستِ قطع نماند."""
     if _TOURN_CACHE["data"] is not None and not force:
         return _TOURN_CACHE["data"]
+    now = time.time()
+    if not force and now - float(_TOURN_CACHE.get("fail_ts") or 0) < 60:
+        return {}
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -3422,12 +3434,13 @@ def load_tournaments(force=False) -> dict:
         if r.status_code == 200:
             content = r.json().get("files", {}).get(TOURN_FILENAME, {}).get("content", "{}")
             _TOURN_CACHE["data"] = json.loads(content) or {}
-        else:
-            _TOURN_CACHE["data"] = {}
+            _TOURN_CACHE["ok"] = True
+            return _TOURN_CACHE["data"]
+        print("❌ load_tournaments: status", r.status_code)
     except Exception as e:
         print("❌ load_tournaments:", e)
-        _TOURN_CACHE["data"] = {}
-    return _TOURN_CACHE["data"]
+    _TOURN_CACHE["fail_ts"] = now
+    return {}
 
 
 def save_tournaments(data: dict) -> bool:
@@ -3455,7 +3468,10 @@ def _tourn(chat_id) -> dict | None:
 
 
 def _tourn_save(chat_id, t) -> bool:
-    d = load_tournaments() or {}
+    d = load_tournaments()
+    if not _TOURN_CACHE.get("ok"):
+        print("❌ _tourn_save: tournament.json خوانده نشده — چیزی نوشته نشد تا بقیهٔ تورنومنت‌ها پاک نشوند")
+        return False
     d[str(chat_id)] = t
     return save_tournaments(d)
 
@@ -3563,7 +3579,9 @@ async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(_tourn_status_text(t), parse_mode="HTML")
         return
     t = _tourn_new(chat)
-    _tourn_save(chat, t)
+    if not _tourn_save(chat, t):
+        await update.message.reply_text("⚠️ گیست الان در دسترس نیست — چند لحظهٔ دیگر دوباره /tournament بزن.")
+        return
     await update.message.reply_text(
         "🏆 <b>حالتِ تورنومنت روشن شد.</b>\n\n"
         "۱️⃣ داوران را معرفی کن — هر خط یک نفر به شکلِ «آیدی اسم»، یا روی پیامِ خودِ شخص "
@@ -3675,6 +3693,16 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
     tu = rt.from_user
     chat_id = msg.chat.id
     norm = " ".join(str(text or "").split()).translate(_FA_DIGITS)
+    _ours = (norm in ("داور", "داور تورنومنت", "شرکت‌کننده", "شرکت کننده", "عضو تورنومنت", "عضو",
+                      "حذف از تورنومنت", "حذف تورنومنت")
+             or re.match(r"^جایگزین(?:\s+صندلی)?\s+\d{1,2}$", norm))
+    if not _ours:
+        return False
+    if getattr(tu, "is_bot", False):
+        if _tourn_manager(chat_id, uid, g):
+            await msg.reply_text("⚠️ روی پیامِ خودِ شخص ریپلای کن، نه پیامِ بات.")
+            return True
+        return False
     tname = ((getattr(g, "user_names", None) or {}).get(tu.id)
              or (tu.full_name or "").strip() or str(tu.id))[:40]
 
@@ -3737,8 +3765,19 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
         if any(u == tu.id for u, _n in g.seats.values()):
             await msg.reply_text("ℹ️ این شخص همین حالا در لیست است.")
             return True
+        if blocked_info(tu.id):
+            await msg.reply_text("⛔ این شخص از بات محروم است و نمی‌تواند جایگزین شود.")
+            return True
+        _sb = seat_ban_info(tu.id)
+        if _sb:
+            await msg.reply_text(f"⛔ این شخص به‌خاطر {KICK_BAN_LIMIT} بار کیک، "
+                                 f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن ندارد.")
+            return True
+        if await _block_if_playing(ctx, chat_id, g, tu.id, tname):
+            return True
         g.seats[seat] = (tu.id, tname)
-        g.tourn_sub[str(seat)] = str(orig_uid)
+        # 🔁 به ازای آیدیِ خودِ جایگزین — با رندومِ صندلی یا جابه‌جایی هم درست می‌ماند
+        g.tourn_sub[str(tu.id)] = str(orig_uid)
         g.tourn_sub_allowed.add(tu.id)
         store.save()
         await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
@@ -3800,6 +3839,10 @@ def _tourn_seat_err(chat_id, g, uid) -> str | None:
     u = str(uid)
     if uid in (getattr(g, "tourn_sub_allowed", None) or set()):
         return None
+    # 🔁 کسی که برای این بازی جایگزین گرفته و جایگزینش هنوز نشسته، صندلیِ دوم نمی‌گیرد
+    _seated = {str(x) for x, _n in (getattr(g, "seats", None) or {}).values()}
+    if any(o == u and s in _seated for s, o in (getattr(g, "tourn_sub", None) or {}).items()):
+        return "⛔ برای این بازی جایگزین داری — اگر خودت رسیدی، اول جایگزینت از لیست برداشته شود."
     if u in (t.get("lineup") or []) or u in (t.get("extra") or []):
         return None
     if u in (t.get("roster") or {}):
@@ -3835,9 +3878,13 @@ async def _tourn_add_allow(ctx, chat_id, g, by_uid, target_uid) -> bool:
         except Exception:
             pass
         return True
+    if u in (t.get("roster") or {}):
+        _why = "⛔ فقط گاد، داور یا مدیرِ کامل می‌تواند شرکت‌کنندهٔ در حالِ استراحت را به لیستِ این بازی اضافه کند."
+    else:
+        _why = ("⛔ این شخص شرکت‌کنندهٔ تورنومنت نیست — مهمانِ یک‌بازی فقط قبل از شروع، با ریپلای روی پیامش: "
+                "«جایگزین صندلی N».")
     try:
-        await ctx.bot.send_message(
-            chat_id, "⛔ این شخص شرکت‌کنندهٔ تورنومنت نیست — برای یک بازی، روی پیامش ریپلای کن: «جایگزین صندلی N».")
+        await ctx.bot.send_message(chat_id, _why)
     except Exception:
         pass
     return False
@@ -3854,6 +3901,37 @@ def _tourn_recalc(t, game):
         if c in (t.get("roster") or {}):
             by_uid[c] = round(by_uid.get(c, 0.0) + r["pts"], 1)
     game["scores"] = by_uid
+
+
+async def _tourn_winner_fix(ctx, chat_id, event_num, old_side, new_side) -> str:
+    """🔄 «برد مافیا» روی بازیِ تورنومنت: اگر کارنامه هنوز تأیید نشده، سهمِ برد در کارنامهٔ
+    داوران هم جابه‌جا می‌شود (مثلِ آمارِ عادی: کیک‌شده/صفر چیزی نمی‌گیرد)."""
+    t = _tourn_rec(chat_id)
+    if not t or old_side == new_side:
+        return ""
+    idx = next((i for i, gm in enumerate(t.get("games") or [])
+                if str(gm.get("event")) == str(event_num)), None)
+    if idx is None:
+        return ""
+    gm = t["games"][idx]
+    if gm.get("status") == "confirmed":
+        return chr(10) + "🏆 کارنامهٔ تورنومنتِ این بازی قبلاً تأیید شده — امتیازِ آن عوض نشد."
+    for r in gm.get("rows") or []:
+        s = r.get("side")
+        was, now = (s == old_side), (s == new_side)
+        if was == now:
+            continue
+        b = float(r.get("base", 0) or 0)
+        if now and (b > 0 or r.get("wb")):
+            r["base"] = round(b + WIN_SCORE_PTS, 1)
+            r.pop("wb", None)
+        elif not now and b >= WIN_SCORE_PTS:
+            r["base"] = round(b - WIN_SCORE_PTS, 1)
+            r["wb"] = 1
+    _tourn_recalc(t, gm)
+    _tourn_save(chat_id, t)
+    await _tourn_refresh_cards(ctx, chat_id, t, idx)
+    return chr(10) + "🏆 سهمِ برد در کارنامهٔ داورانِ تورنومنت هم جابه‌جا شد."
 
 
 def _tourn_sign(x) -> str:
@@ -3910,7 +3988,9 @@ async def _tourn_game_done(ctx, chat_id, g, scores, event_num, date_str):
         uid, name = g.seats[seat]
         sc = (scores or {}).get(seat) or {}
         pts = round(float(sc.get("total", 0) or 0), 1)
-        credit = subs.get(str(seat)) or str(uid)
+        # 🔁 عضوِ تورنومنت همیشه برای خودش؛ جایگزینِ یک‌بازی برای صاحبِ اصلی
+        credit = (str(uid) if str(uid) in (t.get("roster") or {})
+                  else (subs.get(str(uid)) or str(uid)))
         p = sc.get("parts") or {}
         if sc.get("side") == "مافیا":
             det = f"برد {_sc_fmt(p.get('win', 0))} | فریب {_sc_fmt(p.get('farib', 0))} | پوش {_sc_fmt(p.get('push', 0))} | انضباط {_sc_fmt(p.get('enz', 0))}"
@@ -7046,7 +7126,7 @@ async def announce_winner(ctx, update, g: GameState):
 
     # 🏆 بازیِ تورنومنت: امتیازش فقط در جدولِ خودِ تورنومنت است — به امتیازِ عادی/فصلِ
     #    بات اضافه نمی‌شود؛ آمارِ بازی/برد و «بازی من» مثلِ همیشه ثبت می‌شود
-    if getattr(g, "tourn_game", False) and _tourn(chat.id):
+    if getattr(g, "tourn_game", False):
         stats_scores = None
 
     # 📊 ثبت آمار برد/باخت بازیکنان در Gist (+ امتیاز کل + چکِ پایانِ فصل)
@@ -7087,6 +7167,10 @@ async def announce_winner(ctx, update, g: GameState):
 
     # 📜 گزارشِ بازی: اکت‌های شب‌به‌شب + خروجی‌های روز (زیرِ لیستِ پایانی)
     night_log = getattr(g, "night_log", None)
+    _tflag = bool(getattr(g, "tourn_game", False))
+    if _tflag and night_log:
+        # 🏆 تورنومنت: هیچ عددِ امتیازی در گروه/آرشیو — «= +۳۰»ِ حدسِ روزِ ۱ هم برداشته می‌شود
+        night_log = [re.sub(r"\s*=\s*\+\d+(?:\.\d+)?\s*$", "", x) for x in night_log]
     report = ("📜 <b>گزارش بازی</b>\n" + "\n".join(night_log)) if night_log else None
     if report:
         await _send_chunked(ctx.bot, chat.id, report)
@@ -7094,9 +7178,17 @@ async def announce_winner(ctx, update, g: GameState):
     # 🏅 کارنامه‌ی امتیاز — زیرِ گزارشِ اکت‌ها
     score_text = "\n".join(_score_card_lines(g, game_scores)) if game_scores else None
     # 🏆 بازیِ تورنومنت: کارنامه به هیچ عنوان در گروه (و آرشیو) نمی‌آید — پیویِ داوران
-    _tg = _tourn(chat.id) if getattr(g, "tourn_game", False) else None
-    if _tg:
-        await _tourn_game_done(ctx, chat.id, g, game_scores, event_num, date_str)
+    if _tflag:
+        if _tourn(chat.id):
+            await _tourn_game_done(ctx, chat.id, g, game_scores, event_num, date_str)
+        elif score_text:
+            # ⚠️ گیست الان خوانده نشد — کارنامه گم نشود، ولی در گروه هم نیفتد
+            try:
+                await ctx.bot.send_message(
+                    ADMIN_ID, "⚠️ تورنومنت خوانده نشد؛ کارنامهٔ این بازی فقط برای تو:\n\n" + score_text,
+                    parse_mode="HTML")
+            except Exception:
+                pass
         score_text = None
     if score_text:
         try:
@@ -23131,7 +23223,8 @@ async def shuffle_and_assign(
     # 🎲 جایزهٔ دو طلا: قبل از پخشِ نقش‌ها از صاحبش در پیوی پرسیده می‌شود
     #    🏆 در لیستِ تورنومنت به هیچ عنوان پرسیده نمی‌شود
     if (not preview_mode and notify_players
-            and not getattr(g, "tourn_game", False) and not _tourn(chat_id)):
+            and not getattr(g, "tourn_game", False)
+            and not (_tourn_rec(chat_id) or {}).get("active")):
         await _side_pick_apply(ctx, g, uid_to_role)
 
 
@@ -23534,7 +23627,7 @@ async def _sub_seat_fill(ctx, chat_id: int, g: GameState, seat_no: int, new_uid:
         return False
     if await _block_if_playing(ctx, chat_id, g, new_uid):
         return False
-    if await _tourn_block(ctx, chat_id, g, new_uid):     # 🏆
+    if not await _tourn_add_allow(ctx, chat_id, g, g.god_id, new_uid):   # 🏆 استراحتی بله، غریبه نه
         return False
 
     old_uid, _old_name = (g.sub_open.get(seat_no) or (None, None))
@@ -23745,6 +23838,8 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🏆 تورنومنت: «داور» / «شرکت‌کننده» / «حذف از تورنومنت» / «جایگزین صندلی N» با ریپلای
     if await _tourn_reply_cmd(ctx, msg, g, uid, text):
+        return
+    if await _tourn_setup_text(ctx, msg, g, uid, text):   # 🏆 «آیدی اسم»/«تمام» به‌صورتِ ریپلای
         return
 
     # ⛔ «محروم» — با ریپلای یا «محروم @یوزرنیم / محروم 12345».
@@ -27160,7 +27255,7 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن در لیست ندارد.\n"
             f"(برای رفعش، روی پیامش «رفع محرومیت» بنویس.)")
         return
-    if await _tourn_block(ctx, chat_id, g, new_uid):     # 🏆
+    if not await _tourn_add_allow(ctx, chat_id, g, update.effective_user.id, new_uid):   # 🏆
         return
     new_name = g.user_names.get(new_uid, "ناشناس")
 
