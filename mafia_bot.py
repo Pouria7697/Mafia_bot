@@ -3478,7 +3478,7 @@ def _tourn_save(chat_id, t) -> bool:
 
 def _tourn_new(chat_id) -> dict:
     return {"active": True, "setup": "refs", "adding": False,
-            "season": 1, "per_season": TOURN_GAMES_PER_SEASON,
+            "season": 1, "per_season": TOURN_GAMES_PER_SEASON, "size": None, "need_size": False,
             "refs": {}, "roster": {}, "plays": {}, "totals": {}, "games": [],
             "lineup": [], "lineup_no": 0, "extra": [], "pending": None, "history": []}
 
@@ -3498,9 +3498,8 @@ def _tourn_manager(chat_id, uid, g=None) -> bool:
 
 
 def _tourn_can_score(t, game, uid) -> bool:
-    """✏️ چه کسی کارنامهٔ یک بازی را اصلاح/تأیید می‌کند: داوران، مدیرِ کامل، و گادِ همان بازی."""
-    return bool(_is_full_admin(uid) or _tourn_is_ref(t, uid)
-                or (game and str(uid) == str(game.get("god") or "")))
+    """✏️ کارنامه را فقط و فقط داورانِ تورنومنت اصلاح/تأیید می‌کنند."""
+    return _tourn_is_ref(t, uid)
 
 
 def _tourn_name(t, uid, g=None) -> str:
@@ -3517,18 +3516,55 @@ def _tourn_level(t) -> int:
                 if u in (t.get("roster") or {})] or [0])
 
 
-_TOURN_LINE_RE = re.compile(r"^\s*(\d{5,15})\s+(.+?)\s*$")
-_TOURN_DEL_RE = re.compile(r"^\s*(?:حذف|پاک)\s+(\d{5,15})\s*$")
+_TOURN_ID_RE = re.compile(r"(?<!\d)(\d{5,15})(?!\d)")
+_TOURN_UN_RE = re.compile(r"@([A-Za-z][A-Za-z0-9_]{3,31})")
+_TOURN_DEL_RE = re.compile(r"^\s*(?:حذف|پاک)\s+(@[A-Za-z][A-Za-z0-9_]{3,31}|\d{5,15})\s*$")
 
 
 def _tourn_parse_people(text) -> list:
-    """هر خط «آیدی اسم» → [(uid_str, name)]"""
+    """هر خط یک نفر — «آیدی اسم»، «اسم آیدی»، «@یوزرنیم اسم»، یا فقط «آیدی»/«@یوزرنیم».
+    → [(کلید, اسم)]؛ کلید یا آیدیِ عددی است یا «@یوزرنیم» (بعداً به آیدی تبدیل می‌شود)."""
     out = []
     for ln in str(text or "").translate(_FA_DIGITS).splitlines():
-        m = _TOURN_LINE_RE.match(ln)
+        ln = ln.strip()
+        if not ln or _TOURN_DEL_RE.match(ln):
+            continue
+        m = _TOURN_ID_RE.search(ln)
         if m:
-            out.append((m.group(1), m.group(2)[:40]))
+            key = m.group(1)
+        else:
+            m = _TOURN_UN_RE.search(ln)
+            if not m:
+                continue
+            key = "@" + m.group(1).lower()
+        name = (ln[:m.start()] + " " + ln[m.end():]).strip(" -:،,|—")
+        out.append((key, " ".join(name.split())[:40]))
     return out
+
+
+async def _tourn_resolve(ctx, key, name, names=None):
+    """کلیدِ «آیدی» یا «@یوزرنیم» → (آیدیِ رشته‌ای، اسم)؛ پیدا نشد → (None, None)."""
+    if key.isdigit():
+        nm = name or _UNAME_CACHE_BY_ID.get(int(key)) or (names or {}).get(int(key)) or key
+        return key, nm
+    uname = key.lstrip("@").lower()
+    hit = _UNAME_CACHE.get(uname)
+    if hit:
+        return str(hit[0]), name or hit[1]
+    try:
+        ch = await ctx.bot.get_chat("@" + uname)
+        if getattr(ch, "id", None) and int(ch.id) > 0:
+            return str(ch.id), name or getattr(ch, "full_name", None) or uname
+    except Exception:
+        pass
+    return None, None
+
+
+def _tourn_size_parse(text):
+    """«۱۲» / «12» / «۱۲ نفره» → 12؛ وگرنه None."""
+    s = " ".join(str(text or "").split()).translate(_FA_DIGITS)
+    s = re.sub(r"\s*(?:نفره|نفر)$", "", s)
+    return int(s) if (s.isdigit() and len(s) <= 2) else None
 
 
 def _tourn_roster_text(t) -> str:
@@ -3570,8 +3606,11 @@ async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _tourn_save(chat, t)
         await update.message.reply_text(
             _tourn_roster_text(t) + "\n\n"
-            "➕ برای افزودن: هر خط «آیدی اسم» بفرست (هر تعداد — لازم نیست ۱۴ نفر باشد).\n"
-            "➖ برای حذف: «حذف آیدی».\n"
+            "➕ <b>افزودن</b> — هر کدام از این سه راه (هر تعداد):\n"
+            "• روی یک پیامِ خودِ آن شخص در گروه ریپلای کن و بنویس «شرکت‌کننده»\n"
+            "• یا هر خط «@یوزرنیم اسم»\n"
+            "• یا هر خط «آیدیِ عددی اسم»\n"
+            "➖ <b>حذف</b>: «حذف @یوزرنیم» یا «حذف آیدی»، یا ریپلای + «حذف از تورنومنت».\n"
             "وقتی تمام شد بنویس «تمام».",
             parse_mode="HTML")
         return
@@ -3584,8 +3623,8 @@ async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🏆 <b>حالتِ تورنومنت روشن شد.</b>\n\n"
-        "۱️⃣ داوران را معرفی کن — هر خط یک نفر به شکلِ «آیدی اسم»، یا روی پیامِ خودِ شخص "
-        "ریپلای کن و بنویس «داور». یک داور یا چند داور فرقی ندارد.\n"
+        "۱️⃣ داوران را معرفی کن — روی یک پیامِ خودِ شخص ریپلای کن و بنویس «داور»، یا هر خط "
+        "«@یوزرنیم اسم» یا «آیدیِ عددی اسم». یک داور یا چند داور فرقی ندارد.\n"
         "وقتی تمام شد بنویس «تمام».",
         parse_mode="HTML")
 
@@ -3598,6 +3637,7 @@ def _tourn_status_text(t) -> str:
     return (f"🏆 <b>تورنومنت — فصل {season}</b>\n"
             f"🧑‍⚖️ داوران: {refs}\n"
             f"👥 شرکت‌کننده‌ها: {len(t.get('roster') or {})} نفر\n"
+            f"🔢 لیست‌های این فصل: {(str(t.get('size')) + ' نفره') if t.get('size') and not t.get('need_size') else 'هنوز تعیین نشده'}\n"
             f"🎮 بازی‌های تأییدشدهٔ این فصل: {done} از {t.get('per_season', TOURN_GAMES_PER_SEASON)}\n"
             + (f"⏳ بازی {t['games'][pend]['no']} منتظرِ تأییدِ داوران است.\n" if pend is not None else "")
             + "\n<b>دستورها</b>\n"
@@ -3609,15 +3649,51 @@ def _tourn_status_text(t) -> str:
 
 
 async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
-    """📝 متن‌های راه‌اندازی/افزودن در گروه (فقط مدیرِ کامل): «آیدی اسم»، «حذف آیدی»، «تمام»."""
+    """📝 متن‌های راه‌اندازی/افزودن در گروه: «آیدی اسم» / «@یوزرنیم اسم» / «حذف آیدی» / «تمام»،
+    و اولِ هر فصل «تعدادِ نفراتِ هر لیست» (فقط عدد)."""
     t = _tourn_rec(msg.chat.id)
-    if not t or not t.get("active") or not _is_full_admin(uid):
-        return False
-    stage = t.get("setup")
-    adding = bool(t.get("adding")) and not stage
-    if not stage and not adding:
+    if not t or not t.get("active"):
         return False
     chat_id = msg.chat.id
+    stage = t.get("setup")
+    admin = _is_full_admin(uid)
+
+    # ── 🔢 اندازهٔ لیستِ این فصل ──
+    n = _tourn_size_parse(text)
+    # ⚠️ متنِ غیرعددی اینجا برنمی‌گردد — بینِ دو فصل، افزودنِ بازیکن هم باید کار کند
+    if ((stage == "size" or (not stage and t.get("need_size"))) and n is not None
+            and (admin or (not stage and _tourn_is_ref(t, uid)))):
+        roster_n = len(t.get("roster") or {})
+        if not (5 <= n <= 30):
+            await msg.reply_text("⚠️ تعدادِ نفراتِ لیست باید بینِ ۵ تا ۳۰ باشد.")
+            return True
+        if n > roster_n:
+            await msg.reply_text(f"⚠️ فقط {roster_n} شرکت‌کننده داریم — لیستِ {n} نفره پر نمی‌شود. "
+                                 f"اول با /tournament players نفر اضافه کن.")
+            return True
+        t["size"] = n
+        t["need_size"] = False
+        if stage == "size":
+            t["setup"] = None
+        _tourn_save(chat_id, t)
+        if stage == "size":
+            await msg.reply_text(
+                f"🏆 <b>تورنومنت آماده است:</b> {len(t['refs'])} داور، {roster_n} شرکت‌کننده، "
+                f"لیست‌های <b>{n} نفره</b>.\n"
+                f"با /newgame بازیِ اول را باز کن؛ بات خودش اعلام می‌کند کدام {n} نفر بازی دارند و "
+                f"فقط همان‌ها می‌توانند بنشینند. کارنامهٔ امتیاز بعد از هر بازی به پیویِ داوران می‌رود.",
+                parse_mode="HTML")
+        else:
+            await msg.reply_text(f"✅ فصل {t.get('season', 1)}: لیست‌ها <b>{n} نفره</b>‌اند. "
+                                 f"با /newgame بازیِ اولِ فصل را باز کن.", parse_mode="HTML")
+        return True
+
+    if not admin:
+        return False
+    adding = bool(t.get("adding")) and not stage
+    if stage not in ("refs", "players") and not adding:
+        return False
+
     if text.strip() in ("تمام", "تموم", "پایان"):
         if stage == "refs":
             if not t["refs"]:
@@ -3627,58 +3703,75 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
             _tourn_save(chat_id, t)
             await msg.reply_text(
                 f"✅ {len(t['refs'])} داور ثبت شد.\n\n"
-                "۲️⃣ حالا شرکت‌کننده‌ها را بفرست — هر خط «آیدی اسم»، یا روی پیامشان ریپلای کن و "
-                "بنویس «شرکت‌کننده». تعداد آزاد است (حداقل ۱۰). وقتی تمام شد بنویس «تمام».")
-            return True
-        if len(t["roster"]) < 10:
-            await msg.reply_text(f"⚠️ فقط {len(t['roster'])} شرکت‌کننده ثبت شده؛ حداقل ۱۰ نفر لازم است.")
+                "۲️⃣ حالا شرکت‌کننده‌ها — به هر کدام از این سه راه:\n"
+                "• روی یک پیامِ خودِ آن شخص در گروه ریپلای کن و بنویس «شرکت‌کننده»\n"
+                "• یا هر خط «@یوزرنیم اسم» بفرست\n"
+                "• یا هر خط «آیدیِ عددی اسم» بفرست\n"
+                "تعداد آزاد است. وقتی تمام شد بنویس «تمام».")
             return True
         if stage == "players":
-            t["setup"] = None
+            if len(t["roster"]) < 5:
+                await msg.reply_text(f"⚠️ فقط {len(t['roster'])} شرکت‌کننده ثبت شده — خیلی کم است.")
+                return True
+            t["setup"] = "size"
             _tourn_save(chat_id, t)
             await msg.reply_text(
-                f"🏆 <b>تورنومنت آماده است:</b> {len(t['refs'])} داور، {len(t['roster'])} شرکت‌کننده.\n"
-                "با /newgame بازیِ اول را باز کن؛ بات خودش اعلام می‌کند کدام ۱۰ نفر بازی دارند و "
-                "فقط همان‌ها می‌توانند بنشینند. کارنامهٔ امتیاز بعد از هر بازی به پیویِ داوران می‌رود.",
-                parse_mode="HTML")
+                f"✅ {len(t['roster'])} شرکت‌کننده ثبت شد.\n\n"
+                "۳️⃣ هر لیستِ این فصل چند نفره باشد؟ فقط عدد بنویس — مثلاً ۱۰ یا ۱۲.")
             return True
         t["adding"] = False
         _tourn_save(chat_id, t)
         await msg.reply_text(_tourn_roster_text(t) + "\n\n✅ فهرست بسته شد.", parse_mode="HTML")
         return True
+
     norm = str(text or "").translate(_FA_DIGITS)
-    dels = [m.group(1) for ln in norm.splitlines() for m in [_TOURN_DEL_RE.match(ln)] if m]
+    dels = [m.group(1) for ln in norm.splitlines() for m in [_TOURN_DEL_RE.match(ln.strip())] if m]
     people = _tourn_parse_people(text)
     if not people and not dels:
         return False
+    names = None
+    if any(k.isdigit() and not n for k, n in people):
+        names = load_usernames_from_gist() or {}
+    failed, ok = [], []
+    for key, nm in people:
+        u, nm2 = await _tourn_resolve(ctx, key, nm, names)
+        if u is None:
+            failed.append(key)
+        else:
+            ok.append((u, nm2))
     if stage == "refs":
-        for u, n in people:
+        for u, n in ok:
             t["refs"][u] = n
         _tourn_save(chat_id, t)
-        await msg.reply_text(f"✅ {len(people)} داور اضافه شد (مجموع: {len(t['refs'])}). "
-                             f"باز هم می‌توانی بفرستی؛ وقتی تمام شد بنویس «تمام».")
-        return True
-    lvl = 0 if stage == "players" else _tourn_level(t)
-    added = 0
-    for u, n in people:
-        if u not in t["roster"]:
-            added += 1
-            t["plays"][u] = max(int(t["plays"].get(u, 0) or 0), lvl)
-        t["roster"][u] = n
-        t["totals"].setdefault(u, 0.0)
-    removed = 0
-    for u in dels:
-        if t["roster"].pop(u, None) is not None:
-            removed += 1
-        t["lineup"] = [x for x in (t.get("lineup") or []) if x != u]
-    _tourn_save(chat_id, t)
-    parts = []
-    if added or people:
-        parts.append(f"➕ {added} نفرِ تازه" + (f" ({len(people) - added} اسمِ به‌روزشده)" if len(people) > added else ""))
-    if dels:
-        parts.append(f"➖ {removed} نفر حذف شد")
-    await msg.reply_text("✅ " + " | ".join(parts) + f" — مجموع: {len(t['roster'])} شرکت‌کننده. "
-                         f"وقتی تمام شد بنویس «تمام».")
+        rep = f"✅ {len(ok)} داور اضافه شد (مجموع: {len(t['refs'])})."
+    else:
+        lvl = 0 if stage == "players" else _tourn_level(t)
+        added = 0
+        for u, n in ok:
+            if u not in t["roster"]:
+                added += 1
+                t["plays"][u] = max(int(t["plays"].get(u, 0) or 0), lvl)
+            t["roster"][u] = n
+            t["totals"].setdefault(u, 0.0)
+        removed = 0
+        for key in dels:
+            u, _n = await _tourn_resolve(ctx, key, "", names)
+            if u and t["roster"].pop(u, None) is not None:
+                removed += 1
+                t["lineup"] = [x for x in (t.get("lineup") or []) if x != u]
+            elif not u:
+                failed.append(key)
+        _tourn_save(chat_id, t)
+        bits = []
+        if ok:
+            bits.append(f"➕ {added} نفرِ تازه" + (f" ({len(ok) - added} اسمِ به‌روزشده)" if len(ok) > added else ""))
+        if dels:
+            bits.append(f"➖ {removed} نفر حذف شد")
+        rep = "✅ " + " | ".join(bits or ["چیزی عوض نشد"]) + f" — مجموع: {len(t['roster'])} شرکت‌کننده."
+    if failed:
+        rep += ("\n⚠️ این‌ها پیدا نشدند: " + "، ".join(failed)
+                + "\nبرای این‌ها روی یک پیامِ خودشان در گروه ریپلای کن و بنویس «شرکت‌کننده».")
+    await msg.reply_text(rep + "\nوقتی تمام شد بنویس «تمام».")
     return True
 
 
@@ -3958,8 +4051,8 @@ def _tourn_card_text(t, game, public=False) -> str:
         lines += ["", "✅ تأیید شد" + (f" — {escape(str(game.get('by_name')), quote=False)}" if game.get("by_name") else "")]
     else:
         lines += ["",
-                  "✏️ برای افزودن/کم‌کردنِ امتیاز «✏️ اصلاح» را بزن و هر خط بفرست: "
-                  "«صندلی دلیل امتیاز» — مثلاً «۵ فکت ۵» یا «۳ اکت ۱۰» یا «۷ خطا -۵».",
+                  "✏️ امتیازِ اضافه/کم: روی همین پیام ریپلای کن (یا «✏️ اصلاح» را بزن) و بنویس "
+                  "شمارهٔ صندلی، بعد دلیل و امتیاز — مثلاً «۵ اکت ۱۰ فکت ۵» یا «۷ خطا -۵».",
                   "با «✅ تأیید» امتیازها ثبت و لیست در گروه اعلام می‌شود؛ اگر تا بازیِ بعدی تأیید نشود، "
                   "همین‌ها خودکار ثبت می‌شود."]
     return "\n".join(lines)
@@ -4016,9 +4109,7 @@ async def _tourn_game_done(ctx, chat_id, g, scores, event_num, date_str):
     t["lineup"] = []
     t["extra"] = []
     text = _tourn_card_text(t, game)
-    to = list((t.get("refs") or {}).keys()) or [str(ADMIN_ID)]
-    if god and god not in to:
-        to.append(god)          # 🎩 گادِ همین بازی هم دلیل‌دار امتیاز می‌دهد
+    to = list((t.get("refs") or {}).keys()) or [str(ADMIN_ID)]   # 🧑‍⚖️ فقط داوران
     sent = 0
     for r in to:
         try:
@@ -4096,8 +4187,11 @@ def _tourn_table(t, final=False) -> str:
 async def _tourn_close_season(ctx, chat_id, t):
     table = _tourn_table(t, final=True)
     try:
-        await ctx.bot.send_message(chat_id, table + "\n\n🎉 فصل بسته شد — فصلِ بعد از بازیِ بعدی شروع می‌شود.",
-                                   parse_mode="HTML")
+        await ctx.bot.send_message(
+            chat_id, table + "\n\n🎉 فصل بسته شد.\n\n"
+            f"🔢 <b>فصلِ {int(t.get('season', 1)) + 1}</b>: قبل از بازیِ اول، مدیر یا داور تعدادِ نفراتِ "
+            f"هر لیست را همین‌جا بنویسد — فقط عدد، مثلاً ۱۰ یا ۱۲ "
+            f"(فصلِ قبل {t.get('size') or '—'} نفره بود).", parse_mode="HTML")
     except Exception:
         pass
     hint = ("\n\n➕ برای افزودن/حذفِ شرکت‌کننده قبل از فصلِ بعد، در گروهِ تورنومنت بنویس "
@@ -4113,6 +4207,7 @@ async def _tourn_close_season(ctx, chat_id, t):
     t["totals"] = {u: 0.0 for u in (t.get("roster") or {})}
     t["plays"] = {u: 0 for u in (t.get("roster") or {})}
     t["pending"] = None
+    t["need_size"] = True        # 🔢 اندازهٔ لیستِ فصلِ تازه پرسیده می‌شود
     _tourn_save(chat_id, t)
 
 
@@ -4137,7 +4232,7 @@ async def handle_tourn_callback(update, ctx):
         await safe_q_answer(q, "این بازی پیدا نشد.", show_alert=True)
         return
     if not _tourn_can_score(t, game, uid):
-        await safe_q_answer(q, "⛔ فقط داورانِ تورنومنت و گادِ همین بازی.", show_alert=True)
+        await safe_q_answer(q, "⛔ فقط داورانِ تورنومنت.", show_alert=True)
         return
     if game.get("status") == "confirmed":
         await safe_q_answer(q, "✅ این بازی قبلاً تأیید شده.", show_alert=True)
@@ -4152,9 +4247,10 @@ async def handle_tourn_callback(update, ctx):
         _TOURN_EDIT[uid] = (chat_id, idx)
         try:
             await ctx.bot.send_message(
-                uid, "✏️ هر خط: «صندلی دلیل امتیاز» — مثلاً:\n"
-                     "۵ فکت ۵\n۳ اکت ۱۰\n۷ خطا -۵\n\n"
-                     "امتیاز به امتیازِ بات اضافه (یا با منفی کم) می‌شود و دلیلش زیرِ اسم می‌آید.\n"
+                uid, "✏️ حالا بنویس: شمارهٔ صندلی، بعد دلیل و امتیاز. مثلاً برای صندلی ۵:\n\n"
+                     "۵ اکت ۱۰ فکت ۵\n\n"
+                     "یعنی ۱۰ امتیاز «اکت» و ۵ امتیاز «فکت» به صندلی ۵ اضافه شود. "
+                     "برای کم‌کردن منفی بنویس: «۷ خطا -۵». چند صندلی؟ هر کدام یک خط.\n"
                      "«پاک ۵» همهٔ اصلاح‌های صندلی ۵ را برمی‌دارد.\n"
                      "کارنامه همان لحظه به‌روز می‌شود؛ آخرش «✅ تأیید» را بزن. برای بیرون‌آمدن «انصراف».")
         except Exception:
@@ -4163,21 +4259,48 @@ async def handle_tourn_callback(update, ctx):
     await safe_q_answer(q)
 
 
+def _tourn_card_of_reply(message):
+    """پیویِ داور: ریپلای روی کارنامهٔ معلقِ خودش → (chat_id, شمارهٔ بازی)؛ وگرنه None.
+    (بدونِ زدنِ «✏️ اصلاح» هم کار می‌کند و با ری‌استارتِ بات از دست نمی‌رود.)"""
+    try:
+        rt = getattr(message, "reply_to_message", None)
+        if rt is None or message.from_user is None:
+            return None
+        u = str(message.from_user.id)
+        for cid, t in (load_tournaments() or {}).items():
+            if not t.get("active") or u not in (t.get("refs") or {}):
+                continue
+            for i, gm in enumerate(t.get("games") or []):
+                if (gm.get("status") == "pending"
+                        and int((gm.get("msgs") or {}).get(u, 0) or 0) == int(rt.message_id)):
+                    return int(cid), i
+    except Exception:
+        pass
+    return None
+
+
 class _TournEditFilter(filters.MessageFilter):
-    """داور/گادی که همین حالا در حالِ اصلاحِ کارنامه است."""
+    """داوری که در حالِ اصلاحِ کارنامه است، یا روی کارنامهٔ معلقش ریپلای کرده."""
 
     def filter(self, message):
         try:
-            return bool(message and message.from_user and message.from_user.id in _TOURN_EDIT)
+            return bool(message and message.from_user and (
+                message.from_user.id in _TOURN_EDIT or _tourn_card_of_reply(message)))
         except Exception:
             return False
 
 
-_TQ_NUM_RE = re.compile(r"([+\-−]?\s*\d+(?:[.,٫]\d+)?)")
+_TQ_NUM_RE = re.compile(r"[+\-−]?\s*\d+(?:[.,٫]\d+)?")
+
+
+def _tourn_adj_why(x) -> str:
+    x = " ".join(str(x or "").split()).strip(" :-–،,+")
+    return re.sub(r"^و\s+", "", x).strip()
 
 
 def _tourn_parse_adj(text) -> list:
-    """«۵ فکت ۵» / «۳ اکت -۱۰» / «۵ ۱۰» / «پاک ۵» → [("add", صندلی, امتیاز, دلیل) | ("clear", صندلی)]"""
+    """هر خط: «صندلی» + یک یا چند «دلیل امتیاز» → [("add", صندلی, امتیاز, دلیل) | ("clear", صندلی)]
+    «۵ اکت ۱۰ فکت ۵» = دو مورد | «۵ ۱۰ اکت ۵ فکت» هم | «۷ خطا -۵» | «۵ ۱۰» | «پاک ۵»"""
     out = []
     for ln in str(text or "").translate(_FA_DIGITS).splitlines():
         ln = ln.strip()
@@ -4194,14 +4317,26 @@ def _tourn_parse_adj(text) -> list:
         nums = list(_TQ_NUM_RE.finditer(rest))
         if not nums:
             continue
-        last = nums[-1]
-        raw = last.group(1).replace(" ", "").replace("−", "-").replace(",", ".").replace("٫", ".")
-        try:
-            pts = float(raw)
-        except Exception:
-            continue
-        reason = (rest[:last.start()] + rest[last.end():]).strip(" :-–،,")
-        out.append(("add", seat, round(pts, 1), reason or "اصلاحِ داور"))
+        texts, prev = [], 0
+        for n in nums:
+            texts.append(rest[prev:n.start()])
+            prev = n.end()
+        tail = rest[prev:]
+        vals = []
+        for n in nums:
+            raw = n.group(0).replace(" ", "").replace("−", "-").replace(",", ".").replace("٫", ".")
+            try:
+                vals.append(round(float(raw), 1))
+            except Exception:
+                vals.append(None)
+        if _tourn_adj_why(texts[0]):
+            whys = [texts[i] for i in range(len(vals))]          # «اکت ۱۰ فکت ۵»
+        else:
+            whys = texts[1:] + [tail]                            # «۱۰ اکت ۵ فکت»
+        for v, w in zip(vals, whys):
+            if v is None:
+                continue
+            out.append(("add", seat, v, _tourn_adj_why(w) or "اصلاحِ داور"))
     return out
 
 
@@ -4210,7 +4345,7 @@ async def handle_tourn_edit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
     uid = msg.from_user.id
-    st = _TOURN_EDIT.get(uid)
+    st = _tourn_card_of_reply(msg) or _TOURN_EDIT.get(uid)
     if not st:
         return
     chat_id, idx = st
@@ -4223,6 +4358,9 @@ async def handle_tourn_edit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         game = t["games"][idx]
     except Exception:
+        _TOURN_EDIT.pop(uid, None)
+        return
+    if not _tourn_is_ref(t, uid):
         _TOURN_EDIT.pop(uid, None)
         return
     if game.get("status") == "confirmed":
@@ -4242,9 +4380,10 @@ async def handle_tourn_edit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             done.append(f"{op[1]}: اصلاح‌ها پاک شد")
         else:
             row.setdefault("adj", []).append([op[2], op[3][:40]])
-            done.append(f"{op[1]}: {_tourn_sign(op[2])} {op[3]}")
+            done.append(f"{op[1]}. {row.get('name', '')}: {_tourn_sign(op[2])} {op[3]}")
     if not done:
-        await msg.reply_text("⚠️ چیزی نفهمیدم — هر خط «صندلی دلیل امتیاز»، مثلاً «۵ فکت ۵»."
+        await msg.reply_text("⚠️ چیزی نفهمیدم — هر خط: شمارهٔ صندلی، بعد دلیل و امتیاز. مثلاً:\n"
+                             "۵ اکت ۱۰ فکت ۵"
                              + (f"\n(صندلیِ {', '.join(bad)} در این بازی نبود)" if bad else ""))
         return
     _tourn_recalc(t, game)
@@ -4252,7 +4391,7 @@ async def handle_tourn_edit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _tourn_refresh_cards(ctx, chat_id, t, idx)
     await msg.reply_text("✏️ ثبت شد:\n" + "\n".join(done)
                          + (f"\n⚠️ صندلیِ {', '.join(bad)} در این بازی نبود." if bad else "")
-                         + "\nبرای نهایی‌کردن «✅ تأیید» را بزن.")
+                         + "\nبرای نهایی‌کردن «✅ تأیید» را زیرِ کارنامه بزن.")
 
 
 async def handle_tourn_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -24264,6 +24403,15 @@ async def newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     seats = 10
     if ctx.args and ctx.args[0].isdigit():
         seats = int(ctx.args[0])
+
+    # 🏆 تورنومنت: اندازهٔ لیست را فصل تعیین می‌کند، نه /newgame
+    _tn = _tourn(chat)
+    if _tn:
+        if _tn.get("need_size") or not _tn.get("size"):
+            await update.message.reply_text(
+                "🏆 اول تعدادِ نفراتِ هر لیستِ این فصل را بنویس — فقط عدد، مثلاً ۱۰ یا ۱۲.")
+            return
+        seats = int(_tn["size"])
 
     # 🎥 اگر بازیِ قبلی نیمه‌کاره بود و ضبطش هنوز باز است، همین‌جا بسته شود و
     #    اکانتِ صوتی از مایک پایین بیاید — بدونِ ارسال به چنل (لیستِ قبلی تپان شده).
