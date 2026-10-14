@@ -3776,10 +3776,143 @@ def _tourn_status_text(t) -> str:
             + (f"⏳ بازی {pg.get('no')} منتظرِ تأییدِ داوران است.\n" if pg else "")
             + "\n<b>دستورها</b>\n"
               "• /tournament players — دیدن/افزودن/حذفِ شرکت‌کننده‌ها (مدیرانِ اصلی)\n"
+              "• «داور آیدی اسم» / «حذف داور آیدی» — افزودن/حذفِ داور، یا ریپلای + «داور» / «حذف داور» (مدیرانِ اصلی)\n"
               "• ریپلای + «شرکت‌کننده» / «حذف از تورنومنت» — همان کار برای یک نفر (مدیر/داور)\n"
               "• ریپلای + «جایگزین صندلی N» — مهمانِ یک‌بازی؛ امتیاز برای صاحبِ صندلی\n"
               "• «جدول» در پیویِ بات — جدولِ فعلی (داور/مدیر)\n"
               "• /tournament end — بستنِ تورنومنت")
+
+
+_TOURN_REFCMD_RE = re.compile(r"^(حذف\s+)?داور(?:ها|ان)?(?=\s|$)")
+
+
+def _tourn_refs_list(t) -> str:
+    rows = [f"• {escape(str(n), quote=False)} — <code>{u}</code>" for u, n in (t.get("refs") or {}).items()]
+    return f"🧑‍⚖️ <b>داوران ({len(rows)} نفر)</b>\n" + ("\n".join(rows) or "—")
+
+
+_TOURN_REF_HOWTO = ("➕ داورِ تازه: «داور آیدی اسم» یا «داور @یوزرنیم» — یا روی پیامِ خودِ شخص ریپلای کن و "
+                    "بنویس «داور».\n➖ حذف: «حذف داور آیدی» — یا ریپلای روی پیامِ داور + «حذف داور».")
+
+
+async def _tourn_drop_ref(ctx, chat_id, t, u):
+    """🗑 کنار گذاشتنِ یک داور — از تورنومنت و از کارنامهٔ معلق (اصلاح‌هایش هم دیگر حساب نمی‌شود)."""
+    u = str(u)
+    (t.get("refs") or {}).pop(u, None)
+    for k in [k for k, v in _TOURN_EDIT.items() if str(k) == u and v[0] == chat_id]:
+        _TOURN_EDIT.pop(k, None)
+    idx = t.get("pending")
+    game = _tourn_game_at(t, idx) if idx is not None else None
+    if not game or game.get("status") != "pending" or u not in [str(r) for r in (game.get("refs") or [])]:
+        return
+    game["refs"] = [str(r) for r in game["refs"] if str(r) != u]
+    game["ok_by"] = [str(r) for r in (game.get("ok_by") or []) if str(r) != u]
+    for row in game.get("rows") or []:
+        (row.get("adj_by") or {}).pop(u, None)
+    mid = (game.get("msgs") or {}).pop(u, None)
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(chat_id=int(u), message_id=int(mid),
+                                            text="🗑 دیگر داورِ این تورنومنت نیستی — این کارنامه بسته شد.")
+        except Exception:
+            pass
+    if game["refs"] and all(r in game["ok_by"] for r in game["refs"]):
+        # ✅ بقیهٔ داورها پیش‌تر تأیید کرده بودند — حالا نهایی می‌شود
+        await _tourn_confirm(ctx, chat_id, t, idx, by_uid=game["refs"][-1])
+        return
+    if not game["refs"]:
+        # 📨 کارنامه بی‌داور ماند — به داورهای فعلی (یا در نبودشان به مدیرِ اصلی) می‌رود
+        tid = t.get("tid", 0)
+        for r in list((t.get("refs") or {}).keys()):
+            try:
+                m = await ctx.bot.send_message(int(r), _tourn_card_text(t, game, ref=r), parse_mode="HTML",
+                                               reply_markup=_tourn_card_kb(chat_id, tid, idx))
+                game.setdefault("msgs", {})[r] = m.message_id
+                game["refs"].append(r)
+            except Exception as e:
+                print("⚠️ tourn card to", r, e)
+        if not game["refs"]:
+            game["fallback_admin"] = True
+            game["refs"] = [str(ADMIN_ID)]
+            try:
+                m = await ctx.bot.send_message(
+                    ADMIN_ID, "⚠️ داورِ این کارنامه حذف شد و داورِ دیگری نیست — خودت بررسی و تأیید کن:"
+                    + chr(10) + chr(10) + _tourn_card_text(t, game, ref=str(ADMIN_ID)),
+                    parse_mode="HTML", reply_markup=_tourn_card_kb(chat_id, tid, idx))
+                game.setdefault("msgs", {})[str(ADMIN_ID)] = m.message_id
+            except Exception as e:
+                print("⚠️ tourn card fallback:", e)
+    _tourn_recalc(t, game)
+    _tourn_save(chat_id, t)
+    await _tourn_refresh_cards(ctx, chat_id, t, idx)
+
+
+def _tourn_dropref_msg(t, stage, gone, miss) -> str:
+    out = []
+    if gone:
+        out.append("🗑 از داوری کنار رفت: " + "، ".join(escape(str(x), quote=False) for x in gone))
+    if miss:
+        out.append("ℹ️ این‌ها داور نبودند: " + "، ".join(escape(str(x), quote=False) for x in miss))
+    out += [_tourn_refs_list(t), _TOURN_REF_HOWTO]
+    if not (t.get("refs") or {}) and stage != "refs":
+        out.append("⚠️ هیچ داوری نمانده — تا داور اضافه نکنی، کارنامهٔ بازی‌ها فقط به پیویِ مدیرِ اصلی می‌رود.")
+    return "\n\n".join(out)
+
+
+async def _tourn_ref_text(ctx, msg, t, stage, text) -> bool:
+    """🧑‍⚖️ بی‌ریپلای و در هر مرحله (مدیرِ اصلی): «داور آیدی اسم» / «داور @یوزرنیم» و «حذف داور آیدی».
+    ⚠️ بدونِ این، «داور 123» در مرحلهٔ داوران «داور» را اسم می‌گرفت و در مرحلهٔ بازیکنان شرکت‌کننده می‌ساخت."""
+    norm = str(text or "").translate(_FA_DIGITS).strip()
+    m = _TOURN_REFCMD_RE.match(norm)
+    if not m:
+        return False
+    chat_id = msg.chat.id
+    drop = bool(m.group(1))
+    body = chr(10).join(_TOURN_REFCMD_RE.sub("", ln.strip(), count=1) for ln in norm.splitlines())
+    people = _tourn_parse_people(body)
+    if drop:
+        if not people:
+            await msg.reply_text(_tourn_refs_list(t) + "\n\n" + _TOURN_REF_HOWTO, parse_mode="HTML")
+            return True
+        gone, miss = [], []
+        for key, _nm in people:
+            u, _n = await _tourn_resolve(ctx, key, "-")
+            if u and u in (t.get("refs") or {}):
+                gone.append(_tourn_raw_name(t, u))
+                await _tourn_drop_ref(ctx, chat_id, t, u)
+            else:
+                miss.append(key)
+        _tourn_save(chat_id, t)
+        await msg.reply_text(_tourn_dropref_msg(t, stage, gone, miss), parse_mode="HTML")
+        return True
+    if not people:
+        return False                     # «داور» بی‌آیدی — پیامِ عادیِ گروه است
+    names = (load_usernames_from_gist() or {}) if any(k.isdigit() and not nm for k, nm in people) else None
+    added, failed, noname = [], [], []
+    for key, nm in people:
+        u, nm2 = await _tourn_resolve(ctx, key, nm, names)
+        if u is None:
+            failed.append(key)
+            continue
+        t.setdefault("refs", {})[u] = nm2
+        added.append(nm2)
+        if str(nm2) == u:
+            noname.append(u)
+    _tourn_save(chat_id, t)
+    out = []
+    if added:
+        out.append("🧑‍⚖️ داور شد: " + "، ".join(escape(str(x), quote=False) for x in added))
+    if noname:
+        out.append("⚠️ اسمِ این‌ها پیدا نشد و آیدی‌شان اسم شد — اگر می‌خواهی: «داور آیدی اسم»: "
+                   + "، ".join(noname))
+    if failed:
+        out.append("⚠️ این‌ها پیدا نشدند: " + "، ".join(escape(str(x), quote=False) for x in failed)
+                   + " — روی پیامِ خودشان ریپلای کن و بنویس «داور».")
+    out.append(_tourn_refs_list(t))
+    if stage == "refs":
+        out.append("وقتی تمام شد بنویس «تمام».")
+    await msg.reply_text("\n\n".join(out), parse_mode="HTML")
+    return True
 
 
 async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
@@ -3794,6 +3927,8 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
         return False
     chat_id = msg.chat.id
     stage = t.get("setup")
+    if admin and await _tourn_ref_text(ctx, msg, t, stage, text):
+        return True
 
     # ── 🔢 اندازهٔ لیستِ این فصل ──
     #    ⚠️ متنِ غیرعددی اینجا برنمی‌گردد — بینِ دو فصل، افزودنِ بازیکن هم باید کار کند
@@ -3840,7 +3975,8 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
             t["setup"] = "players"
             _tourn_save(chat_id, t)
             await msg.reply_text(
-                f"✅ {len(t['refs'])} داور ثبت شد.\n\n"
+                f"✅ {len(t['refs'])} داور ثبت شد.\n"
+                "(داور را بعداً هم می‌شود اضافه یا حذف کرد: «داور آیدی اسم» / «حذف داور آیدی».)\n\n"
                 "۲️⃣ حالا شرکت‌کننده‌ها — به هر کدام از این سه راه:\n"
                 "• روی یک پیامِ خودِ آن شخص در گروه ریپلای کن و بنویس «شرکت‌کننده»\n"
                 "• یا هر خط «@یوزرنیم اسم» بفرست\n"
@@ -3923,7 +4059,7 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
     return True
 
 
-_TOURN_REPLY_WORDS = ("داور", "داور تورنومنت", "شرکت‌کننده", "شرکت کننده", "عضو تورنومنت",
+_TOURN_REPLY_WORDS = ("داور", "داور تورنومنت", "حذف داور", "شرکت‌کننده", "شرکت کننده", "عضو تورنومنت",
                       "حذف از تورنومنت", "حذف تورنومنت")
 _TOURN_SUB_RE = re.compile(r"^جایگزین(?:\s+صندلی)?\s+(\d{1,2})$")
 
@@ -3943,6 +4079,8 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
     tu = rt.from_user
     chat_id = msg.chat.id
     if getattr(tu, "is_bot", False):
+        if norm == "حذف داور":
+            return False                 # ریپلای روی پیامِ بات → همان فهرستِ داوران و راهنما
         if _tourn_manager(chat_id, uid, g):
             await msg.reply_text("⚠️ روی پیامِ خودِ شخص ریپلای کن، نه پیامِ بات.")
             return True
@@ -3950,6 +4088,18 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
     tname = ((getattr(g, "user_names", None) or {}).get(tu.id)
              or (tu.full_name or "").strip() or str(tu.id))[:40]
     tid_s = str(tu.id)
+
+    if norm == "حذف داور":
+        if not _is_full_admin(uid):
+            return False
+        if tid_s not in (t.get("refs") or {}):
+            await msg.reply_text("ℹ️ این شخص داورِ تورنومنت نیست.\n\n" + _tourn_refs_list(t), parse_mode="HTML")
+            return True
+        nm = _tourn_raw_name(t, tid_s)
+        await _tourn_drop_ref(ctx, chat_id, t, tid_s)
+        _tourn_save(chat_id, t)
+        await msg.reply_text(_tourn_dropref_msg(t, t.get("setup"), [nm], []), parse_mode="HTML")
+        return True
 
     if norm in ("داور", "داور تورنومنت"):
         if not _is_full_admin(uid):
