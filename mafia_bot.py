@@ -3434,7 +3434,7 @@ def save_bot_settings(data: dict):
 #  • بعد از TOURN_GAMES_PER_SEASON بازیِ تأییدشده، جدولِ فصل بسته و فصلِ بعد شروع می‌شود
 # ═════════════════════════════════════════════════════════════
 TOURN_FILENAME = "tournament.json"
-TOURN_GAMES_PER_SEASON = 10
+TOURN_GAMES_PER_SEASON = 14
 TOURN_ADD_WINDOW = 600        # ⏳ حالتِ افزودنِ شرکت‌کننده بعد از ۱۰ دقیقه خودش بسته می‌شود
 TOURN_EDIT_WINDOW = 900       # ⏳ حالتِ «✏️ اصلاح» بعد از ۱۵ دقیقه بی‌کاری بسته می‌شود
 _TOURN_CACHE = {"data": None, "ok": False, "fail_ts": 0.0}
