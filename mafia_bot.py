@@ -3777,6 +3777,7 @@ def _tourn_status_text(t) -> str:
             + "\n<b>دستورها</b>\n"
               "• /tournament players — دیدن/افزودن/حذفِ شرکت‌کننده‌ها (مدیرانِ اصلی)\n"
               "• «داور آیدی اسم» / «حذف داور آیدی» — افزودن/حذفِ داور، یا ریپلای + «داور» / «حذف داور» (مدیرانِ اصلی)\n"
+              "• «لیست تورنومنت» در گروه — داورها و شرکت‌کننده‌ها (مدیر/داور)\n"
               "• ریپلای + «شرکت‌کننده» / «حذف از تورنومنت» — همان کار برای یک نفر (مدیر/داور)\n"
               "• ریپلای + «جایگزین صندلی N» — مهمانِ یک‌بازی؛ امتیاز برای صاحبِ صندلی\n"
               "• «جدول» در پیویِ بات — جدولِ فعلی (داور/مدیر)\n"
@@ -3915,18 +3916,48 @@ async def _tourn_ref_text(ctx, msg, t, stage, text) -> bool:
     return True
 
 
+_TOURN_LIST_WORDS = {"لیستتورنومنت", "لیستپلیر", "لیستپلیرها", "لیستبازیکن", "لیستبازیکنان", "لیستبازیکنها",
+                     "شرکتکنندهها", "شرکتکنندگان", "لیستشرکتکنندهها", "لیستشرکتکنندگان"}
+
+
+def _tourn_is_list_cmd(text) -> bool:
+    return str(text or "").replace(chr(0x200c), "").replace(" ", "").strip() in _TOURN_LIST_WORDS
+
+
+def _tourn_list_text(t) -> str:
+    """📋 داورها + شرکت‌کننده‌ها + قدمِ بعدیِ همین مرحله."""
+    stage = t.get("setup")
+    out = [_tourn_refs_list(t), _tourn_roster_text(t)]
+    if stage == "refs":
+        out.append("۱️⃣ هنوز مرحلهٔ داوران است — وقتی تمام شد بنویس «تمام».")
+    elif stage == "players":
+        out.append("۲️⃣ مرحلهٔ شرکت‌کننده‌ها: هر خط «آیدی اسم» یا «@یوزرنیم اسم»، یا ریپلای + «شرکت‌کننده». "
+                   "حذف: «حذف آیدی». وقتی تمام شد بنویس «تمام».")
+    elif stage == "size":
+        out.append("۳️⃣ هر لیستِ این فصل چند نفره باشد؟ فقط عدد بنویس — مثلاً ۱۰ یا ۱۲.")
+    else:
+        out.append("افزودن/حذفِ شرکت‌کننده: /tournament players — داور: «داور آیدی اسم» / «حذف داور آیدی».")
+    return "\n\n".join(out)
+
+
 async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
     """📝 متن‌های راه‌اندازی/افزودن در گروه: «آیدی اسم» / «@یوزرنیم اسم» / «حذف آیدی» / «تمام»،
     و اولِ هر فصل «تعدادِ نفراتِ هر لیست» (فقط عدد)."""
     n = _tourn_size_parse(text)
     admin = _is_full_admin(uid)
-    if not admin and n is None:
+    is_list = _tourn_is_list_cmd(text)
+    if not admin and n is None and not is_list:
         return False                     # ⚡ مسیرِ داغ: بیشترِ پیام‌های گروه همین‌جا رد می‌شوند
     t = _tourn_rec(msg.chat.id)
     if not t or not t.get("active"):
         return False
     chat_id = msg.chat.id
     stage = t.get("setup")
+    if is_list:
+        if not (admin or _tourn_is_ref(t, uid)):
+            return False
+        await msg.reply_text(_tourn_list_text(t), parse_mode="HTML")
+        return True
     if admin and await _tourn_ref_text(ctx, msg, t, stage, text):
         return True
 
@@ -3976,7 +4007,8 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
             _tourn_save(chat_id, t)
             await msg.reply_text(
                 f"✅ {len(t['refs'])} داور ثبت شد.\n"
-                "(داور را بعداً هم می‌شود اضافه یا حذف کرد: «داور آیدی اسم» / «حذف داور آیدی».)\n\n"
+                "(داور را بعداً هم می‌شود اضافه یا حذف کرد: «داور آیدی اسم» / «حذف داور آیدی».)\n"
+                "(هر وقت خواستی «لیست تورنومنت» بنویس تا ثبت‌شده‌ها را ببینی.)\n\n"
                 "۲️⃣ حالا شرکت‌کننده‌ها — به هر کدام از این سه راه:\n"
                 "• روی یک پیامِ خودِ آن شخص در گروه ریپلای کن و بنویس «شرکت‌کننده»\n"
                 "• یا هر خط «@یوزرنیم اسم» بفرست\n"
