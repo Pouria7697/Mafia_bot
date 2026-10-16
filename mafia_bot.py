@@ -3640,11 +3640,12 @@ def _tourn_size_parse(text):
     return int(s) if (s.isdigit() and len(s) <= 2) else None
 
 
-def _tourn_roster_text(t) -> str:
+def _tourn_roster_text(t, ids=True) -> str:
     played = t.get("played") or {}
     rows = sorted((t.get("roster") or {}).items(), key=lambda x: x[1])
     out = [f"👥 <b>شرکت‌کننده‌ها ({len(rows)} نفر)</b>"]
-    out += [f"• {escape(str(n), quote=False)} — <code>{u}</code> ({int(played.get(u, 0) or 0)} بازی)"
+    out += [(f"• {escape(str(n), quote=False)} — <code>{u}</code> ({int(played.get(u, 0) or 0)} بازی)" if ids
+             else f"• {escape(str(n), quote=False)}")
             for u, n in rows] or ["—"]
     return chr(10).join(out)
 
@@ -3787,8 +3788,9 @@ def _tourn_status_text(t) -> str:
 _TOURN_REFCMD_RE = re.compile(r"^(حذف\s+)?داور(?:ها|ان)?(?=\s|$)")
 
 
-def _tourn_refs_list(t) -> str:
-    rows = [f"• {escape(str(n), quote=False)} — <code>{u}</code>" for u, n in (t.get("refs") or {}).items()]
+def _tourn_refs_list(t, ids=True) -> str:
+    rows = [f"• {escape(str(n), quote=False)}" + (f" — <code>{u}</code>" if ids else "")
+            for u, n in (t.get("refs") or {}).items()]
     return f"🧑‍⚖️ <b>داوران ({len(rows)} نفر)</b>\n" + ("\n".join(rows) or "—")
 
 
@@ -3927,7 +3929,7 @@ def _tourn_is_list_cmd(text) -> bool:
 def _tourn_list_text(t) -> str:
     """📋 داورها + شرکت‌کننده‌ها + قدمِ بعدیِ همین مرحله."""
     stage = t.get("setup")
-    out = [_tourn_refs_list(t), _tourn_roster_text(t)]
+    out = [_tourn_refs_list(t, ids=False), _tourn_roster_text(t, ids=False)]
     if stage == "refs":
         out.append("۱️⃣ هنوز مرحلهٔ داوران است — وقتی تمام شد بنویس «تمام».")
     elif stage == "players":
