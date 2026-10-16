@@ -9066,13 +9066,39 @@ def _game_log(g, text):
 
 
 async def _night_report(ctx, g, text):
-    """ثبت در لاگ پایان‌بازی + ارسال زندهٔ گزارش به پیوی گاد."""
+    """ثبت در لاگ پایان‌بازی + ارسال زندهٔ گزارش به پیوی گاد (و در تورنومنت، داورها)."""
     g.night_log.append(text)
     store.save()
     try:
         await ctx.bot.send_message(g.god_id, text, parse_mode="HTML")
     except Exception:
         pass
+    if getattr(g, "tourn_game", False):
+        await _tourn_refs_mirror(ctx, g, text)
+
+
+async def _tourn_refs_mirror(ctx, g, text):
+    """🧑‍⚖️ بازیِ تورنومنت: همان گزارشِ اکتی که گاد می‌گیرد، برای داورها هم.
+    ⚠️ داوری که خودش در این بازی صندلی دارد چیزی نمی‌گیرد (نقش‌ها و اکت‌ها لو می‌رفت)؛
+    گادی که داور هم هست دوبار نمی‌گیرد. فقط از کش خوانده می‌شود تا شب منتظرِ گیست نماند."""
+    try:
+        chat_id = _game_chat_id(g)
+        t = ((_TOURN_CACHE.get("data") or {}).get(str(chat_id)) if chat_id is not None else None)
+        if not t or not t.get("active"):
+            return
+        seated = {int(u) for u, _n in (g.seats or {}).values()}
+        for r in list((t.get("refs") or {}).keys()):
+            if not str(r).isdigit():
+                continue
+            ru = int(r)
+            if ru == getattr(g, "god_id", None) or ru in seated:
+                continue
+            try:
+                await ctx.bot.send_message(ru, "🧑‍⚖️ " + text, parse_mode="HTML")
+            except Exception as e:
+                print("⚠️ tourn ref mirror:", ru, e)
+    except Exception as e:
+        print("⚠️ tourn ref mirror:", e)
 
 
 def _night_all_done(g) -> bool:
