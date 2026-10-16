@@ -3565,6 +3565,76 @@ def _tourn_raw_name(t, uid, g=None) -> str:
     return str(nm or u)
 
 
+def _tourn_part_name(u, typed, fallback, names):
+    """📇 اسمِ شرکت‌کننده — به فایلِ اسم‌های بات (usernames.json) وصل است:
+    اسم دارد → همان؛ ندارد → اسمی که مدیر نوشت (و همان در فایل ذخیره می‌شود)؛ آن هم نه → اسمِ تلگرام.
+    خروجی: (اسم، اسمی که باید در فایل نوشته شود یا None)."""
+    fn = (names or {}).get(int(u)) if str(u).isdigit() else None
+    if fn:
+        return str(fn)[:40], None
+    typed = " ".join(str(typed or "").split())[:40]
+    if typed:
+        return typed, typed
+    return str(fallback or u)[:40], None
+
+
+def _tourn_names_sync(t, names) -> bool:
+    """🔄 اسم‌های فهرستِ تورنومنت = اسم‌های فایلِ بات (هر کس آنجا اسم دارد). عوض شد → True."""
+    ro = t.get("roster") or {}
+    changed = False
+    for u in list(ro):
+        n = (names or {}).get(int(u)) if str(u).isdigit() else None
+        if n and ro[u] != str(n)[:40]:
+            ro[u] = str(n)[:40]
+            changed = True
+    return changed
+
+
+def _tourn_rename(uid, name):
+    """✏️ بازیکن در بات «تغییر نام» زد → در فهرستِ همهٔ تورنومنت‌هایی که عضوشان است هم."""
+    try:
+        data = _TOURN_CACHE.get("data")
+        if not _TOURN_CACHE.get("ok") or not isinstance(data, dict):
+            return
+        u, name = str(uid), " ".join(str(name or "").split())[:40]
+        changed = False
+        for t in data.values():
+            ro = (t or {}).get("roster") if isinstance(t, dict) else None
+            if isinstance(ro, dict) and u in ro and name and ro[u] != name:
+                ro[u] = name
+                changed = True
+        if changed:
+            save_tournaments(data)
+    except Exception as e:
+        print("⚠️ tourn rename:", e)
+
+
+def _names_file_write(new: dict) -> dict:
+    """(در ترد) اسم‌های تازه در usernames.json — فقط برای کسی که آنجا هنوز اسم ندارد."""
+    un = load_usernames_from_gist()
+    if not isinstance(un, dict):
+        return {}                        # ⚠️ خطا ≠ خالی — چیزی نوشته نمی‌شود
+    add = {int(u): n for u, n in (new or {}).items() if n and not un.get(int(u))}
+    if not add:
+        return {}
+    un.update(add)
+    return add if save_usernames_to_gist(un) else {}
+
+
+async def _names_file_put(new: dict):
+    try:
+        add = await asyncio.to_thread(_names_file_write, new)
+    except Exception as e:
+        print("⚠️ names file put:", e)
+        return
+    # 🔄 بازی‌های بازِ همهٔ گروه‌ها هم بدانند — وگرنه ذخیرهٔ بعدی‌شان این اسم را پاک می‌کرد
+    for _g in list(store.games.values()):
+        nm = getattr(_g, "user_names", None)
+        if isinstance(nm, dict):
+            for u, n in add.items():
+                nm.setdefault(u, n)
+
+
 def _tourn_name(t, uid, g=None) -> str:
     return escape(_tourn_raw_name(t, uid, g), quote=False)
 
@@ -3958,6 +4028,8 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
     if is_list:
         if not (admin or _tourn_is_ref(t, uid)):
             return False
+        if _tourn_names_sync(t, getattr(g, "user_names", None)):
+            _tourn_save(chat_id, t)
         await msg.reply_text(_tourn_list_text(t), parse_mode="HTML")
         return True
     if admin and await _tourn_ref_text(ctx, msg, t, stage, text):
@@ -4038,28 +4110,38 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
     people = _tourn_parse_people(text)
     if not people and not dels:
         return False
-    names = None
-    if any(k.isdigit() and not nm for k, nm in people):
-        names = load_usernames_from_gist() or {}
+    names, names_ok = None, True
+    if people and (stage != "refs" or any(k.isdigit() and not nm for k, nm in people)):
+        names = await asyncio.to_thread(load_usernames_from_gist)
+        if names is None:
+            # ⚠️ فایلِ اسم‌ها خوانده نشد — از اسم‌های همین گروه کمک بگیر و چیزی در فایل ننویس
+            names_ok, names = False, dict(getattr(g, "user_names", None) or {})
     failed, ok, busy = [], [], []
     for key, nm in people:
         u, nm2 = await _tourn_resolve(ctx, key, nm, names)
         if u is None:
             failed.append(key)
         else:
-            ok.append((u, nm2))
+            ok.append((u, nm2, nm))
+    to_file, noname = {}, []
     if stage == "refs":
-        for u, nm in ok:
+        for u, nm, _typed in ok:
             t["refs"][u] = nm
         _tourn_save(chat_id, t)
         rep = f"✅ {len(ok)} داور اضافه شد (مجموع: {len(t['refs'])})."
     else:
         lvl = 0 if stage == "players" else _tourn_level(t)
         added = 0
-        for u, nm in ok:
+        for u, nm, typed in ok:
             if u not in t["roster"]:
                 added += 1
                 t["plays"][u] = max(int(t["plays"].get(u, 0) or 0), lvl)
+            # 📇 اسم از فایلِ اسم‌های بات؛ نبود → اسمی که نوشتی (و در فایل هم ذخیره می‌شود)
+            nm, save = _tourn_part_name(u, typed, nm, names)
+            if save:
+                to_file[int(u)] = save
+            elif not (names or {}).get(int(u)):
+                noname.append(nm)
             t["roster"][u] = nm
             t["totals"].setdefault(u, 0.0)
             t.setdefault("played", {}).setdefault(u, 0)
@@ -4077,6 +4159,8 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
             t["adding"] = {"by": uid, "until": time.time() + TOURN_ADD_WINDOW}   # ⏳ تمدید
         warn = _tourn_short_warn(t) if removed else ""
         _tourn_save(chat_id, t)
+        if to_file and names_ok:
+            await _names_file_put(to_file)
         bits = []
         if ok:
             bits.append(f"➕ {added} نفرِ تازه" + (f" ({len(ok) - added} اسمِ به‌روزشده)" if len(ok) > added else ""))
@@ -4089,6 +4173,10 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
                 + "\nبرای این‌ها روی یک پیامِ خودشان در گروه ریپلای کن و بنویس «شرکت‌کننده».")
     if busy:
         rep += "\n⚠️ این‌ها همین حالا وسطِ بازی‌اند و حذف نشدند: " + "، ".join(busy)
+    if noname:
+        rep += ("\nℹ️ این‌ها در بات اسم ندارند و فعلاً اسمِ تلگرامشان آمد: " + "، ".join(noname)
+                + "\nدرستش کن: «آیدی اسم»، یا ریپلای روی پیامِ خودش + «شرکت‌کننده اسم» — "
+                  "یا خودش در لیستِ بازی «تغییر نام» بزند.")
     await msg.reply_text(rep + "\nوقتی تمام شد بنویس «تمام».")
     return True
 
@@ -4096,6 +4184,7 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
 _TOURN_REPLY_WORDS = ("داور", "داور تورنومنت", "حذف داور", "شرکت‌کننده", "شرکت کننده", "عضو تورنومنت",
                       "حذف از تورنومنت", "حذف تورنومنت")
 _TOURN_SUB_RE = re.compile(r"^جایگزین(?:\s+صندلی)?\s+(\d{1,2})$")
+_TOURN_PART_RE = re.compile(r"^(?:شرکت\u200cکننده|شرکت کننده|عضو تورنومنت)\s+(.+)$")
 
 
 async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
@@ -4105,7 +4194,8 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
         return False
     norm = " ".join(str(text or "").split()).translate(_FA_DIGITS)
     m_sub = _TOURN_SUB_RE.match(norm)
-    if norm not in _TOURN_REPLY_WORDS and not m_sub:
+    m_part = None if _tourn_is_list_cmd(norm) else _TOURN_PART_RE.match(norm)
+    if norm not in _TOURN_REPLY_WORDS and not m_sub and not m_part:
         return False                     # ⚡ مسیرِ داغ: قبل از هر خواندنی رد می‌شود
     t = _tourn_rec(msg.chat.id)
     if not t or not t.get("active"):
@@ -4143,20 +4233,43 @@ async def _tourn_reply_cmd(ctx, msg, g, uid, text) -> bool:
         await msg.reply_text(f"🧑‍⚖️ «{tname}» داور شد (مجموع {len(t['refs'])} داور).")
         return True
 
-    if norm in ("شرکت‌کننده", "شرکت کننده", "عضو تورنومنت"):
+    if norm in ("شرکت‌کننده", "شرکت کننده", "عضو تورنومنت") or m_part:
         if not _tourn_roster_admin(t, uid):
             return False
+        typed = m_part.group(1) if m_part else ""
+        names = await asyncio.to_thread(load_usernames_from_gist)
+        names_ok = names is not None
+        if not names_ok:
+            names = dict(getattr(g, "user_names", None) or {})
+        # 📇 اسم از فایلِ اسم‌های بات؛ نبود → اسمی که نوشتی؛ نبود → اسمِ تلگرام
+        nm, save = _tourn_part_name(tid_s, typed, (tu.full_name or "").strip() or tid_s, names)
+        fname = (names or {}).get(tu.id)
+        note = ""
+        if fname and typed and " ".join(typed.split()) != nm:
+            note = f"\nℹ️ این بازیکن در بات اسمِ «{nm}» را دارد و در تورنومنت هم همان می‌آید."
+        elif not fname and not typed:
+            note = ("\nℹ️ این بازیکن در بات اسم ندارد و فعلاً اسمِ تلگرامش آمد — با ریپلای «شرکت‌کننده اسم» "
+                    "درستش کن، یا خودش در لیستِ بازی «تغییر نام» بزند.")
         if tid_s in t["roster"]:
-            await msg.reply_text("ℹ️ همین حالا هم شرکت‌کنندهٔ تورنومنت است.")
+            if t["roster"][tid_s] == nm:
+                await msg.reply_text(f"ℹ️ «{nm}» همین حالا هم شرکت‌کنندهٔ تورنومنت است." + note)
+                return True
+            t["roster"][tid_s] = nm
+            _tourn_save(chat_id, t)
+            if save and names_ok:
+                await _names_file_put({int(tid_s): save})
+            await msg.reply_text(f"✏️ اسمش در تورنومنت «{nm}» شد." + note)
             return True
-        t["roster"][tid_s] = tname
+        t["roster"][tid_s] = nm
         _mx = 0 if t.get("setup") else _tourn_level(t)
         t["plays"][tid_s] = _mx
         t["totals"].setdefault(tid_s, 0.0)
         t.setdefault("played", {}).setdefault(tid_s, 0)
         _tourn_save(chat_id, t)
-        await msg.reply_text(f"✅ «{tname}» به شرکت‌کننده‌ها اضافه شد"
-                             + (f" — نوبتش با بقیه هم‌تراز شد ({_mx})." if _mx else "."))
+        if save and names_ok:
+            await _names_file_put({int(tid_s): save})
+        await msg.reply_text(f"✅ «{nm}» به شرکت‌کننده‌ها اضافه شد"
+                             + (f" — نوبتش با بقیه هم‌تراز شد ({_mx})." if _mx else ".") + note)
         return True
 
     if norm in ("حذف از تورنومنت", "حذف تورنومنت"):
@@ -4245,6 +4358,7 @@ async def _tourn_on_newgame(ctx, chat_id, g, seats):
             t = _tourn(chat_id) or t
         if isinstance(t.get("adding"), dict):
             t["adding"] = False                  # ➕ حالتِ افزودن با بازیِ تازه بسته می‌شود
+        _tourn_names_sync(t, getattr(g, "user_names", None))   # 📇 اسم‌ها از فایلِ اسم‌های بات
         god = getattr(g, "god_id", None)
         same_turn = bool(t.get("lineup")) and t.get("lineup_no") == len(t.get("games") or []) + 1
         # 🔁 /newgame دوباره، بدونِ اینکه بازی‌ای تمام شده باشد → همان لیست می‌ماند
@@ -24971,6 +25085,7 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # ذخیره نام جدید در دفترچه
         g.user_names[uid] = text
+        _tourn_rename(uid, text)                 # 🏆 فهرستِ تورنومنت هم همین اسم
 
         # ── تغییر نام گاد (صندلی نمادین ۰) ──
         if target_seat == 0:
@@ -27307,6 +27422,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
         g.seats[seat_no] = (uid, text)
         g.user_names[uid] = text
         save_usernames_to_gist(g.user_names)
+        _tourn_rename(uid, text)                 # 🏆 فهرستِ تورنومنت هم همین اسم
         store.save()
 
         if uid in g.last_name_prompt_msg_id:
