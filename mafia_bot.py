@@ -1867,6 +1867,51 @@ async def blocked_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
+async def tourn_quiet_gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🤫 بازیِ تورنومنت، از پخشِ نقش‌ها تا پایانِ بازی یا ریست: پیامِ هر کسی که نه در لیستِ
+    بازی است، نه گاد، نه داور (و نه مدیرِ اصلیِ بات) همان لحظه پاک می‌شود و پردازش هم نمی‌شود.
+    ⚡ جلوی همهٔ پیام‌های گروه است — هیچ خواندنِ شبکه‌ای ندارد."""
+    msg = update.message
+    if msg is None or msg.chat is None:
+        return
+    g = store.games.get(msg.chat.id)
+    if g is None or not getattr(g, "tourn_game", False):
+        return
+    if getattr(g, "phase", "idle") in ("idle", "ended") or not getattr(g, "assigned_roles", None):
+        return
+    u = msg.from_user
+    if (u is None or getattr(u, "is_bot", False) or getattr(msg, "sender_chat", None) is not None
+            or getattr(msg, "is_automatic_forward", False)):
+        return                           # بات‌ها، ادمینِ ناشناس، پستِ کانالِ متصل
+    uid = u.id
+    if uid == getattr(g, "god_id", None) or any(x == uid for x, _n in (g.seats or {}).values()):
+        return
+    t = (_TOURN_CACHE.get("data") or {}).get(str(msg.chat.id))
+    if not t or not t.get("active"):
+        return
+    if str(uid) in (t.get("refs") or {}) or _is_super_admin(uid):
+        return
+    try:
+        if u.username:
+            _UNAME_CACHE[u.username.lower()] = (u.id, u.full_name)
+        _UNAME_CACHE_BY_ID[u.id] = u.full_name
+    except Exception:
+        pass
+    try:
+        await msg.delete()
+    except Exception as e:
+        print("⚠️ tourn quiet delete:", e)
+        if not getattr(g, "tourn_quiet_warned", False):
+            g.tourn_quiet_warned = True
+            try:
+                await ctx.bot.send_message(
+                    msg.chat.id, "⚠️ بات اجازهٔ پاک‌کردنِ پیام ندارد — برای ساکت‌شدنِ تماشاچی‌ها در بازیِ "
+                                 "تورنومنت، بات را ادمین کن و دسترسیِ «Delete messages» بده.")
+            except Exception:
+                pass
+    raise ApplicationHandlerStop
+
+
 def compute_god_bans(delta: dict) -> dict:
     """از دلتای هفته، لیستِ محرومانِ هفتهٔ بعد را می‌سازد."""
     banned = {}
@@ -28643,6 +28688,9 @@ async def main():
     app.add_error_handler(on_error)
     # ⛔ دروازهٔ محرومیتِ کامل — گروهِ منفی یعنی قبل از همهٔ هندلرهای دیگر
     app.add_handler(TypeHandler(Update, blocked_gate), group=-1)
+    # 🤫 بازیِ تورنومنت: پیامِ تماشاچی‌ها (نه بازیکن، نه گاد، نه داور) از پخشِ نقش تا پایان پاک می‌شود
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.UpdateType.MESSAGE
+                                   & ~filters.StatusUpdate.ALL, tourn_quiet_gate), group=-2)
     # 🎙 صدای سفارشیِ گادِ صوتی — فقط پیویِ سازنده؛ قبل از هندلرهای عمومیِ پیوی
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO) & _FullAdminFilter(),
