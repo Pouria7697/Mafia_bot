@@ -4924,15 +4924,19 @@ def _tourn_crit_card_text(t, game, public=False, ref=None) -> str:
     else:
         head = f"✅ <b>امتیازِ تأییدشده — تورنومنت، فصل {s}، بازی {no}</b>"
     lines = [head, f"📅 {escape(str(game.get('date', '—')), quote=False)} | 🎯 رویداد {game.get('event', '—')}", ""]
+    compact = []
     for row in game.get("rows") or []:
         mark = _tourn_mark(row)
         nm = escape(str(row.get("name", "")), quote=False)
         sub = f" (به‌جای {escape(str(row.get('for_name')), quote=False)})" if row.get("for_name") else ""
         if ref is not None and not public:
             vals = _tourn_ref_crit(row, ref)
-            lines.append(f"{mark}{row['seat']}. {nm}{sub} — ⚠️ اخطار: {_sc_fmt(row.get('warns', 0) or 0)}")
-            lines.append(f"      {_tourn_crit_line(vals)}"
-                         + (f" = <b>{_sc_fmt(_tourn_crit_total(vals))}</b>" if vals else ""))
+            _w = _sc_fmt(row.get('warns', 0) or 0)
+            _tot = f" = <b>{_sc_fmt(_tourn_crit_total(vals))}</b>" if vals else ""
+            lines.append(f"{mark}{row['seat']}. {nm}{sub} — ⚠️ اخطار: {_w}")
+            lines.append(f"      {_tourn_crit_line(vals)}" + _tot)
+            compact.append(f"{mark}{row['seat']}. {nm}{sub} — ⚠️{_w} — "
+                           f"{_sc_fmt(_tourn_crit_done(vals))}/{_sc_fmt(len(_TOURN_CRIT_KEYS))}{_tot}")
             continue
         if ref is not None:
             vals = _tourn_ref_crit(row, ref)
@@ -4947,8 +4951,14 @@ def _tourn_crit_card_text(t, game, public=False, ref=None) -> str:
                 v0 = _tourn_ref_crit(row, judges[0]) if judges else {}
                 extra = _tourn_crit_brief(v0) if all(_tourn_ref_crit(row, j) == v0 for j in judges) else ""
         lines.append(f"{mark}{row['seat']}. {nm}{sub} — <b>{_sc_fmt(pts)}</b>" + (f" ({extra})" if extra else ""))
+        compact.append(f"{mark}{row['seat']}. {nm}{sub} — <b>{_sc_fmt(pts)}</b>")
     if public:
+        if len(chr(10).join(lines)) > 3500:
+            lines = lines[:3] + compact      # 📏 لیستِ خیلی بزرگ: فقط جمعِ هر نفر (سقفِ ۴۰۹۶ حرفِ تلگرام)
         return chr(10).join(lines)
+    if compact and len(chr(10).join(lines)) > 3500:
+        # 📏 لیستِ خیلی بزرگ: هر صندلی یک خط (جزئیاتِ هر مورد در نمای همان صندلی هست)
+        lines = lines[:3] + compact
     st = game.get("status")
     ok = {str(r) for r in (game.get("ok_by") or [])}
     if st == "confirmed":
@@ -5183,6 +5193,8 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
     st = _tourn_crit_state(uid)
     if not st:
         return False
+    if _tourn_card_of_reply(msg) is not None:
+        return False                     # ریپلای روی کارنامهٔ قدیمی — مسیرِ اصلاحِ قدیمی
     chat_id, idx = st["chat"], st["idx"]
     t = _tourn_rec(chat_id)
     game = _tourn_game_at(t or {}, idx)
@@ -5414,6 +5426,12 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
             t.setdefault("played", {})[u] = int(t["played"].get(u, 0) or 0) + 1
     game["counted"] = True
     game["status"] = "confirmed"
+    # 🔒 بستنِ فصل همین‌جا، بی‌فاصله از تأیید، تصمیم گرفته می‌شود (قبل از هر await) — وگرنه دو تأییدِ
+    #    هم‌زمانِ دو بازیِ آخر هر دو «۱۴ از ۱۴» می‌دیدند و فصل دوبار بسته می‌شد
+    _season = t.get("season", 1)
+    close_now = (game.get("season", _season) == _season
+                 and len([x for x in t["games"] if x.get("season") == _season and x.get("status") == "confirmed"])
+                 >= int(t.get("per_season") or TOURN_GAMES_PER_SEASON))
     _nj = len(_tourn_judges(game))
     if multi:
         game["by_name"] = f"میانگینِ {_nj} داور" + ("" if by_uid else " (خودکار)")
@@ -5432,9 +5450,7 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
         await ctx.bot.send_message(chat_id, _tourn_card_text(t, game, public=True), parse_mode="HTML")
     except Exception as e:
         print("⚠️ tourn public card:", e)
-    season = t.get("season", 1)
-    done = len([x for x in t["games"] if x.get("season") == season and x.get("status") == "confirmed"])
-    if done >= int(t.get("per_season") or TOURN_GAMES_PER_SEASON):
+    if close_now:
         await _tourn_close_season(ctx, chat_id, t)
     return True
 
@@ -5457,12 +5473,24 @@ def _tourn_table(t, final=False) -> str:
 
 async def _tourn_close_season(ctx, chat_id, t):
     table = _tourn_table(t, final=True)
+    old_season, old_size = int(t.get("season", 1)), t.get("size")
+    # 🔒 اول وضعیت عوض و ذخیره می‌شود، بعد پیام‌ها — تا وسطِ ارسال‌ها کسی فصلِ قدیمی را نبیند
+    t.setdefault("history", []).append({"season": old_season, "totals": dict(t.get("totals") or {}),
+                                        "played": dict(t.get("played") or {}),
+                                        "plays": dict(t.get("plays") or {})})
+    t["season"] = old_season + 1
+    t["totals"] = {u: 0.0 for u in (t.get("roster") or {})}
+    t["plays"] = {u: 0 for u in (t.get("roster") or {})}
+    t["played"] = {u: 0 for u in (t.get("roster") or {})}
+    t["pending"] = None
+    t["need_size"] = True        # 🔢 اندازهٔ لیستِ فصلِ تازه پرسیده می‌شود
+    _tourn_save(chat_id, t)
     try:
         await ctx.bot.send_message(
             chat_id, table + "\n\n🎉 فصل بسته شد.\n\n"
-            f"🔢 <b>فصلِ {int(t.get('season', 1)) + 1}</b>: قبل از بازیِ اول، مدیر یا داور تعدادِ نفراتِ "
+            f"🔢 <b>فصلِ {old_season + 1}</b>: قبل از بازیِ اول، مدیر یا داور تعدادِ نفراتِ "
             f"هر لیست را همین‌جا بنویسد — فقط عدد، مثلاً ۱۰ یا ۱۲ "
-            f"(فصلِ قبل {t.get('size') or '—'} نفره بود).", parse_mode="HTML")
+            f"(فصلِ قبل {old_size or '—'} نفره بود).", parse_mode="HTML")
     except Exception:
         pass
     admins = {str(ADMIN_ID)} | {str(a) for a in (load_full_admins() or [])}
@@ -5473,16 +5501,6 @@ async def _tourn_close_season(ctx, chat_id, t):
             await ctx.bot.send_message(int(r), table + (hint if r in admins else ""), parse_mode="HTML")
         except Exception:
             pass
-    t.setdefault("history", []).append({"season": t.get("season", 1), "totals": dict(t.get("totals") or {}),
-                                        "played": dict(t.get("played") or {}),
-                                        "plays": dict(t.get("plays") or {})})
-    t["season"] = int(t.get("season", 1)) + 1
-    t["totals"] = {u: 0.0 for u in (t.get("roster") or {})}
-    t["plays"] = {u: 0 for u in (t.get("roster") or {})}
-    t["played"] = {u: 0 for u in (t.get("roster") or {})}
-    t["pending"] = None
-    t["need_size"] = True        # 🔢 اندازهٔ لیستِ فصلِ تازه پرسیده می‌شود
-    _tourn_save(chat_id, t)
 
 
 # ─── دکمه‌ها و پیویِ داوران ───────────────────────────────────
@@ -5594,13 +5612,13 @@ class _TournEditFilter(filters.MessageFilter):
             if not (message and message.from_user and getattr(message, "text", None)):
                 return False
             uid = message.from_user.id
+            if _tourn_card_of_reply(message):
+                return True                      # ریپلای روی کارنامهٔ قدیمیِ خودش — مقدم بر برگه
             if _tourn_crit_state(uid) is not None and not _tourn_pm_busy(uid):
                 # 🧑‍⚖️ وسطِ برگهٔ داوری: عدد(ها) یا «انصراف»
                 txt = message.text.strip()
                 if txt in ("انصراف", "لغو") or _tourn_crit_numlike(txt):
                     return True
-            if _tourn_card_of_reply(message):
-                return True
             st = _TOURN_EDIT.get(uid)
             if not st:
                 return False
@@ -25377,8 +25395,9 @@ async def _try_set_event_date(ctx, chat_id: int, uid: int, g: GameState, text: s
         return True
     d = t.translate(_FA_DIGITS)
     # 📅 فقط شکلِ تاریخ: عدد، «/ - .»، فاصله و حروفِ فارسی (مثلِ «۲۸ مهر») — «۲۲:۳۰» و نشانه‌ها نه
-    if not (re.fullmatch(r"[0-9\u0600-\u06FF/\-. ]{1,20}", d) and re.search(r"\d", d)):
-        return False                     # تاریخ نیست — پیامِ عادیِ گروه
+    if not (re.fullmatch(r"[0-9\u0600-\u06FF\u200c/\-. ]{1,20}", d) and re.search(r"\d", d)
+            and re.search(r"[/\-.\u0600-\u06FF]", d)):
+        return False                     # تاریخ نیست — پیامِ عادیِ گروه (عددِ تنها هم نه)
     g.awaiting_event_date = None
     g.await_input_ts = None
     g.event_date = d
