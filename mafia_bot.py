@@ -9792,6 +9792,10 @@ async def _night_open_mafia_decision(ctx, chat_id, g):
 
 
 async def _broadcast_negotiation_night(ctx, g):
+    # 🎙 اعلامِ صوتی در وویس‌چتِ گروه — مثلِ یاکوزایی/ناتویی
+    _cid = _game_chat_id(g)
+    if _cid is not None:
+        voice_god.say(_cid, "mozakere")
     for s in _alive_seats(g):
         u, _n = g.seats[s]
         try:
@@ -28428,6 +28432,7 @@ VOICE_PHRASE_LABELS = {
     "temp_night_end": "پایان شب موقت",
     "yakuza":         "یاکوزایی",
     "nato":           "ناتویی",
+    "mozakere":       "مذاکره",
     "jalad":          "جلادی",
     "maarefe":        "معارفه",
     "mine_on":        "مین فعال شد",
