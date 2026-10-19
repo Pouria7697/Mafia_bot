@@ -3554,6 +3554,33 @@ def _tourn_save(chat_id, t) -> bool:
     return save_tournaments(d)
 
 
+_TOURN_SAVE_SOON: dict = {}           # گروه → تسکِ ذخیرهٔ تأخیری
+TOURN_SAVE_DELAY = 20
+
+
+def _tourn_save_soon(chat_id, t):
+    """💾 ذخیرهٔ تأخیری (برگهٔ داوری): ده‌ها عددِ پشتِ سرِ هم یک بار روی گیست نوشته می‌شوند —
+    گیت‌هاب برای نوشتن سقفِ دقیقه‌ای/ساعتی دارد و آمار و اسم‌ها هم همان گیست را می‌نویسند.
+    داده همان لحظه در حافظه است؛ تأیید و بقیهٔ کارها مثلِ قبل فوراً ذخیره می‌کنند."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _tourn_save(chat_id, t)
+        return
+    task = _TOURN_SAVE_SOON.get(chat_id)
+    if task is not None and not task.done() and task.get_loop() is loop:
+        return
+
+    async def _later():
+        try:
+            await asyncio.sleep(TOURN_SAVE_DELAY)
+        finally:
+            _TOURN_SAVE_SOON.pop(chat_id, None)
+        _tourn_save(chat_id, _tourn_rec(chat_id) or t)
+
+    _TOURN_SAVE_SOON[chat_id] = loop.create_task(_later())
+
+
 def _tourn_flagged(chat_id) -> bool:
     """📌 نشانِ «این گروه تورنومنت دارد» در فایلِ محلیِ بات — تا قطعیِ گیست بازیِ تورنومنت را
     بی‌صدا به بازیِ عادی تبدیل نکند."""
@@ -4447,10 +4474,16 @@ def _tourn_pick_lineup(t, n, exclude=(), keep=()) -> list:
     ex = {str(x) for x in exclude if x is not None}
     roster = [u for u in (t.get("roster") or {}).keys() if u not in ex]
     plays = t.get("plays") or {}
+    # 🔁 بازیِ قدیمیِ باز (نوبتش هنوز با تأیید شمرده می‌شود) هم بازی حساب شود — وگرنه همان‌ها دوباره بازی می‌کنند
+    pend = {}
+    for _pg in t.get("games") or []:
+        if _pg.get("status") == "pending" and not _pg.get("counted"):
+            for u in (_pg.get("scores") or {}):
+                pend[u] = pend.get(u, 0) + 1
     kept = [u for u in keep if u in roster][:n]
     rest = [u for u in roster if u not in kept]
     random.shuffle(rest)
-    rest.sort(key=lambda u: int(plays.get(u, 0) or 0))
+    rest.sort(key=lambda u: int(plays.get(u, 0) or 0) + pend.get(u, 0))
     return kept + rest[:max(0, n - len(kept))]
 
 
@@ -4744,7 +4777,7 @@ def _tourn_card_text(t, game, public=False, ref=None) -> str:
         head = f"✅ <b>امتیازِ نهایی (میانگینِ {len(judges)} داور) — تورنومنت، فصل {s}، بازی {no}</b>"
     else:
         head = f"✅ <b>امتیازِ تأییدشده — تورنومنت، فصل {s}، بازی {no}</b>"
-    lines = [head, f"📅 {game.get('date', '—')} | 🎯 رویداد {game.get('event', '—')}", ""]
+    lines = [head, f"📅 {escape(str(game.get('date', '—')), quote=False)} | 🎯 رویداد {game.get('event', '—')}", ""]
     for row in game.get("rows") or []:
         mark = {"مافیا": "◾️", "مستقل": "♦️"}.get(row.get("side"), "◽️")
         nm = escape(str(row.get("name", "")), quote=False)
@@ -4786,10 +4819,9 @@ def _tourn_card_text(t, game, public=False, ref=None) -> str:
                   "✏️ امتیازِ اضافه/کم: روی همین پیام ریپلای کن (یا «✏️ اصلاح» را بزن) و بنویس "
                   "شمارهٔ صندلی، بعد دلیل و امتیاز — مثلاً «۵ اکت ۱۰ فکت ۵» یا «۷ خطا -۵».",
                   ("با «✅ تأیید» فهرستِ تو در گروه اعلام می‌شود؛ هر داور جدا نمره می‌دهد و امتیازِ "
-                   "نهایی میانگینِ همه است. اگر تا بازیِ بعدی تأیید نشود، همین‌ها خودکار ثبت می‌شود."
+                   "نهایی میانگینِ همه است. تا همهٔ داورها تأیید نکنند ثبت نمی‌شود."
                    if multi else
-                   "با «✅ تأیید» امتیازها ثبت و لیست در گروه اعلام می‌شود؛ اگر تا بازیِ بعدی تأیید نشود، "
-                   "همین‌ها خودکار ثبت می‌شود.")]
+                   "با «✅ تأیید» امتیازها ثبت و لیست در گروه اعلام می‌شود؛ تا تأیید نکنی ثبت نمی‌شود.")]
     return "\n".join(lines)
 
 
@@ -4891,7 +4923,7 @@ def _tourn_crit_card_text(t, game, public=False, ref=None) -> str:
         head = f"✅ <b>امتیازِ نهایی (میانگینِ {len(judges)} داور) — تورنومنت، فصل {s}، بازی {no}</b>"
     else:
         head = f"✅ <b>امتیازِ تأییدشده — تورنومنت، فصل {s}، بازی {no}</b>"
-    lines = [head, f"📅 {game.get('date', '—')} | 🎯 رویداد {game.get('event', '—')}", ""]
+    lines = [head, f"📅 {escape(str(game.get('date', '—')), quote=False)} | 🎯 رویداد {game.get('event', '—')}", ""]
     for row in game.get("rows") or []:
         mark = _tourn_mark(row)
         nm = escape(str(row.get("name", "")), quote=False)
@@ -5048,7 +5080,7 @@ async def _tourn_crit_show(ctx, chat_id, t, game, idx, ref, fresh=False, mid=Non
                                             parse_mode="HTML", reply_markup=kb)
             if mid and int(mid) != int(old or 0):
                 msgs[str(ref)] = int(mid)
-                _tourn_save(chat_id, t)
+                _tourn_save_soon(chat_id, t)
             return
         except Exception as e:
             if "not modified" in str(e).lower():
@@ -5064,7 +5096,7 @@ async def _tourn_crit_show(ctx, chat_id, t, game, idx, ref, fresh=False, mid=Non
         except Exception:
             pass
     msgs[str(ref)] = m.message_id
-    _tourn_save(chat_id, t)
+    _tourn_save_soon(chat_id, t)
 
 
 async def handle_tourn_crit_callback(update, ctx):
@@ -5120,8 +5152,18 @@ async def handle_tourn_crit_callback(update, ctx):
         _TOURN_CRIT_ST.pop(uid, None)
     else:
         _TOURN_CRIT_ST[uid] = st
+        _TOURN_EDIT.pop(uid, None)
     await safe_q_answer(q)
     await _tourn_crit_show(ctx, chat_id, t, game, idx, uid, mid=getattr(getattr(q, "message", None), "message_id", None))
+
+
+_TOURN_NUMLIKE_RE = re.compile(r"[\d۰-۹٠-٩\s.,،/٫\-−+]+")
+
+
+def _tourn_crit_numlike(text) -> bool:
+    """فقط عدد و فاصله و علامت — بی‌حرف (تا جمله‌ها و خطِ «۵ اکت ۱۰» قاطی نشوند)."""
+    t = str(text or "").strip()
+    return bool(t) and bool(_TOURN_NUMLIKE_RE.fullmatch(t)) and any(ch.isdigit() for ch in t)
 
 
 def _tourn_crit_nums(text):
@@ -5150,6 +5192,8 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
         _TOURN_CRIT_ST.pop(uid, None)
         return False
     text = msg.text.strip()
+    if text not in ("انصراف", "لغو") and not _tourn_crit_numlike(text):
+        return False                     # مالِ برگه نیست — مسیرِ دیگر (اصلاحِ قدیمی و …)
     if text in ("انصراف", "لغو"):
         _TOURN_CRIT_ST.pop(uid, None)
         await msg.reply_text("↩️ از ویرایش بیرون آمدی — نمره‌هایی که دادی سرِ جایش می‌ماند.")
@@ -5158,8 +5202,12 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
     vals = _tourn_crit_nums(text)
     seat, key = st.get("seat"), (st.get("key") if st.get("view") == "key" else None)
     row = _tourn_crit_row(game, seat) if seat is not None else None
-    if vals is None or row is None:
+    if row is None:
         await msg.reply_text("✏️ اول روی «ویرایش» بزن و صندلی را انتخاب کن؛ بعد عدد بفرست.")
+        return True
+    if vals is None:
+        await msg.reply_text("⚠️ فقط عدد بفرست — مثلاً ۲۰ یا ۱۲٫۵. برای «تأثیرگذاری منفی» هم عددِ مثبت "
+                             "(۰ تا ۱۰) بنویس؛ خودش کم می‌شود.")
         return True
     if key and len(vals) == 1:
         plan = [(key, vals[0])]
@@ -5193,7 +5241,7 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
             st.update(view="seats", seat=None, key=None)
     st["ts"] = time.time()
     _tourn_recalc(t, game)
-    _tourn_save(chat_id, t)
+    _tourn_save_soon(chat_id, t)
     await _tourn_crit_show(ctx, chat_id, t, game, idx, uid, fresh=True)
     return True
 
@@ -5472,6 +5520,7 @@ async def handle_tourn_callback(update, ctx):
         # ✅ → «مطمئنی؟» با فهرستِ نهایی | ✏️ ویرایش → انتخابِ صندلی
         _TOURN_CRIT_ST[uid] = {"chat": chat_id, "idx": idx, "tid": tid, "view": "ask" if act == "ok" else "seats",
                                "seat": None, "key": None, "ts": time.time()}
+        _TOURN_EDIT.pop(uid, None)
         await safe_q_answer(q)
         await _tourn_crit_show(ctx, chat_id, t, game, idx, uid, mid=getattr(getattr(q, "message", None), "message_id", None))
         return
@@ -5482,6 +5531,7 @@ async def handle_tourn_callback(update, ctx):
     if act == "edit":
         await safe_q_answer(q)
         _TOURN_EDIT[uid] = (chat_id, idx, tid, time.time())
+        _TOURN_CRIT_ST.pop(uid, None)
         _multi = len(game.get("refs") or []) > 1
         try:
             await ctx.bot.send_message(
@@ -5547,7 +5597,7 @@ class _TournEditFilter(filters.MessageFilter):
             if _tourn_crit_state(uid) is not None and not _tourn_pm_busy(uid):
                 # 🧑‍⚖️ وسطِ برگهٔ داوری: عدد(ها) یا «انصراف»
                 txt = message.text.strip()
-                if txt in ("انصراف", "لغو") or _tourn_crit_nums(txt) is not None:
+                if txt in ("انصراف", "لغو") or _tourn_crit_numlike(txt):
                     return True
             if _tourn_card_of_reply(message):
                 return True
@@ -6823,10 +6873,26 @@ def _await_input_start(g):
     g.await_input_ts = datetime.now(timezone.utc).timestamp()
 
 
+def _await_input_open(g) -> bool:
+    """یکی از ورودی‌های یک‌دقیقه‌ای (موضوع/تاریخ/ساعت) واقعاً باز است؟ منقضی‌ها همین‌جا بسته می‌شوند."""
+    if not (getattr(g, "awaiting_event_title", False) or getattr(g, "awaiting_event_date", None)
+            or getattr(g, "vote_type", None) == "awaiting_time"):
+        return False
+    return _await_input_alive(g)
+
+
 def _await_input_alive(g) -> bool:
     """آیا پنجرهٔ ۶۰ ثانیه‌ایِ ورودی هنوز باز است؟ (منقضی → بسته می‌شود)"""
     ts = getattr(g, "await_input_ts", None)
     if ts is None:
+        # 🧹 پرچمِ جامانده بی‌مهلت (مثلاً ورودیِ دیگری مهلت را برداشت) — باز نماند
+        if (getattr(g, "awaiting_event_title", False) or getattr(g, "awaiting_event_date", None)
+                or getattr(g, "vote_type", None) == "awaiting_time"):
+            g.awaiting_event_title = False
+            g.awaiting_event_date = None
+            if getattr(g, "vote_type", None) == "awaiting_time":
+                g.vote_type = None
+            store.save()
         return False
     if datetime.now(timezone.utc).timestamp() - float(ts) <= AWAIT_INPUT_TIMEOUT:
         return True
@@ -22915,6 +22981,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "change_time":
         if uid != g.god_id:
             return
+        g.awaiting_event_title = False
+        g.awaiting_event_date = None
         g.vote_type = "awaiting_time"
         _await_input_start(g)
         store.save()
@@ -24000,6 +24068,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await _is_god_or_admin(ctx, chat, uid, g):
             return
         g.awaiting_event_date = uid
+        g.awaiting_event_title = False
+        if getattr(g, "vote_type", None) == "awaiting_time":
+            g.vote_type = None
         _await_input_start(g)
         store.save()
         await ctx.bot.send_message(
@@ -24014,6 +24085,9 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await _is_god_or_admin(ctx, chat, uid, g):
             return
         g.awaiting_event_title = True
+        g.awaiting_event_date = None
+        if getattr(g, "vote_type", None) == "awaiting_time":
+            g.vote_type = None
         _await_input_start(g)
         store.save()
         await ctx.bot.send_message(
@@ -25302,7 +25376,8 @@ async def _try_set_event_date(ctx, chat_id: int, uid: int, g: GameState, text: s
         await ctx.bot.send_message(chat_id, "✅ تاریخِ لیست به امروز برگشت.")
         return True
     d = t.translate(_FA_DIGITS)
-    if not (re.search(r"\d", d) and len(d) <= 20):
+    # 📅 فقط شکلِ تاریخ: عدد، «/ - .»، فاصله و حروفِ فارسی (مثلِ «۲۸ مهر») — «۲۲:۳۰» و نشانه‌ها نه
+    if not (re.fullmatch(r"[0-9\u0600-\u06FF/\-. ]{1,20}", d) and re.search(r"\d", d)):
         return False                     # تاریخ نیست — پیامِ عادیِ گروه
     g.awaiting_event_date = None
     g.await_input_ts = None
@@ -28213,9 +28288,7 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     #    بالاتر گرفته و return شده؛ اینجا فقط عددهای «بی‌صاحبِ» زمانِ ثبت‌نام می‌رسند.
     if (g.phase == "idle"
             and not getattr(g, "awaiting_shuffle_decision", False)
-            and not getattr(g, "awaiting_event_title", False)
-            and not getattr(g, "awaiting_event_date", None)
-            and getattr(g, "vote_type", None) != "awaiting_time"
+            and not _await_input_open(g)
             and uid not in (getattr(g, "awaiting_name_input", {}) or {})
             and uid not in (getattr(g, "waiting_name", {}) or {})):
         _bs = _parse_bare_seat(text)
