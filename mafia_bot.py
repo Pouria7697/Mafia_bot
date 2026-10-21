@@ -59,6 +59,7 @@ BTN_DELETE  = "delete_seat"
 BTN_START   = "start_game"      
 BTN_CALL = "call_players"   
 BTN_REROLL = "reroll_roles"
+BTN_SEAT_SHUFFLE = "seat_shuffle"
 # 📣 لینک کانال (فوتر تبلیغی لیست‌ها)
 CHANNEL_LINK = "https://t.me/Mafiashow_games"
 CHANNEL_AD = f"📣 <a href='{CHANNEL_LINK}'>کانال مافیاشو | MafiaShow</a>"
@@ -4840,7 +4841,7 @@ TOURN_CRIT = (
     ("pos", "تأثیرگذاری مثبت", "مثبت", 25, 1),
     ("neg", "تأثیرگذاری منفی", "منفی", 10, -1),
     ("sp", "فن بیان و زبان بدن", "فن‌بیان", 10, 1),
-    ("fa", "کلمات فارسی", "فارسی", 5, 1),
+    ("fa", "انضباط", "انضباط", 5, 1),           # (پیش‌تر «کلمات فارسی» — کلید همان ماند تا نمره‌های قبلی بمانند)
     ("ot", "سایر موارد", "سایر", 10, 1),
 )
 _TOURN_CRIT_BY = {c[0]: c for c in TOURN_CRIT}
@@ -6480,8 +6481,6 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton("❌ حذف ", callback_data=BTN_DELETE),
-            InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time"),   
-        
         ],
         [
             InlineKeyboardButton("🧹 پاکسازی ", callback_data="cleanup"),
@@ -6501,8 +6500,9 @@ def text_seating_keyboard(g: GameState) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🪄 تغییر سناریو", callback_data="change_scenario")
         ])
 
-        # ردیف دوم: شروع بازی + رندوم نقش (فقط وقتی همه صندلیا پره)
+        # ردیف دوم: رندوم سیت، و زیرش شروع بازی + رندوم نقش (فقط وقتی همه صندلیا پره)
         if len(g.seats) == g.max_seats:
+            rows.append([InlineKeyboardButton("🎲 رندوم سیت", callback_data=BTN_SEAT_SHUFFLE)])
             rows.append([
                 InlineKeyboardButton("▶️ شروع بازی", callback_data="startgame"),
                 InlineKeyboardButton("🎲 رندوم نقش", callback_data=BTN_REROLL)
@@ -6515,6 +6515,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ سناریو جدید", callback_data="add_scenario")],
         [InlineKeyboardButton("📝 تغییر رویداد", callback_data="change_event")],
         [InlineKeyboardButton("📅 تغییر تاریخ", callback_data="change_date")],
+        [InlineKeyboardButton("⏰ تغییر ساعت", callback_data="change_time")],
         [InlineKeyboardButton("⬅️ برگشت", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -9820,22 +9821,29 @@ async def _night_report(ctx, g, text):
         await _tourn_refs_mirror(ctx, g, text)
 
 
+def _tourn_watch_refs(g) -> list:
+    """🧑‍⚖️ داورهایی که این بازیِ تورنومنت را از بیرون می‌بینند: داورِ فعال، نه گاد، نه نشسته در بازی.
+    (فقط از کش — جلوی هر کاری در شب است)"""
+    try:
+        if not getattr(g, "tourn_game", False):
+            return []
+        chat_id = _game_chat_id(g)
+        t = ((_TOURN_CACHE.get("data") or {}).get(str(chat_id)) if chat_id is not None else None)
+        if not t or not t.get("active"):
+            return []
+        seated = {int(u) for u, _n in (g.seats or {}).values()}
+        return [int(r) for r in (t.get("refs") or {}) if str(r).isdigit()
+                and int(r) != getattr(g, "god_id", None) and int(r) not in seated]
+    except Exception:
+        return []
+
+
 async def _tourn_refs_mirror(ctx, g, text):
     """🧑‍⚖️ بازیِ تورنومنت: همان گزارشِ اکتی که گاد می‌گیرد، برای داورها هم.
     ⚠️ داوری که خودش در این بازی صندلی دارد چیزی نمی‌گیرد (نقش‌ها و اکت‌ها لو می‌رفت)؛
     گادی که داور هم هست دوبار نمی‌گیرد. فقط از کش خوانده می‌شود تا شب منتظرِ گیست نماند."""
     try:
-        chat_id = _game_chat_id(g)
-        t = ((_TOURN_CACHE.get("data") or {}).get(str(chat_id)) if chat_id is not None else None)
-        if not t or not t.get("active"):
-            return
-        seated = {int(u) for u, _n in (g.seats or {}).values()}
-        for r in list((t.get("refs") or {}).keys()):
-            if not str(r).isdigit():
-                continue
-            ru = int(r)
-            if ru == getattr(g, "god_id", None) or ru in seated:
-                continue
+        for ru in _tourn_watch_refs(g):
             try:
                 await ctx.bot.send_message(ru, "🧑‍⚖️ " + text, parse_mode="HTML")
             except Exception as e:
@@ -23043,19 +23051,24 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         store.group_stats[chat]["started"].append(now)
         store.save()
         if g.scenario:
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ بله", callback_data="shuffle_yes"),
-                    InlineKeyboardButton("❌ خیر", callback_data="shuffle_no"),
-                ]
-            ])
-            msg = await ctx.bot.send_message(
+            # 🎲 سؤالِ «صندلی‌ها رندوم بشن؟» حذف شد — اگر گاد بخواهد، قبل از شروع «🎲 رندوم سیت» را می‌زند
+            _u2r = g.preview_uid_to_role            # همان لحظه برداشته می‌شود: دو بار «شروع» دو بار پخش نکند
+            g.preview_uid_to_role = None
+            repeats = getattr(g, "shuffle_repeats", None) or 1
+            g.awaiting_shuffle_decision = False
+            g.from_startgame = False
+            store.save()
+            await shuffle_and_assign(
+                ctx,
                 chat,
-                "❓ آیا مایل هستید صندلی‌ها رندوم بشن؟",
-                reply_markup=keyboard
+                g,
+                shuffle_seats=False,
+                uid_to_role=_u2r or None,
+                notify_players=True,
+                preview_mode=False,
+                role_shuffle_repeats=repeats,
             )
-            g.shuffle_prompt_msg_id = msg.message_id
-            g.awaiting_shuffle_decision = True
+            g.shuffle_repeats = None
             store.save()
             return
 
@@ -24024,6 +24037,23 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await publish_seating(ctx, chat, g, mode="kick")
         return
 
+    if data == BTN_SEAT_SHUFFLE:
+        if uid != g.god_id:
+            await safe_q_answer(q, "⛔ فقط گادِ بازی می‌تواند صندلی‌ها را رندوم کند.", show_alert=True)
+            return
+        if getattr(g, "phase", "idle") != "idle" or getattr(g, "assigned_roles", None):
+            await safe_q_answer(q, "⛔ بازی شروع شده — رندوم سیت فقط قبل از شروع است.", show_alert=True)
+            return
+        if len(g.seats) != g.max_seats:
+            await safe_q_answer(q, "⚠️ اول همهٔ صندلی‌ها پُر شوند.", show_alert=True)
+            return
+        _seat_shuffle(g)
+        store.save()
+        await safe_q_answer(q)
+        await publish_seating(ctx, chat, g, mode=_ui_mode(g))
+        await ctx.bot.send_message(chat, "🎲 صندلی‌ها رندوم شد.")
+        return
+
     if data == BTN_REROLL:
         if uid != g.god_id:
             return
@@ -24774,6 +24804,31 @@ async def _side_pick_apply(ctx, g, uid_to_role):
 
 
 
+def _seat_shuffle(g):
+    """🎲 رندوم سیت: جای بازیکن‌ها عوض می‌شود. نقش‌های رندوم‌شده به آیدیِ هر نفر بندند، نه به صندلی،
+    پس سرِ جایشان می‌مانند؛ هرچه قبل از شروع به شمارهٔ صندلی بند بود هم دنبالِ صاحبش می‌رود."""
+    old = dict(g.seats or {})
+    players = [old[s] for s in sorted(old)]
+    random.shuffle(players)
+    g.seats = {i + 1: p for i, p in enumerate(players)}
+    new_of_uid = {u: s for s, (u, _n) in g.seats.items()}
+    o2n = {s: new_of_uid[u] for s, (u, _n) in old.items() if u in new_of_uid}
+    for attr in ("awaiting_name_input", "waiting_name"):
+        d = getattr(g, attr, None)
+        if isinstance(d, dict):
+            for u in list(d):
+                if u in new_of_uid:
+                    d[u] = new_of_uid[u]
+    for attr in ("warnings", "pending_warnings"):
+        d = getattr(g, attr, None)
+        if isinstance(d, dict) and d:
+            setattr(g, attr, {o2n.get(s, s): v for s, v in d.items()})
+    for attr in ("striked", "pending_delete"):
+        d = getattr(g, attr, None)
+        if isinstance(d, set) and d:
+            setattr(g, attr, {o2n.get(s, s) for s in d})
+
+
 async def shuffle_and_assign(
     ctx,
     chat_id: int,
@@ -25049,8 +25104,9 @@ async def shuffle_and_assign(
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
         try:
+            _wr = set(_tourn_watch_refs(g))
             for _u in list(g.mafia_room_members or set()):
-                if _u == g.god_id:
+                if _u == g.god_id or _u in _wr:
                     continue
                 await _room_kick(ctx, g, _u)
                 g.mafia_room_members.discard(_u)
@@ -25098,14 +25154,16 @@ async def shuffle_and_assign(
         log.append(f"{seat:>2}. <a href='tg://user?id={uid}'>{name}</a> → {role}")
 
 
+    text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
+    if unreachable:
+        text += "\n⚠️ نشد برای این افراد پیام بفرستم: " + ", ".join(unreachable)
     if g.god_id:
-        text = "👑 خلاصهٔ نقش‌ها:\n" + "\n".join(log)
-        if unreachable:
-            text += "\n⚠️ نشد برای این افراد پیام بفرستم: " + ", ".join(unreachable)
         try:
             await ctx.bot.send_message(g.god_id, text, parse_mode="HTML")
         except:
             pass
+    if getattr(g, "tourn_game", False):
+        await _tourn_refs_mirror(ctx, g, text)   # 🏆 داورها هم (داورِ نشسته در بازی نه)
 
     # 7) به‌روزرسانی فاز و UI
     g.phase = "playing"
@@ -27391,10 +27449,11 @@ async def _room_join_check_later(ctx, g, delay=300):
         return
     await _room_rotate_link(ctx, g)   # لینک نو + رفعِ بن + ارسال به جوین‌نشده‌ها
     names = []
+    _wr = set(_tourn_watch_refs(g))
     for uid in _out:
         seat = _seat_of_uid(g, uid)
         names.append(f"{seat}. {g.seats[seat][1]}" if seat
-                     else ("گاد" if uid == g.god_id else str(uid)))
+                     else ("گاد" if uid == g.god_id else ("داور" if uid in _wr else str(uid))))
     await _night_report(ctx, g, "⏰ بعد از ۵ دقیقه هنوز واردِ اتاق مافیا نشده بودند: "
                         + "، ".join(names) + "\n(لینکِ جدید ساخته و برایشان ارسال شد)")
 
@@ -27408,9 +27467,10 @@ async def _room_sync_on_night(ctx, g):
     if not (_is_hanibal_scenario(g) or _is_dentist_scenario(g)):
         await _room_set_locked(ctx, g, False)
     removed_any = False
+    _wr = set(_tourn_watch_refs(g))
     for uid in list(g.mafia_room_members):
-        if uid == g.god_id:
-            continue   # ⚠️ گاد صندلی ندارد ولی هیچ‌وقت نباید حذف شود!
+        if uid == g.god_id or uid in _wr:
+            continue   # ⚠️ گاد (و داورِ تورنومنت) صندلی ندارد ولی هیچ‌وقت نباید حذف شود!
         seat = _seat_of_uid(g, uid)
         if seat is None or seat in (g.striked or set()):
             await _room_kick(ctx, g, uid)
@@ -27453,8 +27513,9 @@ async def _room_drop_dead(ctx, g):
     if not getattr(g, "mafia_room_id", None):
         return
     removed = False
+    _wr = set(_tourn_watch_refs(g))
     for uid in list(g.mafia_room_members or set()):
-        if uid == g.god_id:
+        if uid == g.god_id or uid in _wr:
             continue
         seat = _seat_of_uid(g, uid)
         if seat is None or seat in (g.striked or set()):
@@ -27718,17 +27779,22 @@ async def do_maarefe(ctx, chat_id, g):
     # 🔗 اتاق چت مافیا: تخصیص + ارسال لینک به گاد و مافیاها (در تکاور گروگانگیر مستثنی)
     if await _room_allocate(ctx, g):
         await _room_send_link(ctx, g, g.god_id)
+        _wr = _tourn_watch_refs(g)                  # 🏆 داورهای تورنومنت هم مثلِ گاد
+        for _r in _wr:
+            await _room_send_link(ctx, g, _r)
         if manual:
             # ✋ لینک فقط برای کسانی می‌رود که خودِ گاد در پیویش انتخاب و تأیید کند
             g.mlink_sel = set()
             g.mlink_done = False
             store.save()
             await _mlink_panel(ctx, g)
-            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد ارسال شد.")
+            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد" + (" و داورها" if _wr else "")
+                                       + " ارسال شد.")
         else:
             for s in _mafia_room_seats(g):
                 await _room_send_link(ctx, g, g.seats[s][0])
-            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد و مافیاها ارسال شد.")
+            await ctx.bot.send_message(chat_id, "🔗 لینک گروه مافیا به پیوی گاد، مافیاها" + (" و داورها" if _wr else "")
+                                       + " ارسال شد.")
         g.maarefe_done = True   # ✅ موفق → دکمه‌ی معارفه از پنل حذف می‌شود
         store.save()
         # ⏰ بعد از ۵ دقیقه اگر کسی جوین نشده بود، لینکِ جدید بساز و بفرست
