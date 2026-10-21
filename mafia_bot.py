@@ -5383,6 +5383,27 @@ async def _tourn_refresh_cards(ctx, chat_id, t, idx, kb=True):
             pass
 
 
+async def _tourn_channel_post(ctx, chat_id, game, text):
+    """📢 امتیازِ داوری در چنلِ آرشیو هم — زیرِ همان لیستِ بازی اگر نشانی‌اش در سندِ رویداد هست.
+    هیچ خطایی از اینجا به تأیید نمی‌رسد."""
+    ch = get_archive_channel()
+    if not ch:
+        return
+    reply_to = None
+    try:
+        led = await asyncio.to_thread(load_game_ledger)
+        ent = ((led or {}).get(str(chat_id)) or {}).get(str(int(game.get("event"))))
+        if ent and ent.get("cm") and str(ent.get("cc")) == str(ch):
+            reply_to = int(ent["cm"][0])
+    except Exception:
+        reply_to = None
+    try:
+        await ctx.bot.send_message(ch, text, parse_mode="HTML", reply_to_message_id=reply_to,
+                                   allow_sending_without_reply=True)
+    except Exception as e:
+        print("⚠️ tourn channel post:", e)
+
+
 async def _tourn_ref_confirm(ctx, chat_id, t, idx, ref_uid) -> bool:
     """✅ تأییدِ یک داور: با چند داور فهرستش به گروه می‌رود؛ وقتی همه تأیید کردند، نهایی (میانگین)."""
     game = _tourn_game_at(t, idx)
@@ -5397,10 +5418,12 @@ async def _tourn_ref_confirm(ctx, chat_id, t, idx, ref_uid) -> bool:
     _TOURN_CRIT_ST.pop(int(ref_uid), None)
     refs = [str(x) for x in (game.get("refs") or [])]
     if len(refs) > 1:
+        _rt = _tourn_card_text(t, game, public=True, ref=r)
         try:
-            await ctx.bot.send_message(chat_id, _tourn_card_text(t, game, public=True, ref=r), parse_mode="HTML")
+            await ctx.bot.send_message(chat_id, _rt, parse_mode="HTML")
         except Exception as e:
             print("⚠️ tourn ref card:", e)
+        await _tourn_channel_post(ctx, chat_id, game, _rt)     # 📢 چنلِ آرشیو هم
     if all(x in ok for x in refs):
         return await _tourn_confirm(ctx, chat_id, t, idx, by_uid=ref_uid)
     _tourn_recalc(t, game)
@@ -5423,12 +5446,12 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
         touched = _tourn_touched(game)
         for j in refs:
             if j in touched and j not in ok:
+                _jt = _tourn_card_text(t, game, public=True, ref=j) + chr(10) + "(تأییدِ خودکار)"
                 try:
-                    await ctx.bot.send_message(
-                        chat_id, _tourn_card_text(t, game, public=True, ref=j) + chr(10) + "(تأییدِ خودکار)",
-                        parse_mode="HTML")
+                    await ctx.bot.send_message(chat_id, _jt, parse_mode="HTML")
                 except Exception:
                     pass
+                await _tourn_channel_post(ctx, chat_id, game, _jt)
     _tourn_recalc(t, game)
     for u, pts in (game.get("scores") or {}).items():
         t["totals"][u] = round(float(t["totals"].get(u, 0) or 0) + float(pts or 0), 1)
@@ -5456,11 +5479,13 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
         _TOURN_CRIT_ST.pop(k, None)
     _tourn_save(chat_id, t)
     await _tourn_refresh_cards(ctx, chat_id, t, idx, kb=False)
-    # 📣 لیستِ نهاییِ همین بازی به گروهِ تورنومنت می‌رود
+    # 📣 لیستِ نهاییِ همین بازی به گروهِ تورنومنت می‌رود — و چنلِ آرشیو
+    _ft = _tourn_card_text(t, game, public=True)
     try:
-        await ctx.bot.send_message(chat_id, _tourn_card_text(t, game, public=True), parse_mode="HTML")
+        await ctx.bot.send_message(chat_id, _ft, parse_mode="HTML")
     except Exception as e:
         print("⚠️ tourn public card:", e)
+    await _tourn_channel_post(ctx, chat_id, game, _ft)
     if close_now:
         await _tourn_close_season(ctx, chat_id, t)
     return True
