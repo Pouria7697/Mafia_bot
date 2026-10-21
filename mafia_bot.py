@@ -3881,6 +3881,10 @@ async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not _tourn_save(chat, t):
             await update.message.reply_text("⚠️ ذخیره روی گیست ناموفق بود — تورنومنت هنوز باز است؛ دوباره بزن.")
             return
+        try:
+            await _room_drop_watchers(ctx, g, {int(r) for r in (t.get("refs") or {}) if str(r).isdigit()})
+        except Exception as e:
+            print("⚠️ tourn end room:", e)
         if getattr(g, "tourn_game", False):
             g.tourn_game = False
             g.tourn_sub = {}
@@ -3963,6 +3967,12 @@ async def _tourn_drop_ref(ctx, chat_id, t, u):
     """🗑 کنار گذاشتنِ یک داور — از تورنومنت و از کارنامهٔ معلق (اصلاح‌هایش هم دیگر حساب نمی‌شود)."""
     u = str(u)
     (t.get("refs") or {}).pop(u, None)
+    _gg = store.games.get(chat_id)
+    if _gg is not None and u.isdigit():
+        try:
+            await _room_drop_watchers(ctx, _gg, {int(u)})
+        except Exception as e:
+            print("⚠️ drop ref room:", e)
     for k in [k for k, v in _TOURN_EDIT.items() if str(k) == u and v[0] == chat_id]:
         _TOURN_EDIT.pop(k, None)
     for k in [k for k, v in _TOURN_CRIT_ST.items() if str(k) == u and v.get("chat") == chat_id]:
@@ -9836,6 +9846,31 @@ def _tourn_watch_refs(g) -> list:
                 and int(r) != getattr(g, "god_id", None) and int(r) not in seated]
     except Exception:
         return []
+
+
+def _room_ref_keep(g) -> set:
+    """🧑‍⚖️ داورهایی که در اتاقِ مافیا مثلِ گاد می‌مانند. اگر کشِ تورنومنت خالی است (ری‌استارت و خطای
+    خواندنِ گیست)، همان‌هایی که موقعِ معارفه لینک گرفتند — تا یک خطای خواندن بیرونشان نیندازد."""
+    if getattr(g, "tourn_game", False) and _TOURN_CACHE.get("data") is None:
+        seated = {int(u) for u, _n in (g.seats or {}).values()}
+        return {int(u) for u in (getattr(g, "room_refs", None) or set())
+                if int(u) not in seated and int(u) != getattr(g, "god_id", None)}
+    return set(_tourn_watch_refs(g))
+
+
+async def _room_drop_watchers(ctx, g, uids):
+    """🚪 داوری که دیگر داور نیست (حذف شد / تورنومنت بسته شد) و در بازی صندلی ندارد، از اتاقِ مافیا بیرون."""
+    if not getattr(g, "mafia_room_id", None):
+        return
+    out = [u for u in uids if u != getattr(g, "god_id", None) and _seat_of_uid(g, u) is None
+           and u in (g.mafia_room_members or set())]
+    for u in out:
+        await _room_kick(ctx, g, u)
+        g.mafia_room_members.discard(u)
+        (getattr(g, "room_refs", None) or set()).discard(u)
+    if out:
+        await _room_rotate_link(ctx, g)        # با لینکِ قدیمی برنگردد
+        store.save()
 
 
 async def _tourn_refs_mirror(ctx, g, text):
@@ -23057,17 +23092,21 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             repeats = getattr(g, "shuffle_repeats", None) or 1
             g.awaiting_shuffle_decision = False
             g.from_startgame = False
+            g.dealing_ts = time.time()                # ⏳ تا پخش تمام نشده رندوم سیت نمی‌شود
             store.save()
-            await shuffle_and_assign(
-                ctx,
-                chat,
-                g,
-                shuffle_seats=False,
-                uid_to_role=_u2r or None,
-                notify_players=True,
-                preview_mode=False,
-                role_shuffle_repeats=repeats,
-            )
+            try:
+                await shuffle_and_assign(
+                    ctx,
+                    chat,
+                    g,
+                    shuffle_seats=False,
+                    uid_to_role=_u2r or None,
+                    notify_players=True,
+                    preview_mode=False,
+                    role_shuffle_repeats=repeats,
+                )
+            finally:
+                g.dealing_ts = None
             g.shuffle_repeats = None
             store.save()
             return
@@ -24044,6 +24083,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if getattr(g, "phase", "idle") != "idle" or getattr(g, "assigned_roles", None):
             await safe_q_answer(q, "⛔ بازی شروع شده — رندوم سیت فقط قبل از شروع است.", show_alert=True)
             return
+        if time.time() - float(getattr(g, "dealing_ts", None) or 0) < 180:
+            await safe_q_answer(q, "⏳ «شروع بازی» زده شده و نقش‌ها در حالِ پخش است — دیگر رندوم سیت نمی‌شود.",
+                                show_alert=True)
+            return
         if len(g.seats) != g.max_seats:
             await safe_q_answer(q, "⚠️ اول همهٔ صندلی‌ها پُر شوند.", show_alert=True)
             return
@@ -24813,12 +24856,8 @@ def _seat_shuffle(g):
     g.seats = {i + 1: p for i, p in enumerate(players)}
     new_of_uid = {u: s for s, (u, _n) in g.seats.items()}
     o2n = {s: new_of_uid[u] for s, (u, _n) in old.items() if u in new_of_uid}
-    for attr in ("awaiting_name_input", "waiting_name"):
-        d = getattr(g, attr, None)
-        if isinstance(d, dict):
-            for u in list(d):
-                if u in new_of_uid:
-                    d[u] = new_of_uid[u]
+    # ✏️ «تغییر نام»ِ نیمه‌کاره دست نمی‌خورد: مهلتش با همان شمارهٔ قدیمی بسته می‌شود و
+    #    name_reply خودش صندلیِ فعلیِ آن نفر را پیدا می‌کند
     for attr in ("warnings", "pending_warnings"):
         d = getattr(g, attr, None)
         if isinstance(d, dict) and d:
@@ -25104,7 +25143,7 @@ async def shuffle_and_assign(
     # 🔗 اگر معارفه با نقش‌های قبلی انجام شده بود، اتاقِ مافیا مالِ تیمِ قدیمی است → تخلیه + معارفه‌ی مجدد
     if getattr(g, "maarefe_done", False) and getattr(g, "mafia_room_id", None):
         try:
-            _wr = set(_tourn_watch_refs(g))
+            _wr = _room_ref_keep(g)
             for _u in list(g.mafia_room_members or set()):
                 if _u == g.god_id or _u in _wr:
                     continue
@@ -25283,6 +25322,12 @@ async def _sub_seat_fill(ctx, chat_id: int, g: GameState, seat_no: int, new_uid:
                 g.mafia_room_members.discard(old_uid)
                 await _room_rotate_link(ctx, g)
             await _room_send_link(ctx, g, new_uid)
+        elif (getattr(g, "mafia_room_id", None) and new_uid != g.god_id
+              and new_uid in (g.mafia_room_members or set())):
+            # 🧑‍⚖️ داورِ تماشاگرِ اتاق حالا بازیکنِ غیرمافیاست → بیرون (وگرنه چتِ مافیا را می‌خواند)
+            await _room_kick(ctx, g, new_uid)
+            g.mafia_room_members.discard(new_uid)
+            await _room_rotate_link(ctx, g)
     except Exception as e:
         print("⚠️ sub room:", e)
 
@@ -27449,7 +27494,7 @@ async def _room_join_check_later(ctx, g, delay=300):
         return
     await _room_rotate_link(ctx, g)   # لینک نو + رفعِ بن + ارسال به جوین‌نشده‌ها
     names = []
-    _wr = set(_tourn_watch_refs(g))
+    _wr = _room_ref_keep(g)
     for uid in _out:
         seat = _seat_of_uid(g, uid)
         names.append(f"{seat}. {g.seats[seat][1]}" if seat
@@ -27467,7 +27512,7 @@ async def _room_sync_on_night(ctx, g):
     if not (_is_hanibal_scenario(g) or _is_dentist_scenario(g)):
         await _room_set_locked(ctx, g, False)
     removed_any = False
-    _wr = set(_tourn_watch_refs(g))
+    _wr = _room_ref_keep(g)
     for uid in list(g.mafia_room_members):
         if uid == g.god_id or uid in _wr:
             continue   # ⚠️ گاد (و داورِ تورنومنت) صندلی ندارد ولی هیچ‌وقت نباید حذف شود!
@@ -27513,7 +27558,7 @@ async def _room_drop_dead(ctx, g):
     if not getattr(g, "mafia_room_id", None):
         return
     removed = False
-    _wr = set(_tourn_watch_refs(g))
+    _wr = _room_ref_keep(g)
     for uid in list(g.mafia_room_members or set()):
         if uid == g.god_id or uid in _wr:
             continue
@@ -27782,6 +27827,8 @@ async def do_maarefe(ctx, chat_id, g):
         _wr = _tourn_watch_refs(g)                  # 🏆 داورهای تورنومنت هم مثلِ گاد
         for _r in _wr:
             await _room_send_link(ctx, g, _r)
+        g.room_refs = set(_wr)                      # برای وقتی کشِ تورنومنت خالی است
+        store.save()
         if manual:
             # ✋ لینک فقط برای کسانی می‌رود که خودِ گاد در پیویش انتخاب و تأیید کند
             g.mlink_sel = set()
@@ -28997,6 +29044,12 @@ async def sub_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g.mafia_room_members.discard(old_uid)
             await _room_rotate_link(ctx, g)   # لینکِ قبلی باطل تا قدیمی برنگردد
         await _room_send_link(ctx, g, new_uid)
+    elif (getattr(g, "mafia_room_id", None) and new_uid != g.god_id
+          and new_uid in (g.mafia_room_members or set())):
+        # 🧑‍⚖️ داورِ تماشاگرِ اتاق حالا بازیکنِ غیرمافیاست → بیرون
+        await _room_kick(ctx, g, new_uid)
+        g.mafia_room_members.discard(new_uid)
+        await _room_rotate_link(ctx, g)
 
 
     stickers = load_stickers()
