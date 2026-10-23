@@ -6707,6 +6707,13 @@ def control_keyboard(g: GameState) -> InlineKeyboardMarkup:
             and not getattr(g, "hb_duel_used", False)):
         rows.append([InlineKeyboardButton("🏛 معمار", callback_data="ctl_memar")])
 
+    # ⚖️ دکمه‌ی یک‌بارمصرفِ دادستان — بعد از معارفه، فقط روزِ ۱ (انتهای صحبت‌ها، قبل از رأی‌گیری)
+    #    ⚠️ دیدنی بودنش به زنده‌بودنِ دادستان وابسته نیست، وگرنه از بود‌ونبودش لو می‌رود.
+    if (_is_prosecutor_scenario(g) and getattr(g, "maarefe_done", False)
+            and getattr(g, "night_number", 0) == 0
+            and not getattr(g, "pr_button_used", False)):
+        rows.append([InlineKeyboardButton("⚖️ دادستان", callback_data="ctl_dadsetan")])
+
     # 💣 دکمه‌ی الیوت (گیمر) — همیشه هست، چون تووفیس شب‌های فرد بمبِ تازه می‌گذارد.
     #    ⚠️ دیدنی بودنش به وجودِ بمب وابسته نیست، وگرنه از بود‌ونبودش لو می‌رفت.
     if _is_gamer_scenario(g) and getattr(g, "maarefe_done", False):
@@ -7537,19 +7544,53 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
     # 🔢 ترتیبِ نهایی (لیست و دکمه‌های رأی نهایی) = ترتیبِ رأی‌گیریِ اولیه، نه تعدادِ رأی
     qualified.sort(key=lambda t: order.index(t))
 
-    if not qualified and lawyer_seat is None:
+    # ⚖️ دادستان (روزِ ۱): انتخابِ شبِ موقت بعد از همه‌ی قانون‌های رأی اعمال می‌شود، چون رأی‌محور نیست.
+    #    رأیِ اولیه هر بار از نو گرفته شود، همین دوباره اعمال می‌شود (فقط همان روز).
+    pr_pick, pr_note = None, None
+    if (_is_prosecutor_scenario(g) and getattr(g, "pr_target", None) is not None
+            and getattr(g, "pr_day", None) == (getattr(g, "night_number", 0) or 0)):
+        pt = g.pr_target
+        pros = _find_seat_by_role(g, _R_PR_DADSETAN, alive_only=False)
+        if pt not in g.seats or pt in (g.striked or set()):
+            await _night_report(ctx, g, "⚖️ انتخابِ دادستان دیگر در بازی نیست → بی‌اثر.")
+        elif pros in qualified:
+            # خودِ دادستان واردِ دفاع شد → اکتش اجرا نمی‌شود
+            await _night_report(ctx, g, f"⚖️ دادستان خودش واردِ دفاع شد → اکتش اجرا نشد "
+                                        f"({_pr_who(g, pt)} به دستورِ او نمی‌آید).")
+        elif getattr(g, "pr_amn", None) == pt:
+            # 🎩 امان‌نامه‌ی تردست به همان نفر خورد → اصلاً واردِ دفاع نمی‌شود (با رأی هم)
+            if pt in qualified:
+                qualified.remove(pt)
+                pr_note = f"🎩 {_pr_who(g, pt)} با امان‌نامه‌ی تردست از دفاعیه خارج شد."
+            await _night_report(ctx, g, f"🎩 امان‌نامه‌ی تردست به {_pr_who(g, pt)} خورد → "
+                                        f"انتخابِ دادستان به دفاع نمی‌آید.")
+        elif pt in qualified:
+            # خودش رأی آورده → در گروه گفته نمی‌شود که به دستورِ دادستان آمده
+            await _night_report(ctx, g, f"⚖️ انتخابِ دادستان ({_pr_who(g, pt)}) خودش رأی آورده → در گروه اعلام نمی‌شود.")
+        else:
+            qualified.append(pt)
+            pr_pick = pt
+            pr_note = f"⚖️ به دستورِ دادستان: {_pr_who(g, pt)} واردِ دفاعیه می‌شود."
+            await _night_report(ctx, g, f"⚖️ انتخابِ دادستان ({_pr_who(g, pt)}) به دفاعیه اضافه شد.")
+
+    if not qualified and lawyer_seat is None and pr_note is None:
         await ctx.bot.send_message(chat_id, f"ℹ️ هیچ‌کس به حدنصاب دفاعیه ({thr} رأی) نرسید.")
         return
 
     lines = [f"🗳 حدنصاب دفاعیه با {alive} بازیکنِ زنده: <b>{thr}</b> رأی",
              "🧍 <b>این افراد داخل دفاعیه هستند:</b>"]
     for t in qualified:
-        lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
+        if t == pr_pick:
+            lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — به دستورِ دادستان")
+        else:
+            lines.append(f"• {t}. {escape(g.seats[t][1], quote=False)} — {counts.get(t, 0)} رأی")
     if gap_note:
         lines.append(gap_note)
     if lawyer_seat is not None:
         lines.append(f"⚖️ {lawyer_seat}. {escape(g.seats[lawyer_seat][1], quote=False)} "
                      f"با اکتِ وکیل واردِ دفاع نمی‌شود.")
+    if pr_note:
+        lines.append(pr_note)
     if not qualified:
         await ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
         return
@@ -9056,6 +9097,8 @@ def _mafia_role_set(g):
         return _HB_MAFIA
     if _is_classic_scenario(g):
         return (_R_DON, _R_CL_TERROR, _R_SIMPLE_MAFIA)
+    if _is_prosecutor_scenario(g):
+        return _PR_MAFIA
     return (_R_GODFATHER, _R_NEGOTIATOR, _R_SIMPLE_MAFIA)
 
 def _mafia_seats(g, alive_only=False):
@@ -9931,6 +9974,9 @@ def _night_all_done(g) -> bool:
             return need <= d
         return True
 
+    if _is_prosecutor_scenario(g):
+        return _pr_all_done(g)
+
     if _is_classic_scenario(g):
         if "mafia" not in d:
             return False
@@ -10058,7 +10104,8 @@ def _is_manual_scenario(g) -> bool:
     return not (_is_neg_scenario(g) or _is_baazpors_scenario(g) or _is_nemayande_scenario(g)
                 or _is_takavar_scenario(g) or _is_kapu_scenario(g) or _is_gamer_scenario(g)
                 or _is_shahname_scenario(g) or _is_mythic_scenario(g)
-                or _is_hanibal_scenario(g) or _is_classic_scenario(g))
+                or _is_hanibal_scenario(g) or _is_classic_scenario(g)
+                or _is_prosecutor_scenario(g))
 
 
 async def start_night(ctx, chat_id, g):
@@ -10072,6 +10119,7 @@ async def start_night(ctx, chat_id, g):
     is_my = _is_mythic_scenario(g)
     is_hb = _is_hanibal_scenario(g)
     is_cl = _is_classic_scenario(g)
+    is_pr = _is_prosecutor_scenario(g)
     # 🌙 سناریوهای بدونِ موتورِ خودکار: شب و روز مثل همیشه برقرار است،
     #    فقط اکت‌ها به‌جای دکمه‌های بات، در پیویِ گاد گرفته می‌شوند.
     is_manual = _is_manual_scenario(g)
@@ -10184,6 +10232,15 @@ async def start_night(ctx, chat_id, g):
     g.night_hb_bond = None
     g.night_hb_avenge = None
     g.night_attar_poison_target = None
+    # ⚖️ دادستان — per-night (پناهِ مصرف‌شده، تیرِ تک‌تیرانداز و حدسِ غلطِ شبِ قبل کلِ بازی می‌مانند)
+    g.night_pr_shelter = None
+    g.night_pr_shelter_ok = None
+    g.night_pr_flip = None
+    g.night_pr_nab_target = None
+    g.night_pr_nab_role = None
+    g.night_pr_nab_correct = False
+    g.pr_decider_seat = None
+    g.pr_bond = None              # 🕵️ همراهیِ نابودگر فقط تا شبِ بعد اعتبار داشت
     g.poison_phase = False
     g.antidote_votes = {}
     g.antidote_expected = []
@@ -10326,6 +10383,8 @@ async def start_night(ctx, chat_id, g):
             g.night_stage = "classic"
             store.save()
             await _cl_open_all(ctx, chat_id, g)
+        elif is_pr:
+            await _pr_start(ctx, chat_id, g)
         else:
             # 💎 تانوس اول از همه؛ اگر نبود مستقیم رابین‌هود
             g.night_stage = "thanos" if _is_gamer17(g) else "robin"
@@ -10612,6 +10671,11 @@ def _burn_seat_acts(g, seat, force=False):
         _R_GUIDE:       ("night_guide_target", "night_guide_recipient_inv"),
         _R_ATTAR:       ("night_attar_poison_target",),
         _R_MINER:       ("night_mine_sacrifice",),
+        # ⚖️ دادستان
+        _R_PR_DOC:      ("night_doc_saved",),
+        _R_PR_TARDAST:  ("night_pr_flip",),
+        _R_PR_NABOOD:   ("night_pr_nab_target", "night_pr_nab_role", "night_pr_nab_correct"),
+        _R_PR_PANAH:    ("night_pr_shelter", "night_pr_shelter_ok"),
     }
     empties = {"night_doc_saved": [], "night_guard_seats": [], "night_baz_targets": [],
                "night_nato_correct": False, "night_jalad_correct": False,
@@ -10632,7 +10696,7 @@ def _burn_seat_acts(g, seat, force=False):
 
     # 🩸 تصمیم‌گیرندهٔ مافیا (شات/مذاکره/ناتویی/یاکوزایی/خنثی) — هر سناریو کلیدِ خودش را دارد
     decider_keys = ("night_decider_seat", "bzp_decider_seat", "nem_decider_seat",
-                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat")
+                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat", "pr_decider_seat")
     if any(getattr(g, k, None) == seat for k in decider_keys):
         fields += ["night_shot_target", "night_is_negotiation", "night_negotiation_target",
                    "night_don_act", "night_don_defuse", "night_yakuza_sacrifice"]
@@ -10694,6 +10758,8 @@ async def _shot_outcome_report(ctx, g, dead, reasons, zereh_warn=None):
         why = "خشمِ کاوه — شاتِ امشب کشته نگرفت"
     elif _is_shahname_scenario(g) and st in _sh_saved_seats(g):
         why = "پر سیمرغ به او رسیده بود"
+    elif _is_prosecutor_scenario(g) and _pr_shelter(g) == st:
+        why = "در پناهِ پناه‌بان بود"
     elif _is_saved(g, st):
         why = "پزشک سیوش کرده بود"
     elif _armor_kind(g, st) == "rouin":
@@ -10867,6 +10933,12 @@ async def _check_auto_end(ctx, chat_id, g, after_night=False):
                 await _sh_check_link(ctx, chat_id, g)
             except Exception as _e:
                 print("⚠️ sh link err:", _e)
+        # 🕵️ دادستان: با رفتنِ نابودگر، شهروندِ درست‌حدس‌خورده هم می‌رود (قبل از سنجشِ پایان)
+        if _is_prosecutor_scenario(g):
+            try:
+                await _pr_bond_sweep(ctx, chat_id, g)
+            except Exception as _e:
+                print("⚠️ pr bond err:", _e)
         cond = _win_condition(g)
         if cond and not getattr(g, "endq_token", None):
             side, clean, why = cond
@@ -11084,6 +11156,8 @@ async def _resolve_night(ctx, chat_id, g):
         await _resolve_hanibal(ctx, chat_id, g)
     elif _is_classic_scenario(g):
         await _resolve_classic(ctx, chat_id, g)
+    elif _is_prosecutor_scenario(g):
+        await _resolve_prosecutor(ctx, chat_id, g)
     else:
         await _resolve_manual(ctx, chat_id, g)
 
@@ -11970,6 +12044,793 @@ CLASSIC_KEY = "کلاسیک"
 _R_CL_TERROR = _nz("تروریست")
 
 
+# ═════════════════════════════════════════════════════════════
+#  ⚖️ موتور شبِ خودکار — سناریوی «دادستان» (۱۰ نفره)
+#  مافیا: رئیس‌مافیا، نابودگر، تردست | شهر: دکتر، تک‌تیرانداز، کاراگاه، پناه‌بان، دادستان، ۲ شهروندساده
+#  تشخیص از روی ترکیبِ نقش‌هاست نه اسمِ سناریو.
+#  شب: پناه‌بان (یک‌بار در کلِ بازی؛ هدف باید قبول کند) → مافیا (هر سه هم‌زمان: شلیک، برعکس‌کردنِ
+#       استعلام، حدسِ نقش) → شهروندان (هم‌زمان: دکتر، کاراگاه، تک‌تیرانداز). شهروندِ در پناه اکت ندارد.
+#  روزِ ۱: دکمه‌ی «⚖️ دادستان» → دادستان یک نفر را به دفاع می‌فرستد → تردست امان‌نامه می‌دهد →
+#       «الان می‌توانی رأی‌گیری را شروع کنی». انتخابِ دادستان بعد از رأیِ اولیه به دفاعیه اضافه می‌شود.
+# ═════════════════════════════════════════════════════════════
+_R_PR_BOSS     = _nz("رئیس مافیا")
+_R_PR_NABOOD   = _nz("نابودگر")
+_R_PR_TARDAST  = _nz("تردست")
+_R_PR_PANAH    = _nz("پناه‌بان")
+_R_PR_DADSETAN = _nz("دادستان")
+_R_PR_DOC      = _nz("دکتر")
+_PR_MAFIA = (_R_PR_BOSS, _R_PR_NABOOD, _R_PR_TARDAST)
+_PR_DETECT: dict = {}
+
+
+def _is_prosecutor_scenario(g) -> bool:
+    """تشخیص از روی ترکیبِ نقش‌ها (نه اسمِ سناریو): دادستان + تردست + نابودگر + پناه‌بان."""
+    sc = getattr(g, "scenario", None)
+    roles = getattr(sc, "roles", None) if sc else None
+    if not roles:
+        return False
+    key = (getattr(sc, "name", ""), tuple(sorted(roles)))
+    v = _PR_DETECT.get(key)
+    if v is None:
+        rs = {_nz(r) for r in roles}
+        v = {_R_PR_DADSETAN, _R_PR_TARDAST, _R_PR_NABOOD, _R_PR_PANAH} <= rs
+        _PR_DETECT[key] = v
+    return v
+
+
+def _pr_find_game(uid, q=None):
+    """بازیِ دادستانِ این کاربر — روز هم (اکتِ دادستان/تردست)، نه فقط شب."""
+    cands = []
+    for cid, game in store.games.items():
+        if game.phase in ("idle", "ended"):
+            continue
+        if _is_prosecutor_scenario(game) and _seat_of_uid(game, uid) is not None:
+            cands.append((game, cid))
+    if q is not None and getattr(q, "message", None):
+        for game, cid in cands:
+            if (game.night_pm_msgs or {}).get(uid) == q.message.message_id:
+                return game, cid
+    return cands[0] if cands else (None, None)
+
+
+def _pr_shooter(g):
+    """🔫 شلیک‌کننده‌ی مافیا: رئیس → نابودگر → تردست (اولین زنده)."""
+    return (_find_seat_by_role(g, _R_PR_BOSS) or _find_seat_by_role(g, _R_PR_NABOOD)
+            or _find_seat_by_role(g, _R_PR_TARDAST))
+
+
+def _pr_shelter(g):
+    """صندلیِ در پناه (پذیرفته‌شده) امشب، وگرنه None."""
+    s = getattr(g, "night_pr_shelter", None)
+    return s if (s is not None and getattr(g, "night_pr_shelter_ok", None) is True) else None
+
+
+def _pr_sheltered_citizen(g, seat) -> bool:
+    """شهروندی که پناه را قبول کرده امشب اکت ندارد (مافیایِ در پناه اکتش باز می‌ماند)."""
+    return seat is not None and _pr_shelter(g) == seat and seat not in _mafia_seats(g)
+
+
+def _pr_who(g, s):
+    return f"{s}. {escape(g.seats[s][1], quote=False)}" if s in g.seats else str(s)
+
+
+def _pr_kb_plus(kb, text, cb):
+    """یک دکمه‌ی اضافه (مثلِ «⏭») زیرِ کیبوردِ صندلی‌ها."""
+    return InlineKeyboardMarkup(list(kb.inline_keyboard) + [[InlineKeyboardButton(text, callback_data=cb)]])
+
+
+def _pr_all_done(g) -> bool:
+    """همه‌ی کلیدها همان وقتِ بازشدنِ هر مرحله برای نقش‌های غایب/در پناه هم زده می‌شوند."""
+    return {"panah", "mafia", "flip", "nab", "doctor", "detective", "sniper"} <= (g.night_done or set())
+
+
+# ── شب: پناه‌بان ─────────────────────────────────────────────
+async def _pr_start(ctx, chat_id, g):
+    g.night_stage = "prosecutor"
+    store.save()
+    await _pr_open_panah(ctx, chat_id, g)
+
+
+_PR_PAN_TXT = "🏠 به چه کسی پناه می‌دهی؟ (فقط یک‌بار در کلِ بازی)"
+_PR_NAB_TXT = "🕵️ نقشِ چه کسی را حدس می‌زنی؟ (اول نفر، بعد نقش)"
+
+
+async def _pr_open_panah(ctx, chat_id, g):
+    if "pr_pan_opened" in (g.night_done or set()):
+        return
+    g.night_done.add("pr_pan_opened")
+    store.save()
+    pan = _find_seat_by_role(g, _R_PR_PANAH)
+    if pan is None or getattr(g, "pr_pan_used", False) or "panah" in (g.night_done or set()):
+        g.night_done.add("panah")
+        store.save()
+        # ⏳ پناه‌بانِ مرده/مصرف‌شده: مافیا با تأخیر باز می‌شود تا از سرعتِ بازشدن چیزی نفهمند
+        if _find_seat_by_role(g, _R_PR_PANAH, alive_only=False) is not None:
+            _open_next_delayed(ctx, chat_id, g, _pr_open_mafia)
+        else:
+            await _pr_open_mafia(ctx, chat_id, g)
+        return
+    targets = [s for s in _alive_seats(g) if s != pan]
+    kb = _pr_kb_plus(_kb_night_seats(targets, g, "pr_pan_", confirm_cb="pr_pan_ok"),
+                     "⏭ امشب پناه نمی‌دهم", "pr_pan_skip")
+    m = await _safe_pm(ctx, g.seats[pan][0], _PR_PAN_TXT, kb)
+    if m:
+        g.night_pm_msgs[g.seats[pan][0]] = m.message_id
+    store.save()
+
+
+async def _pr_ask_shelter(ctx, chat_id, g, s):
+    """پیشنهادِ پناه به صندلیِ s — جواب (بله/خیر) از خودِ او."""
+    uid = g.seats[s][0]
+    is_maf = s in _mafia_seats(g)
+    txt = ("🏠 پناه‌بان به تو پناه داده است. قبول می‌کنی؟\n"
+           "اگر قبول کنی امشب شلیکِ مافیا و تک‌تیرانداز به تو کارگر نیست"
+           + ("." if is_maf else " — ولی امشب هیچ اکتی هم نداری."))
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ قبول می‌کنم", callback_data="pr_sh_yes")],
+                               [InlineKeyboardButton("👎 نمی‌خواهم", callback_data="pr_sh_no")]])
+    m = await _safe_pm(ctx, uid, txt, kb)
+    if m:
+        g.night_pm_msgs[uid] = m.message_id
+    store.save()
+
+
+async def _pr_shelter_resolved(ctx, chat_id, g):
+    g.night_done.add("panah")
+    store.save()
+    await _pr_open_mafia(ctx, chat_id, g)
+
+
+# ── شب: مافیا (هر سه هم‌زمان) ─────────────────────────────────
+async def _pr_open_mafia(ctx, chat_id, g):
+    if "pr_mafia_opened" in (g.night_done or set()) or "panah" not in (g.night_done or set()):
+        return
+    g.night_done.add("pr_mafia_opened")
+    store.save()
+    shooter = _pr_shooter(g)
+    g.pr_decider_seat = shooter
+    if shooter is None:
+        g.night_done.update({"mafia", "flip", "nab"})
+        store.save()
+        await _night_report(ctx, g, "🔫 مافیایی زنده نیست.")
+        await _pr_check_open_citizens(ctx, chat_id, g)
+        return
+    await _pr_prompt_shot(ctx, g, shooter)
+    # 🎩 تردست و 🕵️ نابودگر — اگر خودِ شلیک‌کننده‌اند، اکتِ دومشان بعد از شلیک باز می‌شود
+    #    (هر نفر یک پرامپتِ باز دارد)
+    tar = _find_seat_by_role(g, _R_PR_TARDAST)
+    if tar is None:
+        g.night_done.add("flip")
+    elif tar != shooter:
+        await _pr_prompt_flip(ctx, g, tar)
+    nab = _find_seat_by_role(g, _R_PR_NABOOD)
+    if nab is None:
+        g.night_done.add("nab")
+    elif nab != shooter:
+        await _pr_prompt_nab(ctx, g, nab)
+    store.save()
+    await _pr_check_open_citizens(ctx, chat_id, g)
+
+
+async def _pr_prompt_shot(ctx, g, shooter):
+    if "mafia" in (g.night_done or set()):
+        return
+    targets = [s for s in _alive_seats(g) if s != shooter]
+    m = await _safe_pm(ctx, g.seats[shooter][0], "🔫 شلیکِ امشبِ مافیا — چه کسی؟",
+                       _kb_night_seats(targets, g, "pr_shot_", confirm_cb="pr_shot_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[shooter][0]] = m.message_id
+
+
+async def _pr_prompt_flip(ctx, g, tar):
+    if "flip" in (g.night_done or set()):
+        return
+    m = await _safe_pm(ctx, g.seats[tar][0], "🎩 استعلامِ چه کسی را امشب برعکس می‌کنی؟",
+                       _kb_night_seats(list(_alive_seats(g)), g, "pr_flip_", confirm_cb="pr_flip_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[tar][0]] = m.message_id
+
+
+def _pr_nab_targets(g, nab):
+    """هدف‌های حدس: شهروندانِ زنده؛ کسی که دیشب رویش اشتباه زده امشب نه."""
+    blocked = set()
+    ws, wn = getattr(g, "pr_nab_wrong_seat", None), getattr(g, "pr_nab_wrong_night", None)
+    if ws is not None and wn is not None and int(wn) == (g.night_number or 0) - 1:
+        blocked.add(int(ws))
+    maf = _mafia_seats(g)
+    return [s for s in _alive_seats(g) if s != nab and s not in maf and s not in blocked]
+
+
+def _pr_citizen_roles(g):
+    """نقش‌های شهریِ همین سناریو (برای حدسِ نابودگر) — نامِ اصلی، بدونِ تکرار."""
+    maf = set(_mafia_role_set(g))
+    out, seen = [], set()
+    for r in (getattr(g.scenario, "roles", None) or {}):
+        n = _nz(r)
+        if n in maf or n in seen:
+            continue
+        seen.add(n)
+        out.append(r)
+    return out
+
+
+def _pr_nab_role_kb(g):
+    rows = [[InlineKeyboardButton(r, callback_data=f"pr_nab_r_{i}")]
+            for i, r in enumerate(_pr_citizen_roles(g))]
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="pr_nab_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _pr_prompt_nab(ctx, g, nab):
+    if "nab" in (g.night_done or set()):
+        return
+    kb = _pr_kb_plus(_kb_night_seats(_pr_nab_targets(g, nab), g, "pr_nab_s_"),
+                     "⏭ امشب حدس نمی‌زنم", "pr_nab_skip")
+    m = await _safe_pm(ctx, g.seats[nab][0], _PR_NAB_TXT, kb)
+    if m:
+        g.night_pm_msgs[g.seats[nab][0]] = m.message_id
+
+
+async def _pr_after_mafia_step(ctx, chat_id, g, uid):
+    """بعد از هر اکتِ مافیا: اگر شلیک‌کننده خودش تردست/نابودگر است، اکتِ دومش حالا باز می‌شود؛ بعد شهروندان."""
+    seat = _seat_of_uid(g, uid)
+    d = g.night_done or set()
+    if seat is not None and seat == getattr(g, "pr_decider_seat", None) and "mafia" in d:
+        rn = _seat_role_norm(g, seat)
+        if rn == _R_PR_TARDAST and "flip" not in d:
+            await _pr_prompt_flip(ctx, g, seat)
+        elif rn == _R_PR_NABOOD and "nab" not in d:
+            await _pr_prompt_nab(ctx, g, seat)
+    store.save()
+    await _pr_check_open_citizens(ctx, chat_id, g)
+
+
+# ── شب: شهروندان (هم‌زمان) ───────────────────────────────────
+async def _pr_check_open_citizens(ctx, chat_id, g):
+    d = g.night_done or set()
+    if not {"mafia", "flip", "nab"} <= d or "pr_cit_opened" in d:
+        return
+    g.night_done.add("pr_cit_opened")
+    store.save()
+    # 💉 دکتر — خودش حداکثر ۲ بار در کلِ بازی
+    doc = _find_seat_by_role(g, _R_PR_DOC)
+    if doc is None or "doctor" in d or _pr_sheltered_citizen(g, doc):
+        g.night_done.add("doctor")
+    else:
+        self_ok = int(getattr(g, "pr_doc_self", 0) or 0) < 2
+        targets = [s for s in _alive_seats(g) if s != doc or self_ok]
+        note = "" if self_ok else "\n(سهمِ دو سیوِ خودت تمام شده)"
+        m = await _safe_pm(ctx, g.seats[doc][0], "💉 چه کسی را سیو می‌کنی؟" + note,
+                           _kb_night_seats(targets, g, "pr_doc_", confirm_cb="pr_doc_ok"))
+        if m:
+            g.night_pm_msgs[g.seats[doc][0]] = m.message_id
+    # 🔎 کاراگاه
+    det = _find_seat_by_role(g, _R_DETECTIVE)
+    if det is None or "detective" in d or _pr_sheltered_citizen(g, det):
+        g.night_done.add("detective")
+    else:
+        targets = [s for s in _alive_seats(g) if s != det]
+        m = await _safe_pm(ctx, g.seats[det][0], "🔎 استعلامِ چه کسی را می‌گیری؟",
+                           _kb_night_seats(targets, g, "pr_det_", confirm_cb="pr_det_ok"))
+        if m:
+            g.night_pm_msgs[g.seats[det][0]] = m.message_id
+    # 🎯 تک‌تیرانداز — یک شلیک در کلِ بازی، بدونِ فایربک و نایس‌شات
+    snp = _find_sniper(g)
+    if (snp is None or "sniper" in d or getattr(g, "pr_snp_used", False)
+            or _pr_sheltered_citizen(g, snp)):
+        g.night_done.add("sniper")
+    else:
+        targets = [s for s in _alive_seats(g) if s != snp]
+        kb = _pr_kb_plus(_kb_night_seats(targets, g, "pr_snp_", confirm_cb="pr_snp_ok"),
+                         "⏭ امشب شلیک نمی‌کنم", "pr_snp_skip")
+        m = await _safe_pm(ctx, g.seats[snp][0], "🎯 تنها تیرِ تو — به چه کسی شلیک می‌کنی؟", kb)
+        if m:
+            g.night_pm_msgs[g.seats[snp][0]] = m.message_id
+    store.save()
+    await _maybe_notify_god_done(ctx, g)
+
+
+async def _pr_after_burn(ctx, chat_id, g, burned):
+    """🔥 سوخته‌ها «انجام‌شده» می‌شوند و زنجیره ادامه می‌یابد: پناه‌بان → مافیا → شهروندان."""
+    d = g.night_done
+    for rn, key in ((_R_PR_PANAH, "panah"), (_R_PR_TARDAST, "flip"), (_R_PR_NABOOD, "nab"),
+                    (_R_PR_DOC, "doctor"), (_R_DETECTIVE, "detective")):
+        if _find_seat_by_role(g, rn) in burned:
+            d.add(key)
+    if _find_sniper(g) in burned:
+        d.add("sniper")
+    # 🏠 پیشنهادِ پناهِ بی‌جواب که هدفش سوخت → مثلِ «نپذیرفت»
+    sh = getattr(g, "night_pr_shelter", None)
+    if sh is not None and getattr(g, "night_pr_shelter_ok", None) is None and sh in burned:
+        g.night_pr_shelter_ok = False
+        d.add("panah")
+    if _pr_shooter(g) in burned or getattr(g, "pr_decider_seat", None) in burned:
+        d.add("mafia")
+    store.save()
+    if "panah" in d:
+        await _pr_open_mafia(ctx, chat_id, g)
+    await _pr_check_open_citizens(ctx, chat_id, g)
+    await _maybe_notify_god_done(ctx, g)
+
+
+# ── دکمه‌های پیوی ─────────────────────────────────────────────
+async def handle_prosecutor_callback(update, ctx):
+    q = update.callback_query
+    data = q.data
+    uid = _q_uid(q)   # 🎛 اکتِ دستی
+    mid = q.message.message_id if q.message else None
+    # ☀️ اکتِ روزِ ۱ (دادستان/تردست) به شبِ فعال وابسته نیست
+    if data.startswith(("pr_dad_", "pr_amn_")):
+        g, chat_id = _pr_find_game(uid, q)
+        if g is None:
+            await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+            return
+        await safe_q_answer(q)
+        await _pr_day_callback(ctx, chat_id, g, uid, data, mid, q)
+        return
+    g, chat_id = _find_active_night_game(uid, q)
+    if g is None:
+        await safe_q_answer(q, "بازی فعالی یافت نشد.", show_alert=True)
+        return
+    await safe_q_answer(q)
+    d = g.night_done
+    me = _seat_of_uid(g, uid)
+
+    def _sel():
+        s = g.night_sel.get(uid)
+        return s if (s and s in g.seats and s not in (g.striked or set())) else None
+
+    # ── 🏠 پناه‌بان ──
+    if data == "pr_pan_skip":
+        if "panah" in d or getattr(g, "night_pr_shelter", None) is not None:
+            return
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, "⏭ امشب پناه ندادی — پناهت می‌ماند.")
+        await _night_report(ctx, g, "🏠 پناه‌بان → امشب پناه نداد.")
+        await _pr_shelter_resolved(ctx, chat_id, g)
+        return
+    if data == "pr_pan_ok":
+        if "panah" in d or getattr(g, "night_pr_shelter", None) is not None:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.pr_pan_used = True
+        g.night_pr_shelter = s
+        g.night_pr_shelter_ok = None
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🏠 پیشنهادِ پناه برای {s}. {g.seats[s][1]} فرستاده شد.")
+        await _night_report(ctx, g, f"🏠 پناه‌بان → پیشنهادِ پناه به <b>{_pr_who(g, s)}</b> (منتظرِ جوابش)")
+        await _pr_ask_shelter(ctx, chat_id, g, s)
+        return
+    if data.startswith("pr_pan_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        kb = _pr_kb_plus(_kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_pan_",
+                                         selected=s, confirm_cb="pr_pan_ok"),
+                         "⏭ امشب پناه نمی‌دهم", "pr_pan_skip")
+        await _edit_pm(ctx, uid, mid, _PR_PAN_TXT, kb)
+        return
+    if data in ("pr_sh_yes", "pr_sh_no"):
+        if (me is None or me != getattr(g, "night_pr_shelter", None)
+                or getattr(g, "night_pr_shelter_ok", None) is not None):
+            return
+        ok = data == "pr_sh_yes"
+        g.night_pr_shelter_ok = ok
+        store.save()
+        if ok:
+            txt = "✅ پناه را قبول کردی — امشب در امانی" + ("." if me in _mafia_seats(g) else "، و اکتی نداری.")
+        else:
+            txt = "👎 پناه را نپذیرفتی."
+        await _close_pm(ctx, uid, mid, txt)
+        await _night_report(ctx, g, f"🏠 {_pr_who(g, me)} پناه را {'قبول کرد ✅' if ok else 'نپذیرفت ✖️'}")
+        await _pr_shelter_resolved(ctx, chat_id, g)
+        return
+
+    # ── 🔫 شلیکِ مافیا ──
+    if data == "pr_shot_ok":
+        if "mafia" in d:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_shot_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("mafia")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔫 شلیک به {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🔫 مافیا → شلیک به <b>{_pr_who(g, s)}</b>")
+        await _room_note(ctx, g, f"🔫 شلیکِ امشب: <b>{_room_who(g, s)}</b>")
+        await _pr_after_mafia_step(ctx, chat_id, g, uid)
+        return
+    if data.startswith("pr_shot_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔫 شلیکِ امشبِ مافیا — چه کسی؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_shot_",
+                                       selected=s, confirm_cb="pr_shot_ok"))
+        return
+
+    # ── 🎩 تردست: برعکس‌کردنِ استعلام ──
+    if data == "pr_flip_ok":
+        if "flip" in d:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.night_pr_flip = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("flip")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🎩 استعلامِ {s}. {g.seats[s][1]} امشب برعکس می‌شود.")
+        await _night_report(ctx, g, f"🎩 تردست → استعلامِ <b>{_pr_who(g, s)}</b> امشب برعکس می‌شود")
+        await _room_note(ctx, g, f"🎩 تردست: استعلامِ <b>{_room_who(g, s)}</b> امشب برعکس است")
+        await _pr_after_mafia_step(ctx, chat_id, g, uid)
+        return
+    if data.startswith("pr_flip_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🎩 استعلامِ چه کسی را امشب برعکس می‌کنی؟",
+                       _kb_night_seats(list(_alive_seats(g)), g, "pr_flip_", selected=s, confirm_cb="pr_flip_ok"))
+        return
+
+    # ── 🕵️ نابودگر: حدسِ نقش (اول نفر، بعد نقش) ──
+    if data == "pr_nab_skip":
+        if "nab" in d:
+            return
+        g.night_sel.pop(uid, None)
+        g.night_done.add("nab")
+        store.save()
+        await _close_pm(ctx, uid, mid, "⏭ امشب حدسی نزدی.")
+        await _night_report(ctx, g, "🕵️ نابودگر → امشب حدس نزد.")
+        await _pr_after_mafia_step(ctx, chat_id, g, uid)
+        return
+    if data == "pr_nab_back":
+        g.night_sel.pop(uid, None)
+        store.save()
+        _ACT_UID.set(None)          # ↩️ «بازگشت» اکت نیست
+        kb = _pr_kb_plus(_kb_night_seats(_pr_nab_targets(g, me), g, "pr_nab_s_"),
+                         "⏭ امشب حدس نمی‌زنم", "pr_nab_skip")
+        await _edit_pm(ctx, uid, mid, _PR_NAB_TXT, kb)
+        return
+    if data.startswith("pr_nab_s_"):
+        if "nab" in d:
+            return
+        s = int(data.rsplit("_", 1)[1])
+        if s not in _pr_nab_targets(g, me):
+            return
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, f"🕵️ نقشِ {s}. {g.seats[s][1]} چیست؟", _pr_nab_role_kb(g))
+        return
+    if data.startswith("pr_nab_r_"):
+        if "nab" in d:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        roles = _pr_citizen_roles(g)
+        i = int(data.rsplit("_", 1)[1])
+        if i >= len(roles):
+            return
+        role = roles[i]
+        correct = _nz(role) == _seat_role_norm(g, s)
+        g.night_pr_nab_target = s
+        g.night_pr_nab_role = role
+        g.night_pr_nab_correct = correct
+        if correct:
+            g.pr_bond = s                       # 🕵️ تا شبِ بعد: اگر نابودگر برود، او هم می‌رود
+            g.pr_bond_night = g.night_number
+        else:
+            g.pr_nab_wrong_seat = s             # فردا شب روی همین نفر حدس نمی‌زند
+            g.pr_nab_wrong_night = g.night_number
+        g.night_sel.pop(uid, None)
+        g.night_done.add("nab")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🕵️ حدس: {s}. {g.seats[s][1]} = {role} → "
+                        + ("👍 درست! اگر فردا از بازی بروی، او هم با تو می‌رود." if correct
+                           else "✖️ اشتباه — فردا شب روی این نفر حدس نمی‌زنی."))
+        await _night_report(ctx, g, f"🕵️ نابودگر → حدسِ <b>{_pr_who(g, s)}</b> = {escape(role, quote=False)}: "
+                                    + ("درست ✅ (همراه می‌شود)" if correct else "غلط ✖️"))
+        await _pr_after_mafia_step(ctx, chat_id, g, uid)
+        return
+
+    # ── 💉 دکتر ──
+    if data == "pr_doc_ok":
+        if "doctor" in d:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        if s == me:
+            if int(getattr(g, "pr_doc_self", 0) or 0) >= 2:
+                await safe_q_answer(q, "سهمِ سیوِ خودت (۲ بار) تمام شده.", show_alert=True)
+                return
+            g.pr_doc_self = int(getattr(g, "pr_doc_self", 0) or 0) + 1
+        g.night_doc_saved = [s]
+        g.night_sel.pop(uid, None)
+        g.night_done.add("doctor")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"💉 سیوِ {s}. {g.seats[s][1]} ثبت شد.")
+        _self_note = f" (سیوِ خود: {g.pr_doc_self}/۲)" if s == me else ""
+        await _night_report(ctx, g, f"💉 دکتر → سیوِ <b>{_pr_who(g, s)}</b>{_self_note}")
+        await _maybe_notify_god_done(ctx, g)
+        return
+    if data.startswith("pr_doc_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        self_ok = int(getattr(g, "pr_doc_self", 0) or 0) < 2
+        targets = [x for x in _alive_seats(g) if x != me or self_ok]
+        await _edit_pm(ctx, uid, mid, "💉 چه کسی را سیو می‌کنی؟",
+                       _kb_night_seats(targets, g, "pr_doc_", selected=s, confirm_cb="pr_doc_ok"))
+        return
+
+    # ── 🔎 کاراگاه ──
+    if data == "pr_det_ok":
+        if "detective" in d:
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        rn = _seat_role_norm(g, s)
+        positive = rn in (_R_PR_NABOOD, _R_PR_TARDAST)     # رئیس‌مافیا و شهروندان منفی
+        flipped = getattr(g, "night_pr_flip", None) == s
+        if flipped:
+            positive = not positive
+        res = "مثبت ☑️" if positive else "منفی ✖️"
+        g.night_sel.pop(uid, None)
+        g.night_done.add("detective")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🔎 نتیجهٔ استعلامِ {s}. {g.seats[s][1]}: {res}")
+        await _night_report(ctx, g, f"🔎 کاراگاه → استعلامِ <b>{_pr_who(g, s)}</b>: {res}"
+                                    + (" (تردست برعکسش کرد)" if flipped else ""))
+        await _maybe_notify_god_done(ctx, g)
+        return
+    if data.startswith("pr_det_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🔎 استعلامِ چه کسی را می‌گیری؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_det_",
+                                       selected=s, confirm_cb="pr_det_ok"))
+        return
+
+    # ── 🎯 تک‌تیرانداز ──
+    if data == "pr_snp_skip":
+        if "sniper" in d:
+            return
+        g.night_sel.pop(uid, None)
+        g.night_done.add("sniper")
+        store.save()
+        await _close_pm(ctx, uid, mid, "⏭ امشب شلیک نکردی — تیرت می‌ماند.")
+        await _night_report(ctx, g, "🎯 تک‌تیرانداز → امشب شلیک نکرد.")
+        await _maybe_notify_god_done(ctx, g)
+        return
+    if data == "pr_snp_ok":
+        if "sniper" in d or getattr(g, "pr_snp_used", False):
+            return
+        s = _sel()
+        if s is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.pr_snp_used = True
+        g.night_sniper_target = s
+        g.night_sel.pop(uid, None)
+        g.night_done.add("sniper")
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🎯 شلیک به {s}. {g.seats[s][1]} ثبت شد.")
+        await _night_report(ctx, g, f"🎯 تک‌تیرانداز → شلیک به <b>{_pr_who(g, s)}</b>")
+        await _maybe_notify_god_done(ctx, g)
+        return
+    if data.startswith("pr_snp_"):
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        kb = _pr_kb_plus(_kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_snp_",
+                                         selected=s, confirm_cb="pr_snp_ok"),
+                         "⏭ امشب شلیک نمی‌کنم", "pr_snp_skip")
+        await _edit_pm(ctx, uid, mid, "🎯 تنها تیرِ تو — به چه کسی شلیک می‌کنی؟", kb)
+        return
+
+
+# ── سحر: محاسبه‌ی مرگ‌ها ─────────────────────────────────────
+async def _resolve_prosecutor(ctx, chat_id, g):
+    dead, reasons = set(), {}
+    sh = _pr_shelter(g)
+    t = getattr(g, "night_shot_target", None)
+    if t and t in g.seats and t not in (g.striked or set()):
+        if t == sh:
+            await _night_report(ctx, g, f"🏠 {_pr_who(g, t)} در پناه بود — شلیکِ مافیا بی‌اثر شد (فقط تو می‌دانی).")
+        else:
+            out = _shot_outcome(g, t)
+            if out == "kill":
+                dead.add(t)
+                reasons[t] = "شلیک مافیا"
+            elif out == "saved":
+                await _night_report(ctx, g, f"💉 سیوِ دکتر شلیک به {t} را گرفت (فقط تو می‌دانی).")
+    st = getattr(g, "night_sniper_target", None)
+    if st and st in g.seats and st not in (g.striked or set()):
+        if _seat_role_norm(g, st) == _R_PR_BOSS:
+            await _night_report(ctx, g, f"🎯 تیرِ تک‌تیرانداز به {_pr_who(g, st)} خورد — "
+                                        f"رئیس‌مافیا با تیرِ تک‌تیرانداز بیرون نمی‌رود (فقط تو می‌دانی).")
+        elif st == sh:
+            await _night_report(ctx, g, f"🏠 {_pr_who(g, st)} در پناه بود — تیرِ تک‌تیرانداز بی‌اثر شد (فقط تو می‌دانی).")
+        elif _is_saved(g, st):
+            await _night_report(ctx, g, f"💉 سیوِ دکتر تیرِ تک‌تیرانداز به {st} را گرفت (فقط تو می‌دانی).")
+        elif st not in dead:
+            dead.add(st)
+            reasons[st] = "شلیک تک‌تیرانداز"
+    # 🕵️ همراهِ نابودگر: اگر نابودگر همین سحر رفت، شهروندِ درست‌حدس‌خورده هم می‌رود
+    nab = _find_seat_by_role(g, _R_PR_NABOOD, alive_only=False)
+    b = getattr(g, "pr_bond", None)
+    if (nab is not None and nab in dead and b in g.seats and b not in dead
+            and b not in (g.striked or set())):
+        dead.add(b)
+        reasons[b] = "همراهِ نابودگر"
+        g.pr_bond = None
+        await _night_report(ctx, g, f"🕵️ نابودگر رفت → <b>{_pr_who(g, b)}</b> هم با او می‌رود.")
+    _add_night_kick(g, dead, reasons)
+    await _apply_deaths(ctx, chat_id, g, dead, reasons)
+
+
+async def _pr_bond_sweep(ctx, chat_id, g):
+    """🕵️ روز: اگر نابودگر (با رأی/کیک/خط) رفت، شهروندِ حدس‌خورده هم می‌رود — فقط تا شبِ بعد."""
+    b = getattr(g, "pr_bond", None)
+    if b is None or getattr(g, "pr_bond_night", None) != (g.night_number or 0):
+        return
+    nab = _find_seat_by_role(g, _R_PR_NABOOD, alive_only=False)
+    if nab is None or nab not in (g.striked or set()):
+        return
+    g.pr_bond = None
+    if b not in g.seats or b in (g.striked or set()):
+        store.save()
+        return
+    g.striked.add(b)
+    store.save()
+    try:
+        await ctx.bot.send_message(chat_id, f"💀 {_pr_who(g, b)} همراهِ نابودگر از بازی خارج شد.", parse_mode="HTML")
+    except Exception:
+        pass
+    await _night_report(ctx, g, f"🕵️ نابودگر رفت → <b>{_pr_who(g, b)}</b> هم با او رفت.")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+
+
+# ── روزِ ۱: شبِ موقتِ دادستان ─────────────────────────────────
+async def _pr_day_begin(ctx, chat_id, g):
+    """⚖️ دکمه‌ی دادستان زده شد: اول دادستان، بعد تردست."""
+    g.pr_button_used = True
+    g.pr_day = g.night_number or 0
+    g.pr_target = None
+    g.pr_amn = None
+    g.pr_amn_open = False
+    g.pr_day_done = False
+    store.save()
+    voice_god.say(chat_id, "temp_night")
+    await ctx.bot.send_message(
+        chat_id, "⚖️ <b>شبِ موقتِ دادستان</b> — دادستان در پیوی تصمیم می‌گیرد چه کسی به دفاع برود؛ منتظر بمانید…",
+        parse_mode="HTML")
+    await _night_report(ctx, g, "⚖️ شبِ موقتِ دادستان شروع شد.")
+    await _pr_day_open_prosecutor(ctx, chat_id, g)
+
+
+async def _pr_day_open_prosecutor(ctx, chat_id, g):
+    pros = _find_seat_by_role(g, _R_PR_DADSETAN)
+    if pros is None:
+        await _night_report(ctx, g, "⚖️ دادستانی زنده نیست — انتخابی انجام نشد.")
+        await _pr_day_open_tardast(ctx, chat_id, g)
+        return
+    targets = [s for s in _alive_seats(g) if s != pros]
+    m = await _safe_pm(ctx, g.seats[pros][0], "⚖️ چه کسی را به دفاعیه‌ی امروز می‌فرستی؟",
+                       _kb_night_seats(targets, g, "pr_dad_", confirm_cb="pr_dad_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[pros][0]] = m.message_id
+    store.save()
+
+
+async def _pr_day_open_tardast(ctx, chat_id, g):
+    tar = _find_seat_by_role(g, _R_PR_TARDAST)
+    if tar is None:
+        await _pr_day_finish(ctx, chat_id, g)
+        return
+    g.pr_amn_open = True                      # 🎩 از این لحظه جوابِ تردست پذیرفته می‌شود
+    targets = [s for s in _alive_seats(g) if s != tar]
+    m = await _safe_pm(ctx, g.seats[tar][0],
+                       "🎩 امان‌نامه به چه کسی می‌دهی؟ (به‌نظرت دادستان چه کسی را به دفاع می‌فرستد؟)",
+                       _kb_night_seats(targets, g, "pr_amn_", confirm_cb="pr_amn_ok"))
+    if m:
+        g.night_pm_msgs[g.seats[tar][0]] = m.message_id
+    store.save()
+
+
+async def _pr_day_finish(ctx, chat_id, g):
+    g.pr_day_done = True
+    store.save()
+    voice_god.say(chat_id, "temp_night_end")
+    pt, am = getattr(g, "pr_target", None), getattr(g, "pr_amn", None)
+    await _night_report(
+        ctx, g, "⚖️ شبِ موقت تمام شد — انتخابِ دادستان: " + (_pr_who(g, pt) if pt else "—")
+        + " | امان‌نامه‌ی تردست: " + (_pr_who(g, am) if am else "—")
+        + (" → یکی‌اند؛ انتخابِ دادستان به دفاع نمی‌آید." if pt and pt == am else ""))
+    await ctx.bot.send_message(chat_id, "✅ الان می‌توانی رأی‌گیری را شروع کنی.")
+    try:
+        await publish_seating(ctx, chat_id, g, mode=CTRL)
+    except Exception:
+        pass
+
+
+async def _pr_day_callback(ctx, chat_id, g, uid, data, mid, q):
+    if (getattr(g, "night_active", False) or getattr(g, "pr_day", None) != (g.night_number or 0)
+            or getattr(g, "pr_day_done", False)):
+        await _close_pm(ctx, uid, mid, "⏰ فرصتِ این اکت گذشت.")
+        return
+    me = _seat_of_uid(g, uid)
+    rn = _seat_role_norm(g, me) if me is not None else ""
+    s_sel = g.night_sel.get(uid)
+    ok_sel = s_sel if (s_sel and s_sel in g.seats and s_sel not in (g.striked or set())) else None
+    if data == "pr_dad_ok":
+        if rn != _R_PR_DADSETAN or getattr(g, "pr_target", None) is not None:
+            return
+        if ok_sel is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.pr_target = ok_sel
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"⚖️ {ok_sel}. {g.seats[ok_sel][1]} به دفاعیه‌ی امروز فرستاده شد.")
+        await _night_report(ctx, g, f"⚖️ دادستان → <b>{_pr_who(g, ok_sel)}</b> به دفاع می‌رود.")
+        await _pr_day_open_tardast(ctx, chat_id, g)
+        return
+    if data.startswith("pr_dad_"):
+        if rn != _R_PR_DADSETAN:
+            return
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "⚖️ چه کسی را به دفاعیه‌ی امروز می‌فرستی؟",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_dad_",
+                                       selected=s, confirm_cb="pr_dad_ok"))
+        return
+    if data == "pr_amn_ok":
+        if (rn != _R_PR_TARDAST or getattr(g, "pr_amn", None) is not None
+                or not getattr(g, "pr_amn_open", False)):
+            return
+        if ok_sel is None:
+            await safe_q_answer(q, "اول یک نفر را انتخاب کن.", show_alert=True)
+            return
+        g.pr_amn = ok_sel
+        g.night_sel.pop(uid, None)
+        store.save()
+        await _close_pm(ctx, uid, mid, f"🎩 امان‌نامه به {ok_sel}. {g.seats[ok_sel][1]} داده شد.")
+        await _night_report(ctx, g, f"🎩 تردست → امان‌نامه به <b>{_pr_who(g, ok_sel)}</b>"
+                                    + (" — با انتخابِ دادستان یکی است ✅" if ok_sel == getattr(g, "pr_target", None) else ""))
+        await _pr_day_finish(ctx, chat_id, g)
+        return
+    if data.startswith("pr_amn_"):
+        if rn != _R_PR_TARDAST or not getattr(g, "pr_amn_open", False):
+            return
+        s = int(data.rsplit("_", 1)[1])
+        g.night_sel[uid] = s
+        store.save()
+        await _edit_pm(ctx, uid, mid, "🎩 امان‌نامه به چه کسی می‌دهی؟ (به‌نظرت دادستان چه کسی را به دفاع می‌فرستد؟)",
+                       _kb_night_seats([x for x in _alive_seats(g) if x != me], g, "pr_amn_",
+                                       selected=s, confirm_cb="pr_amn_ok"))
+        return
+
+
 def _is_classic_scenario(g) -> bool:
     return bool(getattr(g, "scenario", None)) and (_nz(CLASSIC_KEY) in _nz(g.scenario.name))
 
@@ -12606,7 +13467,7 @@ async def _burn_advance(ctx, chat_id, g):
         if shooter in burned:
             g.night_done.add("mafia")
         for _dk in ("night_decider_seat", "bzp_decider_seat", "nem_decider_seat",
-                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat"):
+                    "tk_decider_seat", "kp_decider_seat", "sh_decider_seat", "pr_decider_seat"):
             if getattr(g, _dk, None) in burned:
                 g.night_done.add("mafia")
         # 🤝 اکتِ مافیا که به یارِ تیم واگذار شده (ناتویی/مذاکره/جلادی) و همان یار سوخت:
@@ -12677,6 +13538,9 @@ async def _burn_advance(ctx, chat_id, g):
                 await _hb_open_mafia(ctx, chat_id, g)
             await _hb_check_open_citizens(ctx, chat_id, g)
             await _hb_check_open_avenger(ctx, chat_id, g)
+        elif _is_prosecutor_scenario(g):
+            # ⚖️ دادستان: پناه‌بان → مافیا → شهروندان (بازکننده‌ها idempotent‌اند)
+            await _pr_after_burn(ctx, chat_id, g, burned)
         elif _is_classic_scenario(g):
             # 🎩 کلاسیک: هر سه اکت از اولِ شب باز است — سوخته فقط «انجام‌شده» می‌شود
             #    (پزشک/کاراگاهِ سوخته را نگاشتِ سراسریِ role_keys بالا پوشش داده)
@@ -22561,6 +23425,8 @@ async def _run_night_act(update, ctx):
     try:
         if _dt.startswith("cl_"):
             await handle_classic_callback(update, ctx)
+        elif _dt.startswith("pr_"):
+            await handle_prosecutor_callback(update, ctx)
         elif _dt.startswith("my_"):
             await handle_mythic_callback(update, ctx)
         elif _dt.startswith("night_"):
@@ -22819,7 +23685,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🌙 اکت‌های شبِ خودکار (در پیوی بازیکنان) — قبل از گارد پی‌وی
     if _q and _q.data and _q.data.startswith(("night_", "bzp_", "cvb_", "hb_", "nem_", "tk_", "kp_",
-                                              "gm_", "sh_", "my_", "cl_", "dn_")):
+                                              "gm_", "sh_", "my_", "cl_", "dn_", "pr_")):
         # ⏪ چون هر اکت یک مهلتِ ۷ ثانیه‌ایِ «اکت مجدد» دارد، پردازش در پس‌زمینه
         #    می‌رود تا وب‌هوکِ تلگرام منتظر نماند (وگرنه هر اکت ۷ ثانیه لفت می‌داد)
         asyncio.create_task(_run_night_act(update, ctx))
@@ -23308,7 +24174,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # مجوز: فقط و فقط گادِ فعلی (با تعویض گاد، خودکار گادِ جدید)
     if data in ("ctl_maarefe", "ctl_night", "ctl_day", "ctl_roomlock", "ctl_kick",
                 "ctl_bazparsi", "ctl_bazask", "ctl_nemayande", "ctl_kapu", "ctl_shahname",
-                "ctl_terror", "ctl_yaghi", "ctl_memar", "ctl_eliot"):
+                "ctl_terror", "ctl_yaghi", "ctl_memar", "ctl_eliot", "ctl_dadsetan"):
         if uid != g.god_id:
             await safe_q_answer(q, "⛔ فقط گادِ بازی.", show_alert=True)
             return
@@ -23434,6 +24300,20 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await publish_seating(ctx, chat, g, mode=CTRL)
             except Exception:
                 pass
+            return
+        if data == "ctl_dadsetan":
+            if getattr(g, "pr_button_used", False):
+                await safe_q_answer(q, "قبلاً استفاده شده.", show_alert=True)
+                return
+            if not (_is_prosecutor_scenario(g) and getattr(g, "maarefe_done", False)
+                    and getattr(g, "night_number", 0) == 0):
+                await safe_q_answer(q, "فقط روزِ ۱ سناریوی دادستان.", show_alert=True)
+                return
+            if getattr(g, "night_active", False) or getattr(g, "maarefe_active", False):
+                await safe_q_answer(q, "فقط در روز.", show_alert=True)
+                return
+            await safe_q_answer(q)
+            await _pr_day_begin(ctx, chat, g)
             return
         if data == "ctl_kapu":
             if getattr(g, "kp_trust_button_used", False):
@@ -24953,7 +25833,7 @@ async def shuffle_and_assign(
     g.seat_sides = {}
     for _seat, (_uid, _name) in g.seats.items():
         _role = _nz(g.assigned_roles.get(_seat, "—"))
-        if _role in _mr:
+        if _role in _mr or _role in _mafia_role_set(g):
             g.seat_sides[_seat] = "مافیا"
         elif _role in _indep:
             g.seat_sides[_seat] = "مستقل"
@@ -25055,6 +25935,21 @@ async def shuffle_and_assign(
     g.cl_runoff_need = 0
     g.cl_defense = []
     g.cl_terror_wait = None
+    # ⚖️ دادستان — همه‌چیزِ کلِ بازی با نقش‌های تازه از نو
+    g.pr_button_used = False
+    g.pr_day = None
+    g.pr_target = None
+    g.pr_amn = None
+    g.pr_amn_open = False
+    g.pr_day_done = False
+    g.pr_pan_used = False
+    g.pr_snp_used = False
+    g.pr_doc_self = 0
+    g.pr_nab_wrong_seat = None
+    g.pr_nab_wrong_night = None
+    g.pr_bond = None
+    g.pr_bond_night = None
+    g.pr_decider_seat = None
     # 🕵️ کاوربازپرس — با نقش‌های تازه، دعوت‌نامه از نو گرفته می‌شود
     g.cvb_asking = False
     g.cvb_invite_seat = None
