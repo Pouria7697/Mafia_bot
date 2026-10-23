@@ -7530,7 +7530,7 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
 
     # ⚖️ قانونِ اختلاف آرا — ساده: هرکس ۳ رأی یا بیشتر از نفرِ اول عقب باشد،
     #    اصلاً واردِ دفاعیه نمی‌شود. (۴ و ۵ و ۷ → فقط ۵ و ۷)
-    gap_note = None
+    gap_note, dropped, top = None, [], 0
     if qualified:
         top = counts.get(qualified[0], 0)
         dropped = [t for t in qualified if (top - counts.get(t, 0)) >= 3]
@@ -7569,6 +7569,12 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
             qualified.append(pt)
             pr_pick = pt
             pr_note = f"⚖️ به دستورِ دادستان: {_pr_who(g, pt)} واردِ دفاعیه می‌شود."
+            if pt in dropped:
+                # با اختلافِ رأی کنار رفته بود، ولی به دستورِ دادستان می‌آید → از خطِ «اختلافِ رأی» حذف
+                _rest = [t for t in dropped if t != pt]
+                gap_note = ((f"⚖️ اختلافِ ۳ رأی یا بیشتر با نفرِ اول ({top} رأی) → "
+                             + "، ".join(f"{t}. {escape(g.seats[t][1], quote=False)}" for t in sorted(_rest))
+                             + " واردِ دفاعیه نمی‌شود.") if _rest else None)
             await _night_report(ctx, g, f"⚖️ انتخابِ دادستان ({_pr_who(g, pt)}) به دفاعیه اضافه شد.")
 
     if not qualified and lawyer_seat is None and pr_note is None:
@@ -9607,6 +9613,7 @@ _ACT_BACK_SKIP: tuple = (
     "hb_mms_", "hb_mmd_",   # کارتِ معمار: به گاد گزارش شده
     "kp_anti_", "kp_ag_", "gm_gift_", "gm_sm_",      # تک‌فشار / زنجیرهٔ چندنفره
     "kpc_", "kpg_", "kpd_", "kpf_", "kpv_",          # پنل‌های گاد / گروه
+    "pr_dad_", "pr_amn_",                            # ⚖️ روزِ ۱ دادستان: تک‌مرحله‌ای، «اکت مجدد» دارد
 )
 
 
@@ -10684,6 +10691,15 @@ def _burn_seat_acts(g, seat, force=False):
                "sh_sim_holders": []}
 
     fields = list(per_role.get(rn, ()))
+    # ⚖️ دادستان: سوزاندنِ دستیِ نابودگر → همراهی/حدسِ غلطِ «همین امشب» هم انگار نبوده
+    if force and rn == _R_PR_NABOOD:
+        if getattr(g, "pr_bond_night", None) == getattr(g, "night_number", None):
+            fields += ["pr_bond", "pr_bond_night"]
+        if getattr(g, "pr_nab_wrong_night", None) == getattr(g, "night_number", None):
+            fields += ["pr_nab_wrong_seat", "pr_nab_wrong_night"]
+    # 🏠 پناهی که هدف قبولش کرده (و اکتش را از دست داده) با سوزاندنِ پناه‌بان پس گرفته نمی‌شود
+    if rn == _R_PR_PANAH and getattr(g, "night_pr_shelter_ok", None) is True:
+        fields = [f for f in fields if not f.startswith("night_pr_shelter")]
 
     # 🏹 شاهنامه — نام نقش‌ها ممکن است دوکلمه‌ای باشد («کاوه آهنگر»)، پس تطبیقِ جزئی
     if _is_shahname_scenario(g):
@@ -12172,7 +12188,14 @@ async def _pr_ask_shelter(ctx, chat_id, g, s):
     m = await _safe_pm(ctx, uid, txt, kb)
     if m:
         g.night_pm_msgs[uid] = m.message_id
+        store.save()
+        return
+    # 🔒 پیوی بسته یا اکتِ سوخته → جوابی نمی‌آید؛ مثلِ «نپذیرفت»، وگرنه مافیا هرگز باز نمی‌شد
+    g.night_pr_shelter_ok = False
     store.save()
+    await _night_report(ctx, g, f"🏠 پیشنهادِ پناه به {_pr_who(g, s)} نرسید (پیوی بسته یا اکتِ سوخته) "
+                                f"→ مثلِ «نپذیرفت».")
+    await _pr_shelter_resolved(ctx, chat_id, g)
 
 
 async def _pr_shelter_resolved(ctx, chat_id, g):
@@ -12753,8 +12776,11 @@ async def _pr_day_open_prosecutor(ctx, chat_id, g):
     targets = [s for s in _alive_seats(g) if s != pros]
     m = await _safe_pm(ctx, g.seats[pros][0], "⚖️ چه کسی را به دفاعیه‌ی امروز می‌فرستی؟",
                        _kb_night_seats(targets, g, "pr_dad_", confirm_cb="pr_dad_ok"))
-    if m:
-        g.night_pm_msgs[g.seats[pros][0]] = m.message_id
+    if not m:
+        await _night_report(ctx, g, "⚠️ پیویِ دادستان بسته است — انتخابی ثبت نشد.")
+        await _pr_day_open_tardast(ctx, chat_id, g)
+        return
+    g.night_pm_msgs[g.seats[pros][0]] = m.message_id
     store.save()
 
 
@@ -12768,8 +12794,11 @@ async def _pr_day_open_tardast(ctx, chat_id, g):
     m = await _safe_pm(ctx, g.seats[tar][0],
                        "🎩 امان‌نامه به چه کسی می‌دهی؟ (به‌نظرت دادستان چه کسی را به دفاع می‌فرستد؟)",
                        _kb_night_seats(targets, g, "pr_amn_", confirm_cb="pr_amn_ok"))
-    if m:
-        g.night_pm_msgs[g.seats[tar][0]] = m.message_id
+    if not m:
+        await _night_report(ctx, g, "⚠️ پیویِ تردست بسته است — امان‌نامه‌ای ثبت نشد.")
+        await _pr_day_finish(ctx, chat_id, g)
+        return
+    g.night_pm_msgs[g.seats[tar][0]] = m.message_id
     store.save()
 
 
@@ -12793,7 +12822,12 @@ async def _pr_day_finish(ctx, chat_id, g):
 async def _pr_day_callback(ctx, chat_id, g, uid, data, mid, q):
     if (getattr(g, "night_active", False) or getattr(g, "pr_day", None) != (g.night_number or 0)
             or getattr(g, "pr_day_done", False) or not getattr(g, "pr_day_active", False)):
-        await _close_pm(ctx, uid, mid, "⏰ فرصتِ این اکت گذشت.")
+        _ACT_UID.set(None)
+        try:
+            await ctx.bot.edit_message_text(chat_id=_pm_target(uid), message_id=mid,
+                                            text="⏰ فرصتِ این اکت گذشت.", reply_markup=None)
+        except Exception:
+            pass
         return
     me = _seat_of_uid(g, uid)
     rn = _seat_role_norm(g, me) if me is not None else ""
