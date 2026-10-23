@@ -9250,7 +9250,8 @@ def _pm_game(uid):
                 continue
             if (getattr(_g, "night_active", False)
                     or getattr(_g, "night_awaiting_sacrifice", False)
-                    or getattr(_g, "maarefe_active", False)):
+                    or getattr(_g, "maarefe_active", False)
+                    or getattr(_g, "pr_day_active", False)):
                 return _g
             if fb is None:
                 fb = _g
@@ -9738,7 +9739,8 @@ async def handle_redo_callback(update, ctx):
             # ⏰ روز شده → اکت دیگر برنمی‌گردد (وگرنه مثلاً تیرِ تک‌تیر به او برمی‌گشت)
             _gx = _pm_game(_u)
             if _gx is not None and not (getattr(_gx, "night_active", False)
-                                        or getattr(_gx, "maarefe_active", False)):
+                                        or getattr(_gx, "maarefe_active", False)
+                                        or getattr(_gx, "pr_day_active", False)):
                 await safe_q_answer(q, "⏰ شب تمام شده — دیگر نمی‌شود اکت را عوض کرد.",
                                     show_alert=True)
                 return
@@ -9767,7 +9769,8 @@ async def _close_pm(ctx, uid, msg_id, text):
             _gr = None
         if (_gr is not None and _prompt and _kb_load(_prompt[1]) is not None
                 and (getattr(_gr, "night_active", False)
-                     or getattr(_gr, "maarefe_active", False))):
+                     or getattr(_gr, "maarefe_active", False)
+                     or getattr(_gr, "pr_day_active", False))):
             _redone = await _redo_window(ctx, _gr, uid, msg_id, _prompt)
             _ACT_UID.set(None)      # مهلت تمام شد → از این به بعد همه‌چیز فوری
             if _redone:
@@ -10239,6 +10242,7 @@ async def start_night(ctx, chat_id, g):
     g.night_pr_nab_correct = False
     g.pr_decider_seat = None
     g.pr_bond = None              # 🕵️ همراهیِ نابودگر فقط تا شبِ بعد اعتبار داشت
+    g.pr_day_active = False       # ⚖️ شبِ موقتِ نیمه‌کاره‌ی دادستان با شبِ واقعی بسته می‌شود
     g.poison_phase = False
     g.antidote_votes = {}
     g.antidote_expected = []
@@ -12092,12 +12096,10 @@ def _pr_find_game(uid, q=None):
 
 
 def _pr_shooter(g):
-    """🔫 شلیک‌کننده‌ی مافیا: رئیس → نابودگر → تردست (اولین زنده‌ای که در پناه نیست)."""
-    for rn in (_R_PR_BOSS, _R_PR_NABOOD, _R_PR_TARDAST):
-        s = _find_seat_by_role(g, rn)
-        if s is not None and not _pr_sheltered(g, s):
-            return s
-    return None
+    """🔫 شلیک‌کننده‌ی مافیا: رئیس → نابودگر → تردست (اولین زنده).
+    اگر خودش پناه را قبول کرده باشد، آن شب مافیا شات ندارد — به نفرِ بعد نمی‌رسد."""
+    return (_find_seat_by_role(g, _R_PR_BOSS) or _find_seat_by_role(g, _R_PR_NABOOD)
+            or _find_seat_by_role(g, _R_PR_TARDAST))
 
 
 def _pr_shelter(g):
@@ -12186,18 +12188,24 @@ async def _pr_open_mafia(ctx, chat_id, g):
     g.night_done.add("pr_mafia_opened")
     store.save()
     shooter = _pr_shooter(g)
-    g.pr_decider_seat = shooter
     _sh = _pr_shelter(g)
     if _sh is not None and _sh in _mafia_seats(g):
         await _night_report(ctx, g, f"🏠 {_pr_who(g, _sh)} (مافیا) در پناه است → امشب اکت ندارد"
-                                    + (f"؛ شلیک با {_pr_who(g, shooter)}." if shooter is not None else "."))
+                                    + ("؛ مافیا امشب شات ندارد." if _sh == shooter else "."))
     if shooter is None:
+        g.pr_decider_seat = None
         g.night_done.update({"mafia", "flip", "nab"})
         store.save()
-        await _night_report(ctx, g, "🔫 مافیایی برای اکت نیست (زنده‌ای نمانده یا در پناه است).")
+        await _night_report(ctx, g, "🔫 مافیایی زنده نیست.")
         await _pr_check_open_citizens(ctx, chat_id, g)
         return
-    await _pr_prompt_shot(ctx, g, shooter)
+    if _pr_sheltered(g, shooter):
+        # 🏠 شلیک‌کننده در پناه → شاتِ امشب سوخت (به یارِ دیگر نمی‌رسد)
+        g.pr_decider_seat = None
+        g.night_done.add("mafia")
+    else:
+        g.pr_decider_seat = shooter
+        await _pr_prompt_shot(ctx, g, shooter)
     # 🎩 تردست و 🕵️ نابودگر — اگر خودِ شلیک‌کننده‌اند، اکتِ دومشان بعد از شلیک باز می‌شود
     #    (هر نفر یک پرامپتِ باز دارد). در پناه → امشب اکت ندارد.
     tar = _find_seat_by_role(g, _R_PR_TARDAST)
@@ -12562,11 +12570,13 @@ async def handle_prosecutor_callback(update, ctx):
                 await safe_q_answer(q, "سهمِ سیوِ خودت (۲ بار) تمام شده.", show_alert=True)
                 return
             g.pr_doc_self = int(getattr(g, "pr_doc_self", 0) or 0) + 1
-        g.night_doc_saved = [s]
         g.night_sel.pop(uid, None)
         g.night_done.add("doctor")
         store.save()
         await _close_pm(ctx, uid, mid, f"💉 سیوِ {s}. {g.seats[s][1]} ثبت شد.")
+        # ⏪ بعد از مهلتِ «اکت مجدد» — فهرست با برگشتِ اکت برنمی‌گشت و سیوِ پس‌گرفته می‌ماند
+        g.night_doc_saved = [s]
+        store.save()
         _self_note = f" (سیوِ خود: {g.pr_doc_self}/۲)" if s == me else ""
         await _night_report(ctx, g, f"💉 دکتر → سیوِ <b>{_pr_who(g, s)}</b>{_self_note}")
         await _maybe_notify_god_done(ctx, g)
@@ -12724,6 +12734,7 @@ async def _pr_day_begin(ctx, chat_id, g):
     g.pr_amn = None
     g.pr_amn_open = False
     g.pr_day_done = False
+    g.pr_day_active = True                    # ⏪ اکت‌های دادستان/تردست هم مهلتِ «اکت مجدد» دارند
     store.save()
     voice_god.say(chat_id, "temp_night")
     await ctx.bot.send_message(
@@ -12764,6 +12775,7 @@ async def _pr_day_open_tardast(ctx, chat_id, g):
 
 async def _pr_day_finish(ctx, chat_id, g):
     g.pr_day_done = True
+    g.pr_day_active = False
     store.save()
     voice_god.say(chat_id, "temp_night_end")
     pt, am = getattr(g, "pr_target", None), getattr(g, "pr_amn", None)
@@ -12780,7 +12792,7 @@ async def _pr_day_finish(ctx, chat_id, g):
 
 async def _pr_day_callback(ctx, chat_id, g, uid, data, mid, q):
     if (getattr(g, "night_active", False) or getattr(g, "pr_day", None) != (g.night_number or 0)
-            or getattr(g, "pr_day_done", False)):
+            or getattr(g, "pr_day_done", False) or not getattr(g, "pr_day_active", False)):
         await _close_pm(ctx, uid, mid, "⏰ فرصتِ این اکت گذشت.")
         return
     me = _seat_of_uid(g, uid)
@@ -15877,7 +15889,8 @@ def _find_active_night_game(uid, q):
     for cid, game in store.games.items():
         if not (getattr(game, "night_active", False)
                 or getattr(game, "night_awaiting_sacrifice", False)
-                or getattr(game, "maarefe_active", False)):
+                or getattr(game, "maarefe_active", False)
+                or getattr(game, "pr_day_active", False)):
             continue
         if _seat_of_uid(game, uid) is not None:
             candidates.append((cid, game))
@@ -25948,6 +25961,7 @@ async def shuffle_and_assign(
     g.pr_amn = None
     g.pr_amn_open = False
     g.pr_day_done = False
+    g.pr_day_active = False
     g.pr_pan_used = False
     g.pr_snp_used = False
     g.pr_doc_self = 0
