@@ -4527,7 +4527,7 @@ async def _tourn_on_newgame(ctx, chat_id, g, seats):
         if str(god) in (t.get("roster") or {}):
             lines.append(f"🎩 راوی: {_tourn_name(t, god)} (این بازی بازیکن نیست)")
         lines += ["", "🎮 <b>این بازی بازی دارند:</b>"]
-        lines += [f"• {_tourn_name(t, u)}" for u in lineup]
+        lines += [f"• {_tourn_mention(t, u)}" for u in lineup]      # 🔔 تگ — تا خبردار شوند
         if rest:
             lines += ["", "😴 <b>استراحت:</b>"] + [f"• {_tourn_name(t, u)}" for u in rest]
         if len(lineup) < seats:
@@ -5487,11 +5487,24 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
         print("⚠️ tourn public card:", e)
     await _tourn_channel_post(ctx, chat_id, game, _ft)
     if close_now:
-        await _tourn_close_season(ctx, chat_id, t)
+        await _tourn_close_season(ctx, chat_id, t)     # 🏆 جدولِ نهاییِ فصل (با تگ) همان‌جا می‌آید
+    else:
+        # 📊 جدولِ کلِ فصل تا این بازی — همه‌ی شرکت‌کننده‌ها تگ می‌شوند
+        try:
+            await ctx.bot.send_message(chat_id, _tourn_table(t, mention=True), parse_mode="HTML")
+        except Exception as e:
+            print("⚠️ tourn table:", e)
     return True
 
 
-def _tourn_table(t, final=False) -> str:
+def _tourn_mention(t, uid) -> str:
+    """🔔 اسمِ شرکت‌کننده با تگ — تا اعلان بگیرد و لازم نباشد کسی دستی تگش کند."""
+    u = str(uid)
+    nm = _tourn_name(t, u)
+    return f"<a href='tg://user?id={u}'>{nm}</a>" if u.isdigit() else nm
+
+
+def _tourn_table(t, final=False, mention=False) -> str:
     rows = sorted(((u, float(p or 0)) for u, p in (t.get("totals") or {}).items()
                    if u in (t.get("roster") or {})),
                   key=lambda x: (-x[1], _tourn_raw_name(t, x[0])))
@@ -5501,7 +5514,8 @@ def _tourn_table(t, final=False) -> str:
     out = [title, ""]
     for i, (u, p) in enumerate(rows, 1):
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-        out.append(f"{medal} {_tourn_name(t, u)} — <b>{_sc_fmt(p)}</b> ({int(played.get(u, 0) or 0)} بازی)")
+        _nm = _tourn_mention(t, u) if mention else _tourn_name(t, u)
+        out.append(f"{medal} {_nm} — <b>{_sc_fmt(p)}</b> ({int(played.get(u, 0) or 0)} بازی)")
     if not rows:
         out.append("—")
     return "\n".join(out)
@@ -5509,6 +5523,7 @@ def _tourn_table(t, final=False) -> str:
 
 async def _tourn_close_season(ctx, chat_id, t):
     table = _tourn_table(t, final=True)
+    gtable = _tourn_table(t, final=True, mention=True)   # 🔔 در گروه با تگ؛ پیویِ داور/مدیر بی‌تگ
     old_season, old_size = int(t.get("season", 1)), t.get("size")
     # 🔒 اول وضعیت عوض و ذخیره می‌شود، بعد پیام‌ها — تا وسطِ ارسال‌ها کسی فصلِ قدیمی را نبیند
     t.setdefault("history", []).append({"season": old_season, "totals": dict(t.get("totals") or {}),
@@ -5523,7 +5538,7 @@ async def _tourn_close_season(ctx, chat_id, t):
     _tourn_save(chat_id, t)
     try:
         await ctx.bot.send_message(
-            chat_id, table + "\n\n🎉 فصل بسته شد.\n\n"
+            chat_id, gtable + "\n\n🎉 فصل بسته شد.\n\n"
             f"🔢 <b>فصلِ {old_season + 1}</b>: قبل از بازیِ اول، مدیر یا داور تعدادِ نفراتِ "
             f"هر لیست را همین‌جا بنویسد — فقط عدد، مثلاً ۱۰ یا ۱۲ "
             f"(فصلِ قبل {old_size or '—'} نفره بود).", parse_mode="HTML")
