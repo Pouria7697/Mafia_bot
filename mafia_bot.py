@@ -4745,6 +4745,9 @@ async def _tourn_void_event(ctx, chat_id, event_num) -> str:
         if gm.get("season") != t.get("season"):
             return chr(10) + "🏆 فصلِ این بازیِ تورنومنت بسته شده — جدولِ آن عوض نشد."
         _tourn_apply_delta(t, gm.get("scores") or {}, {})
+    elif gm.get("reopen") is not None:
+        # ✏️ بازیِ تأییدشده‌ای که برای اصلاح دوباره باز شده — امتیازِ قبلی‌اش هنوز در جدولِ فصل است
+        _tourn_apply_delta(t, (gm.pop("reopen") or {}).get("scores") or {}, {})
     if gm.get("counted") or gm.get("status") == "confirmed":
         for u in (gm.get("scores") or {}):
             t["plays"][u] = max(0, int(t["plays"].get(u, 0) or 0) - 1)
@@ -5385,10 +5388,10 @@ async def _tourn_refresh_cards(ctx, chat_id, t, idx, kb=True):
 
 async def _tourn_channel_post(ctx, chat_id, game, text):
     """📢 امتیازِ داوری در چنلِ آرشیو هم — زیرِ همان لیستِ بازی اگر نشانی‌اش در سندِ رویداد هست.
-    هیچ خطایی از اینجا به تأیید نمی‌رسد."""
+    هیچ خطایی از اینجا به تأیید نمی‌رسد. خروجی: (چنل، آیدیِ پیام) یا None."""
     ch = get_archive_channel()
     if not ch:
-        return
+        return None
     reply_to = None
     try:
         led = await asyncio.to_thread(load_game_ledger)
@@ -5398,10 +5401,12 @@ async def _tourn_channel_post(ctx, chat_id, game, text):
     except Exception:
         reply_to = None
     try:
-        await ctx.bot.send_message(ch, text, parse_mode="HTML", reply_to_message_id=reply_to,
-                                   allow_sending_without_reply=True)
+        m = await ctx.bot.send_message(ch, text, parse_mode="HTML", reply_to_message_id=reply_to,
+                                       allow_sending_without_reply=True)
+        return ch, int(m.message_id)
     except Exception as e:
         print("⚠️ tourn channel post:", e)
+    return None
 
 
 async def _tourn_ref_confirm(ctx, chat_id, t, idx, ref_uid) -> bool:
@@ -5419,6 +5424,8 @@ async def _tourn_ref_confirm(ctx, chat_id, t, idx, ref_uid) -> bool:
     refs = [str(x) for x in (game.get("refs") or [])]
     if len(refs) > 1:
         _rt = _tourn_card_text(t, game, public=True, ref=r)
+        if r in [str(x) for x in (game.get("re_by") or [])]:
+            _rt = "✏️ <b>اصلاح‌شده</b>" + chr(10) + _rt
         try:
             await ctx.bot.send_message(chat_id, _rt, parse_mode="HTML")
         except Exception as e:
@@ -5453,11 +5460,18 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
                     pass
                 await _tourn_channel_post(ctx, chat_id, game, _jt)
     _tourn_recalc(t, game)
-    for u, pts in (game.get("scores") or {}).items():
-        t["totals"][u] = round(float(t["totals"].get(u, 0) or 0) + float(pts or 0), 1)
-        if not game.get("counted"):          # بازیِ برگه‌ای: نوبت همان پایانِ بازی شمرده شده
-            t["plays"][u] = int(t["plays"].get(u, 0) or 0) + 1
-            t.setdefault("played", {})[u] = int(t["played"].get(u, 0) or 0) + 1
+    _reo = game.pop("reopen", None)
+    game.pop("re_by", None)
+    if _reo is not None:
+        # ✏️ «ادیت بازی N»: امتیازِ قبلیِ این بازی در جدول بود — فقط تفاوتش اضافه/کم می‌شود
+        if game.get("season", t.get("season", 1)) == t.get("season", 1):
+            _tourn_apply_delta(t, _reo.get("scores") or {}, game.get("scores") or {})
+    else:
+        for u, pts in (game.get("scores") or {}).items():
+            t["totals"][u] = round(float(t["totals"].get(u, 0) or 0) + float(pts or 0), 1)
+            if not game.get("counted"):          # بازیِ برگه‌ای: نوبت همان پایانِ بازی شمرده شده
+                t["plays"][u] = int(t["plays"].get(u, 0) or 0) + 1
+                t.setdefault("played", {})[u] = int(t["played"].get(u, 0) or 0) + 1
     game["counted"] = True
     game["status"] = "confirmed"
     # 🔒 بستنِ فصل همین‌جا، بی‌فاصله از تأیید، تصمیم گرفته می‌شود (قبل از هر await) — وگرنه دو تأییدِ
@@ -5481,11 +5495,23 @@ async def _tourn_confirm(ctx, chat_id, t, idx, by_uid=None) -> bool:
     await _tourn_refresh_cards(ctx, chat_id, t, idx, kb=False)
     # 📣 لیستِ نهاییِ همین بازی به گروهِ تورنومنت می‌رود — و چنلِ آرشیو
     _ft = _tourn_card_text(t, game, public=True)
+    if _reo is not None:
+        _ft = "✏️ <b>اصلاحِ امتیاز</b> — امتیازِ این بازی و جدولِ فصل اصلاح شد:" + chr(10) + chr(10) + _ft
     try:
         await ctx.bot.send_message(chat_id, _ft, parse_mode="HTML")
     except Exception as e:
         print("⚠️ tourn public card:", e)
-    await _tourn_channel_post(ctx, chat_id, game, _ft)
+    _old_cm = game.get("ch_final")
+    _cm = await _tourn_channel_post(ctx, chat_id, game, _ft)
+    if _cm:
+        game["ch_final"] = list(_cm)      # 📌 تا اگر باز اصلاح شد، همین پیام از چنل پاک شود
+    if _reo is not None and _old_cm and list(_old_cm) != list(_cm or []):
+        try:
+            await ctx.bot.delete_message(chat_id=_old_cm[0], message_id=int(_old_cm[1]))   # 🗑 میانگینِ قبلی
+        except Exception as e:
+            print("⚠️ tourn old final delete:", e)
+    if _cm and not close_now:
+        _tourn_save(chat_id, t)           # (بستنِ فصل خودش ذخیره می‌کند)
     if close_now:
         await _tourn_close_season(ctx, chat_id, t)     # 🏆 جدولِ نهاییِ فصل (با تگ) همان‌جا می‌آید
     else:
@@ -5822,6 +5848,86 @@ async def handle_tourn_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     for o in outs:
         await msg.reply_text(o, parse_mode="HTML")
+
+
+_TOURN_REEDIT_RE = re.compile(r"^\s*(?:اد[یي]ت|و[یي]را[یي]ش|اصلاح)\s*(?:باز[یي]ِ?)?\s*([0-9۰-۹٠-٩]{1,3})\s*$")
+
+
+async def handle_tourn_reedit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """✏️ «ادیت بازی ۲» در پیویِ داور: کارنامهٔ آن بازیِ فصلِ جاری — حتی تأییدشده — دوباره باز می‌شود.
+    با «✅ تأیید» امتیازِ اصلاح‌شده و جدول دوباره در گروه و چنل می‌آید و میانگینِ قبلی از چنل پاک می‌شود."""
+    msg = update.message
+    if not msg or not msg.text or not msg.from_user:
+        return
+    uid = msg.from_user.id
+    if _tourn_pm_busy(uid):
+        await handle_don_sentence_pm(update, ctx)      # 🎩 جملهٔ دن مقدم است
+        return
+    m = _TOURN_REEDIT_RE.match(msg.text)
+    no = str(int(m.group(1).translate(_FA_DIGITS))) if m else ""
+    u = str(uid)
+    hit, mine, not_judge = None, False, False
+    for cid, t in (load_tournaments() or {}).items():
+        if not (t.get("active") and (_tourn_is_ref(t, uid) or _is_full_admin(uid))):
+            continue                                   # فقط داورِ همین تورنومنت (یا مدیرِ کامل)
+        mine = True
+        games = t.get("games") or []
+        for i in range(len(games) - 1, -1, -1):
+            gm = games[i]
+            if (gm.get("season") != t.get("season", 1) or str(gm.get("no")) != no
+                    or gm.get("status") not in ("pending", "confirmed")):
+                continue
+            if _tourn_can_score(t, gm, uid):
+                hit = (int(cid), t, i)
+            else:
+                not_judge = True
+            break
+        if hit:
+            break
+    if not hit:
+        if not_judge:
+            await msg.reply_text(f"⛔ داورِ بازیِ {no} نبودی — فقط داورانِ همان بازی امتیازش را اصلاح می‌کنند.")
+        elif mine:
+            await msg.reply_text(f"ℹ️ بازیِ {no} در فصلِ جاریِ تورنومنت پیدا نشد "
+                                 "(بازی‌های فصل‌های بسته‌شده اصلاح نمی‌شوند).")
+        else:
+            await handle_don_sentence_pm(update, ctx)  # داور نیست — این متن مالِ تورنومنت نبود
+        return
+    chat_id, t, idx = hit
+    game = t["games"][idx]
+    ok = [str(r) for r in (game.get("ok_by") or [])]
+    multi = len(game.get("refs") or []) > 1
+    _TOURN_EDIT.pop(uid, None)
+    _TOURN_CRIT_ST.pop(uid, None)
+    if game.get("status") == "pending" and u not in ok:
+        note = f"✏️ کارنامهٔ بازیِ {no} هنوز باز است — همین‌جا ویرایش کن و آخرش «✅ تأیید» را بزن."
+    else:
+        was_final = game.get("status") == "confirmed"
+        if was_final:
+            game["reopen"] = {"scores": dict(game.get("scores") or {})}
+            game["status"] = "pending"
+        game["ok_by"] = [r for r in ok if r != u]
+        if u not in [str(x) for x in (game.get("re_by") or [])]:
+            game.setdefault("re_by", []).append(u)
+        _tourn_save(chat_id, t)
+        if was_final:
+            note = (f"✏️ کارنامهٔ بازیِ {no} دوباره برای اصلاح باز شد. «✏️ ویرایش» را بزن و نمره‌ها را درست کن؛ "
+                    "با «✅ تأیید» امتیازِ اصلاح‌شده و جدول دوباره در گروه و چنل اعلام می‌شود و میانگینِ قبلی از چنل پاک می‌شود."
+                    + (" نمره‌های داورهای دیگر همان قبلی می‌ماند." if multi else ""))
+        else:
+            note = (f"✏️ فهرستت برای بازیِ {no} دوباره باز شد — ویرایش کن و دوباره «✅ تأیید» را بزن؛ "
+                    "امتیازِ نهایی بعد از تأییدِ بقیهٔ داورها اعلام می‌شود.")
+    await msg.reply_text(note)
+    if game.get("crit"):
+        await _tourn_crit_show(ctx, chat_id, t, game, idx, u, fresh=True)
+        return
+    try:
+        pm = await ctx.bot.send_message(uid, _tourn_card_text(t, game, ref=u), parse_mode="HTML",
+                                        reply_markup=_tourn_card_kb(chat_id, t.get("tid", 0), idx, game))
+        game.setdefault("msgs", {})[u] = pm.message_id
+        _tourn_save(chat_id, t)
+    except Exception as e:
+        print("⚠️ tourn reedit card:", e)
 
 
 def get_archive_channel():
@@ -30445,6 +30551,9 @@ async def main():
         filters.ChatType.PRIVATE & filters.TEXT
         & filters.Regex(r"^\s*(?:\S+\s+)?(جدول|جدول تورنومنت|جدول تورنمنت)\s*$"),
         handle_tourn_pm))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & filters.Regex(_TOURN_REEDIT_RE),
+        handle_tourn_reedit_pm))          # ✏️ «ادیت بازی ۲» — داور کارنامهٔ آن بازی را دوباره باز می‌کند
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
