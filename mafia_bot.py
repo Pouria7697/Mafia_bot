@@ -12700,6 +12700,12 @@ async def handle_prosecutor_callback(update, ctx):
         await _close_pm(ctx, uid, mid, f"🕵️ حدس: {s}. {g.seats[s][1]} = {role} → "
                         + ("👍 درست! اگر فردا از بازی بروی، او هم با تو می‌رود." if correct
                            else "✖️ اشتباه — فردا شب روی این نفر حدس نمی‌زنی."))
+        if correct:
+            # 👍 لایکِ جدا (با اعلان) — نتیجهٔ بالا بعد از مهلتِ ۷ ثانیه‌ای بی‌صدا جای «اکتت ثبت شد» می‌نشیند
+            try:
+                await ctx.bot.send_message(uid, "👍")
+            except Exception:
+                pass
         await _night_report(ctx, g, f"🕵️ نابودگر → حدسِ <b>{_pr_who(g, s)}</b> = {escape(role, quote=False)}: "
                                     + ("درست ✅ (همراه می‌شود)" if correct else "غلط ✖️"))
         await _pr_after_mafia_step(ctx, chat_id, g, uid)
