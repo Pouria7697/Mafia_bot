@@ -10441,6 +10441,7 @@ async def start_night(ctx, chat_id, g):
     g.night_baz_targets = []
     g.night_pm_msgs = {}
     g.night_pm_extra = []
+    g.night_pm_keep = {}
     g.night_alive_at_start = len(_alive_seats(g))
     store.save()
 
@@ -10689,7 +10690,10 @@ async def end_night(ctx, chat_id, g):
         g.night_god_panel_mid = None
     g.night_active = False
     g.night_stage = None
+    _keep = getattr(g, "night_pm_keep", None) or {}
     for u, mid in list((g.night_pm_msgs or {}).items()):
+        if _keep.get(u) == mid:
+            continue        # 📌 نتیجه‌ای که باید در پیوی بماند (حدسِ درستِ نابودگر)
         # ⏰ پرامپتِ جواب‌نداده: متن هم عوض شود که مثل «پرامپتِ بی‌دکمه» به نظر نرسد
         try:
             await ctx.bot.edit_message_text(chat_id=u, message_id=mid,
@@ -10707,6 +10711,7 @@ async def end_night(ctx, chat_id, g):
             pass
     g.night_pm_extra = []
     g.night_pm_msgs = {}
+    g.night_pm_keep = {}
     g.night_sel = {}
     g.night_doc_sel = {}
     store.save()
@@ -12706,6 +12711,13 @@ async def handle_prosecutor_callback(update, ctx):
                 await ctx.bot.send_message(uid, "👍")
             except Exception:
                 pass
+            # 📌 «درست» در پیوی بماند — با «روز» رویش «شب تمام شد» نوشته نشود، تا شبِ بعد یادش باشد
+            #    (سوزاندنِ گاد همان شب هنوز رویش می‌نویسد، چون حدس را باطل می‌کند)
+            if mid:
+                if not isinstance(getattr(g, "night_pm_keep", None), dict):
+                    g.night_pm_keep = {}
+                g.night_pm_keep[uid] = mid
+                store.save()
         await _night_report(ctx, g, f"🕵️ نابودگر → حدسِ <b>{_pr_who(g, s)}</b> = {escape(role, quote=False)}: "
                                     + ("درست ✅ (همراه می‌شود)" if correct else "غلط ✖️"))
         await _pr_after_mafia_step(ctx, chat_id, g, uid)
