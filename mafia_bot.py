@@ -470,6 +470,8 @@ class GameState:
         self.d1_guess_picks = getattr(self, "d1_guess_picks", []) or []
         self.d1_guess_done = getattr(self, "d1_guess_done", False)
         self.d1_guess_used = getattr(self, "d1_guess_used", set()) or set()
+        self.d1_guess_pending = getattr(self, "d1_guess_pending", None)   # (صندلی، نوع) که منتظرِ نوبت است
+        self.d1_guess_token = getattr(self, "d1_guess_token", 0) or 0     # تایمر فقط حدسِ خودش را می‌بندد
         # ── محاسبهٔ خودکار مرگ ──
         self.night_doc_saved = getattr(self, "night_doc_saved", []) or []
         self.night_sniper_target = getattr(self, "night_sniper_target", None)
@@ -3842,6 +3844,34 @@ def _tourn_remove(t, u):
     t["extra"] = [x for x in (t.get("extra") or []) if x != u]
 
 
+def _tourn_transfer(t, old, new, new_name):
+    """🔁 جایگزینِ دائمی: امتیاز، تعدادِ بازی و نوبتِ این فصلِ old به new می‌رسد و old کلاً بیرون می‌رود
+    (امتیازش هم پاک می‌شود تا با برگشتنش دوباره زنده نشود). فصل‌های بسته‌شده سابقه‌اند و دست نمی‌خورند."""
+    t["roster"].pop(old, None)
+    t["roster"][new] = new_name
+    t["totals"][new] = round(float(t["totals"].get(new, 0) or 0) + float(t["totals"].pop(old, 0) or 0), 1)
+    played = t.setdefault("played", {})
+    played[new] = int(played.get(new, 0) or 0) + int(played.pop(old, 0) or 0)
+    t["plays"][new] = int(t["plays"].pop(old, 0) or 0)
+    t["lineup"] = [new if x == old else x for x in (t.get("lineup") or [])]
+    t["extra"] = [new if x == old else x for x in (t.get("extra") or [])]
+    # 🧾 کارنامه‌های این فصل هم — وگرنه تأیید یا «ادیت بازی» سهمِ old را گم می‌کرد
+    for gm in t.get("games") or []:
+        if gm.get("season") != t.get("season", 1) or gm.get("status") not in ("pending", "confirmed"):
+            continue
+        for r in gm.get("rows") or []:
+            if r.get("credit") != old:
+                continue
+            r["credit"] = new
+            if r.get("uid") == new:
+                r.pop("for_name", None)      # مهمانِ یک‌بازیِ old که حالا خودش صاحبِ امتیاز است
+            elif r.get("for_name"):
+                r["for_name"] = new_name
+        for sc in (gm.get("scores"), (gm.get("reopen") or {}).get("scores")):
+            if isinstance(sc, dict) and old in sc:
+                sc[new] = round(float(sc.get(new, 0) or 0) + float(sc.pop(old) or 0), 1)
+
+
 # ─── راه‌اندازی ───────────────────────────────────────────────
 async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """🏆 /tournament — راه‌اندازی، وضعیت، /tournament players (افزودن/حذف)، /tournament end."""
@@ -3906,6 +3936,8 @@ async def tournament_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "• یا هر خط «@یوزرنیم اسم»\n"
             "• یا هر خط «آیدیِ عددی اسم»\n"
             "➖ <b>حذف</b>: «حذف @یوزرنیم» یا «حذف آیدی»، یا ریپلای + «حذف از تورنومنت».\n"
+            "🔁 <b>جایگزینِ دائمی</b> (امتیازها به نفرِ جدید می‌رسد): ریپلای روی نفرِ جدید + "
+            "«جایگزین دائم اسمِ بازیکنِ قبلی».\n"
             "وقتی تمام شد بنویس «تمام» (بعد از ۱۰ دقیقه هم خودش بسته می‌شود).",
             parse_mode="HTML")
         return
@@ -3946,6 +3978,7 @@ def _tourn_status_text(t) -> str:
               "• «لیست تورنومنت» در گروه — داورها و شرکت‌کننده‌ها (مدیر/داور)\n"
               "• ریپلای + «شرکت‌کننده» / «حذف از تورنومنت» — همان کار برای یک نفر (مدیر/داور)\n"
               "• ریپلای + «جایگزین صندلی N» — مهمانِ یک‌بازی؛ امتیاز برای صاحبِ صندلی\n"
+              "• ریپلای روی نفرِ جدید + «جایگزین دائم اسمِ بازیکنِ قبلی» — همهٔ امتیازش به نفرِ جدید می‌رسد و قبلی حذف می‌شود (مدیر/داور)\n"
               "• «جدول» در پیویِ بات — جدولِ فعلی (داور/مدیر)\n"
               "• /tournament end — بستنِ تورنومنت")
 
@@ -4303,6 +4336,143 @@ async def _tourn_setup_text(ctx, msg, g, uid, text) -> bool:
                 + ("" if stage == "refs" else "، یا ریپلای روی پیامِ خودش + «شرکت‌کننده اسم»")
                 + " — یا خودش در لیستِ بازی «تغییر نام» بزند.")
     await msg.reply_text(rep + "\nوقتی تمام شد بنویس «تمام».")
+    return True
+
+
+_TOURN_SWAP_RE = re.compile(r"^جایگزین\s+دائمی?(?:\s+(.+))?$")
+_TOURN_SWAP_TO_RE = re.compile(r"^(.+?)\s+با\s+(\d{5,15}|@[A-Za-z][A-Za-z0-9_]{3,31})(?:\s+(.+))?$")
+_TOURN_SWAP_HELP = ("🔁 جایگزینِ دائمی — همهٔ امتیازها و بازی‌های این فصل به نفرِ جدید می‌رسد و نفرِ قبلی از "
+                    "تورنومنت حذف می‌شود:\n"
+                    "• روی یک پیامِ نفرِ جدید ریپلای کن و بنویس: جایگزین دائم اسمِ بازیکنِ قبلی\n"
+                    "• یا بدونِ ریپلای: جایگزین دائم اسمِ بازیکنِ قبلی با آیدی‌یا‌@یوزرنیمِ نفرِ جدید اسمش\n"
+                    "(به‌جای اسمِ بازیکنِ قبلی، آیدی یا @یوزرنیمش هم می‌شود.)")
+
+
+async def _tourn_swap_cmd(ctx, msg, g, uid, text) -> bool:
+    """🔁 «جایگزین دائم»: نفرِ جدید برای همیشه جای یک شرکت‌کننده را می‌گیرد (مدیر/داور)."""
+    if "جایگزین" not in text:
+        return False                     # ⚡ مسیرِ داغ: بیشترِ پیام‌های گروه همین‌جا رد می‌شوند
+    norm = " ".join(str(text or "").split()).translate(_FA_DIGITS)
+    m = _TOURN_SWAP_RE.match(norm)
+    if not m:
+        return False
+    chat_id = msg.chat.id
+    t = _tourn_rec(chat_id)
+    if not t or not t.get("active") or not _tourn_roster_admin(t, uid):
+        return False
+    if t.get("setup"):
+        await msg.reply_text("ℹ️ راه‌اندازیِ تورنومنت هنوز تمام نشده — فعلاً همان حذف و افزودنِ عادی را بزن.")
+        return True
+    rest = (m.group(1) or "").strip()
+    rt = getattr(msg, "reply_to_message", None)
+    tu = getattr(rt, "from_user", None)
+    mm = _TOURN_SWAP_TO_RE.match(rest)
+    who, key, typed = (mm.group(1), mm.group(2), mm.group(3) or "") if mm else (rest, None, "")
+    if not who or (key is None and (tu is None or getattr(tu, "is_bot", False))):
+        await msg.reply_text(_TOURN_SWAP_HELP)
+        return True
+    names = await asyncio.to_thread(load_usernames_from_gist)
+    names_ok = names is not None
+    if not names_ok:
+        names = dict(getattr(g, "user_names", None) or {})
+    # 👤 نفرِ قبلی: آیدی، @یوزرنیم، یا همان اسمی که در «لیست تورنومنت» است
+    if who.isdigit() or who.startswith("@"):
+        old, _n = await _tourn_resolve(ctx, who, "", names)
+    else:
+        hits = [u for u, n in (t.get("roster") or {}).items()
+                if _nz(str(n).translate(_FA_DIGITS)) == _nz(who)]
+        if len(hits) > 1:
+            await msg.reply_text(f"⚠️ {len(hits)} شرکت‌کننده اسمِ «{who}» را دارند — آیدیِ عددیِ همان نفر را بنویس "
+                                 f"(در /tournament players هست).")
+            return True
+        old = hits[0] if hits else None
+    if not old or old not in (t.get("roster") or {}):
+        await msg.reply_text(f"⚠️ «{who}» در شرکت‌کننده‌های تورنومنت پیدا نشد — اسمش را دقیقاً مثلِ "
+                             f"«لیست تورنومنت» بنویس، یا آیدی‌اش را.")
+        return True
+    # 👤 نفرِ جدید
+    if key:
+        new, fallback = await _tourn_resolve(ctx, key, typed, names)
+        if not new:
+            await msg.reply_text(f"⚠️ {key} پیدا نشد — روی یک پیامِ خودش ریپلای کن، یا آیدیِ عددی‌اش را بنویس.")
+            return True
+    else:
+        new, fallback = str(tu.id), (tu.full_name or "").strip() or str(tu.id)
+    nm, save = _tourn_part_name(new, typed, fallback, names)
+    old_name = _tourn_raw_name(t, old)
+    if new == old:
+        await msg.reply_text("ℹ️ نفرِ قبلی و جدید یکی‌اند.")
+        return True
+    if new in (t.get("roster") or {}):
+        await msg.reply_text(f"⚠️ «{nm}» خودش شرکت‌کنندهٔ تورنومنت است و امتیازِ خودش را دارد — "
+                             f"جایگزین باید کسی باشد که در فهرست نیست.")
+        return True
+    if blocked_info(int(new)):
+        await msg.reply_text("⛔ این شخص از بات محروم است و نمی‌تواند جایگزین شود.")
+        return True
+    tg = bool(getattr(g, "tourn_game", False))
+    phase = getattr(g, "phase", "idle")
+    seated = {str(x) for x, _n in (getattr(g, "seats", None) or {}).values()} if tg else set()
+    # ⏳ پخشِ نقش‌ها: phase هنوز idle است ولی نقشِ صندلی به دستِ صاحبش رسیده (مثلِ رندوم سیت)
+    dealing = phase == "idle" and bool(getattr(g, "assigned_roles", None)
+                                       or time.time() - float(getattr(g, "dealing_ts", None) or 0) < 180)
+    # 🧾 بازی تمام شده ولی کارنامه‌اش هنوز ساخته نشده (_tourn_game_done لیست را خالی می‌کند)
+    closing = phase == "ended" and bool(t.get("lineup"))
+    if closing and (old in seated or new in seated):
+        await msg.reply_text("⏳ بازی همین الان تمام شده و کارنامه‌اش در حالِ ثبت است — چند لحظهٔ دیگر دوباره بزن.")
+        return True
+    if _tourn_seated_running(g, old) or (dealing and old in seated):
+        await msg.reply_text(f"⚠️ «{old_name}» همین حالا وسطِ بازی است — بعد از پایانِ بازی جایگزینش کن.")
+        return True
+    seats = (getattr(g, "seats", None) or {}) if tg and phase != "ended" else {}
+    if any(str(x) == new for x, _n in seats.values()):
+        await msg.reply_text(f"⚠️ «{nm}» همین حالا در لیستِ این بازی نشسته — بعد از این بازی جایگزینش کن.")
+        return True
+    seat = next((s for s, (x, _n) in seats.items() if str(x) == old), None)
+    if (tg and phase != "ended" and int(new) == getattr(g, "god_id", None)
+            and (seat is not None or old in (t.get("lineup") or []) or old in (t.get("extra") or []))):
+        await msg.reply_text(f"⚠️ «{nm}» گادِ همین لیست است و نمی‌تواند در این بازی به‌جای بازیکن بیاید.")
+        return True
+    if seat is not None:
+        _sb = seat_ban_info(int(new))
+        if _sb:
+            await msg.reply_text(f"⛔ این شخص به‌خاطر {KICK_BAN_LIMIT} بار کیک، "
+                                 f"{seat_ban_days_left(_sb)} روز دیگر حقِ نشستن ندارد.")
+            return True
+        if await _block_if_playing(ctx, chat_id, g, int(new), nm):
+            return True
+    pts, games = t["totals"].get(old, 0), (t.get("played") or {}).get(old, 0)
+    _tourn_transfer(t, old, new, nm)
+    in_line = new in (t.get("lineup") or []) or new in (t.get("extra") or [])
+    if tg:
+        # 🔁 مهمانِ یک‌بازیِ old حالا برای new بازی می‌کند — وگرنه امتیازِ آن صندلی گم می‌شد
+        for k, v in list((getattr(g, "tourn_sub", None) or {}).items()):
+            if v == old:
+                g.tourn_sub[k] = new
+    if seat is not None:
+        g.seats[seat] = (int(new), nm)
+        _pv = getattr(g, "preview_uid_to_role", None)
+        if isinstance(_pv, dict) and int(old) in _pv:
+            _pv[int(new)] = _pv.pop(int(old))      # 🎲 نقشِ رندوم‌شده با صندلی به نفرِ جدید می‌رسد
+    store.save()
+    _tourn_save(chat_id, t)
+    if save and names_ok:
+        await _names_file_put({int(new): save})
+    if seat is not None:
+        try:
+            await publish_seating(ctx, chat_id, g, mode=_ui_mode(g))
+        except Exception as e:
+            print("⚠️ tourn swap seating:", e)
+    note = ""
+    if seat is not None:
+        note = f"\n🪑 روی صندلیِ {seat} هم به‌جای او نشست."
+    elif in_line:
+        note = "\n🎮 در لیستِ این بازی هم به‌جای او بازی دارد."
+    if not typed and not (names or {}).get(int(new)):
+        note += ("\nℹ️ در بات اسم ندارد و فعلاً اسمِ تلگرامش آمد — با ریپلای «شرکت‌کننده اسم» درستش کن، "
+                 "یا خودش در لیستِ بازی «تغییر نام» بزند.")
+    await msg.reply_text(f"🔁 «{nm}» برای همیشه جای «{old_name}» را گرفت: {_sc_fmt(pts)} امتیاز و "
+                         f"{_sc_fmt(games)} بازیِ این فصل به او رسید و «{old_name}» از تورنومنت حذف شد." + note)
     return True
 
 
@@ -8003,7 +8173,7 @@ def _score_night_acts(g, dead, reasons):
         print("⚠️ score night acts err:", e)
 
 
-# ── 🎯 حدسِ ۳ مافیا — شهروندِ خروجیِ روزِ ۱ (۲:۳۰ فرصت، هر حدسِ درست +۱۵) ──
+# ── 🎯 حدسِ ۳ مافیا — شهروندِ خروجیِ روزِ ۱ (۴ دقیقه فرصت، هر حدسِ درست +۱۵) ──
 def _d1_guess_kb(g):
     ex = getattr(g, "d1_guess_seat", None)
     picks = getattr(g, "d1_guess_picks", []) or []
@@ -8037,44 +8207,57 @@ async def _d1_guess_finish(ctx, g, timeout=False):
     pk = "، ".join(str(x) for x in picks) if picks else "—"
     ck = "، ".join(str(x) for x in correct) if correct else "—"
     await _night_report(ctx, g, f"🎯 حدسِ شهروندِ خروجی ({seat}): [{pk}] → درست: [{ck}] = +{pts}")
+    await _d1_guess_next(ctx, g)
 
 
-async def _d1_guess_start(ctx, g, seat, kind="day1"):
+async def _d1_guess_next(ctx, g):
+    """حدسی که منتظرِ تمام‌شدنِ حدسِ قبلی مانده بود حالا شروع می‌شود (با مهلتِ کاملِ خودش)."""
+    nxt = getattr(g, "d1_guess_pending", None)
+    g.d1_guess_pending = None
+    if nxt and getattr(g, "phase", "idle") not in ("idle", "ended"):
+        await _d1_guess_start(ctx, g, nxt[0], nxt[1], queued=True)
+
+
+async def _d1_guess_start(ctx, g, seat, kind="day1", queued=False):
     """🎯 حدسِ ۳ مافیا — برای شهروندِ خروجیِ روزِ ۱ و شهروندِ شات‌شدهٔ شبِ ۱ (هرکدام یک‌بار)."""
     _used = set(getattr(g, "d1_guess_used", None) or set())
     if kind in _used:
         return
-    # یکی هنوز در جریان است → مزاحمش نمی‌شویم
-    if getattr(g, "d1_guess_seat", None) is not None and not getattr(g, "d1_guess_done", False):
-        return
-    if int(getattr(g, "night_number", 0) or 0) != (0 if kind == "day1" else 1):
+    if not queued and int(getattr(g, "night_number", 0) or 0) != (0 if kind == "day1" else 1):
         return
     if seat not in g.seats or _sc_side(g, seat) != "شهر":
+        return
+    # یکی هنوز در جریان است → مزاحمش نمی‌شویم؛ تمام که شد نوبتِ این یکی است
+    if getattr(g, "d1_guess_seat", None) is not None and not getattr(g, "d1_guess_done", False):
+        g.d1_guess_pending = (seat, kind)
+        store.save()
         return
     _used.add(kind)
     g.d1_guess_used = _used
     g.d1_guess_seat = seat
     g.d1_guess_picks = []
     g.d1_guess_done = False
+    g.d1_guess_token = _tok = int(getattr(g, "d1_guess_token", 0) or 0) + 1
     store.save()
     _who = ("تو شهروندِ خروجیِ روزِ اولی!" if kind == "day1"
             else "تو شهروندی هستی که شبِ اول شات شدی!")
     m = await _safe_pm(ctx, g.seats[seat][0],
                        f"🎯 {_who}\n"
                        "۳ نفر را که فکر می‌کنی تیمِ مافیا هستند انتخاب کن.\n"
-                       "⏱ ۲ دقیقه و ۳۰ ثانیه فرصت داری — هر حدسِ درست ۱۵ امتیاز!",
+                       "⏱ ۴ دقیقه فرصت داری — هر حدسِ درست ۱۵ امتیاز!",
                        _d1_guess_kb(g))
     if not m:
         g.d1_guess_done = True
         store.save()
         await _night_report(ctx, g, f"🎯 پیویِ شهروند ({seat}) بسته بود — حدسِ مافیا انجام نشد.")
+        await _d1_guess_next(ctx, g)
         return
-    await _night_report(ctx, g, f"🎯 حدسِ ۳ مافیا برای شهروند ({seat}) فرستاده شد — ⏱ ۲:۳۰")
+    await _night_report(ctx, g, f"🎯 حدسِ ۳ مافیا برای شهروند ({seat}) فرستاده شد — ⏱ ۴ دقیقه")
 
     async def _d1_timer():
         try:
-            await asyncio.sleep(150)
-            if not getattr(g, "d1_guess_done", False):
+            await asyncio.sleep(240)
+            if getattr(g, "d1_guess_token", None) == _tok and not getattr(g, "d1_guess_done", False):
                 await _d1_guess_finish(ctx, g, timeout=True)
         except Exception as e:
             print("⚠️ d1 timer err:", e)
@@ -26068,6 +26251,8 @@ async def shuffle_and_assign(
     g.d1_guess_picks = []
     g.d1_guess_done = False
     g.d1_guess_used = set()
+    g.d1_guess_pending = None
+    g.d1_guess_token = int(getattr(g, "d1_guess_token", 0) or 0) + 1   # تایمرِ قبل از پخشِ دوباره بی‌اثر شود
     g.defense_history = {}
     g.nem_reps = []
     g.nem_reps_tmp = []
@@ -26668,6 +26853,8 @@ async def name_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     g = gs(chat_id)
 
     # 🏆 تورنومنت: «داور» / «شرکت‌کننده» / «حذف از تورنومنت» / «جایگزین صندلی N» با ریپلای
+    if await _tourn_swap_cmd(ctx, msg, g, uid, text):
+        return
     if await _tourn_reply_cmd(ctx, msg, g, uid, text):
         return
     if await _tourn_setup_text(ctx, msg, g, uid, text):   # 🏆 «آیدی اسم»/«تمام» به‌صورتِ ریپلای
@@ -29068,6 +29255,8 @@ async def handle_direct_name_input(update: Update, ctx: ContextTypes.DEFAULT_TYP
     text = msg.text.strip()
 
     # 🏆 تورنومنت: خط‌های «آیدی اسم» و «تمام» در مرحلهٔ راه‌اندازی
+    if await _tourn_swap_cmd(ctx, msg, g, uid, text):
+        return
     if await _tourn_setup_text(ctx, msg, g, uid, text):
         return
 
