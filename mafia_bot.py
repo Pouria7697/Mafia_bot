@@ -422,6 +422,7 @@ class GameState:
         self.score_act_impossible = getattr(self, "score_act_impossible", set()) or set()
         self.score_day_initial = getattr(self, "score_day_initial", False)
         self.score_day_final = getattr(self, "score_day_final", False)
+        self.score_cut_striked = getattr(self, "score_cut_striked", None)   # خارج‌شده‌ها تا پایانِ روزِ ۲
         self.score_farib_days = getattr(self, "score_farib_days", set()) or set()  # هر روز فقط یک‌بار فریب
         self.score_yakuza_sac = getattr(self, "score_yakuza_sac", set()) or set()  # فدای یاکوزایی (فریب صفر نمی‌شود)
         self.buy_link_seat = getattr(self, "buy_link_seat", None)                  # 🔗 پرسشِ لینک بعد از خریداری
@@ -7906,12 +7907,20 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
 
 
 # ═══════════════ 🏅 موتورِ امتیازدهی (تستی) ═══════════════
+def _sc_cut(g) -> bool:
+    """⏹ بازیِ غیرتورنومنتی: از شبِ ۲ به بعد (بعد از روزِ ۲) رویدادِ امتیازی ثبت نمی‌شود.
+    برد (آخرِ بازی) و انضباط (اخطار و کیک تا آخرِ بازی) جدا حساب می‌شوند و دست نمی‌خورند."""
+    return not getattr(g, "tourn_game", False) and int(getattr(g, "night_number", 0) or 0) >= 2
+
+
 def _sc_add(g, seat, cat, pts, reason):
     """ثبتِ یک رویدادِ امتیازی برای صندلی.
     ⏪ وسطِ یک اکتِ شب تا بسته‌شدنِ اکت معوق می‌ماند — تا «اکت مجدد»/«بازگشت» امتیازِ
        استعلام/بازپرسی را دوباره حساب نکند (score_events با عکسِ وضعیت برنمی‌گردد)."""
     if seat is None or seat not in (g.seats or {}):
         return
+    if cat != "guess" and _sc_cut(g):
+        return      # حدسِ ۳ مافیا مالِ روزِ ۱/شبِ ۱ است، حتی اگر دیرتر تمام شود
     if _act_defer(_sc_add_now, g, seat, cat, pts, reason):
         return
     g.score_events.setdefault(seat, []).append((cat, float(pts), reason))
@@ -8035,6 +8044,10 @@ def _score_compute(g):
     if _side_secret(g):
         kicked = set()
     impossible = getattr(g, "score_act_impossible", set()) or set()
+    # 🚪 «از بازی خارج شده» برای فریب: در بازیِ غیرتورنومنتی فقط خروج‌های تا پایانِ روزِ ۲
+    gone = getattr(g, "score_cut_striked", None)
+    if gone is None or getattr(g, "tourn_game", False):
+        gone = g.striked or set()
     for seat in sorted(g.seats or {}):
         side = _sc_side_final(g, seat)   # 🌀 اسمیگلِ خیانت‌کرده → مافیا
         sev = ev.get(seat, []) or []
@@ -8058,7 +8071,7 @@ def _score_compute(g):
             # فریب: پایه‌ی ۴۰ منهای کسرها (رأی اولیه از شهروند −۲.۵، حضور در دفاع −۱۰) — بازه [۰، ۴۰]
             farib = max(0.0, min(40.0, 40.0 + _sum("farib1")))
             # 🚪 به هر نحوی از بازی خارج شده (شات، رأی، دوئل…) → فریب صفر — جز فدای یاکوزایی
-            if (seat in (g.striked or set())
+            if (seat in gone
                     and seat not in (getattr(g, "score_yakuza_sac", set()) or set())):
                 farib = 0.0
             push = max(0.0, min(20.0, _sum("push")))   # کف ۰ (رأی به هم‌تیمی منفی دارد)
@@ -10494,6 +10507,8 @@ async def start_night(ctx, chat_id, g):
     g.night_active = True
     g.maarefe_active = False
     g.phase = "playing"   # برگرداندنِ فاز از حالت‌های رأی‌گیریِ روز
+    if int(g.night_number or 0) == 1:
+        g.score_cut_striked = set(g.striked or set())   # 🏅 خارج‌شده‌ها تا پایانِ روزِ ۲ (برای فریب)
     g.night_number = (g.night_number or 0) + 1
     g.night_open_warned = False   # 🚦 اخطارِ «اول باز، بعد شب» مالِ روزِ قبل بود
     g.night_is_negotiation = False
@@ -26246,6 +26261,7 @@ async def shuffle_and_assign(
     g.score_act_impossible = set()
     g.score_day_initial = False
     g.score_day_final = False
+    g.score_cut_striked = None
     g.score_farib_days = set()
     g.d1_guess_seat = None
     g.d1_guess_picks = []
