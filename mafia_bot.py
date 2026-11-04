@@ -16748,6 +16748,9 @@ async def handle_baazpors_callback(update, ctx):
             converted = False
         sac = g.night_yakuza_sacrifice
         sac_txt = f"{sac}. {g.seats[sac][1]}" if sac in g.seats else "—"
+        # ⏪ اول مهلتِ «اکت مجدد»؛ جذب، پیامِ هدف، لینکِ اتاق و گزارش فقط وقتی اکت قطعی شد.
+        #    (فهرستِ جذب‌شده‌ها در عکسِ قبل از اکت نیست، پس «اکت مجدد» پسش نمی‌گرفت.)
+        await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         if converted:
             g.negotiated_seats.add(s)
             try:
@@ -16762,7 +16765,6 @@ async def handle_baazpors_callback(update, ctx):
         #    وگرنه تیم از روی همین پیام می‌فهمد اکت گرفته یا نه
         await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
                          f"جذب: <b>{_room_who(g, s)}</b>")
-        await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         g.night_doctor_blocked = True
         g.night_done.add("mafia")
         store.save()
@@ -19476,6 +19478,8 @@ async def handle_kapu_callback(update, ctx):
             s == g.heir_seat and g.heir_no_yakuza)
         sac = g.night_yakuza_sacrifice
         sac_txt = f"{sac}. {g.seats[sac][1]}" if sac in g.seats else "—"
+        # ⏪ اول مهلتِ «اکت مجدد»؛ جذب، پیامِ هدف، لینکِ اتاق و گزارش فقط وقتی اکت قطعی شد.
+        await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         if convertible:
             g.negotiated_seats.add(s)
             try:
@@ -19489,7 +19493,6 @@ async def handle_kapu_callback(update, ctx):
         # 📣 اتاقِ مافیا: بدونِ تیک/ضربدر — هر دو حالت یک متنِ یکسان
         await _room_note(ctx, g, f"🥷 یاکوزایی — فدا: <b>{escape(sac_txt, quote=False)}</b> | "
                          f"جذب: <b>{_room_who(g, s)}</b>")
-        await _close_pm(ctx, uid, mid, "✅ یاکوزایی ثبت شد.")
         # 🎙 اعلامِ صوتی در وویس‌چتِ گروه (کاپو جداگانه به همه پیام نمی‌دهد)
         _cid = _game_chat_id(g)
         if _cid is not None:
