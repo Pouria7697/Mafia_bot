@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 from dataclasses import dataclass
 import pickle, os, random, asyncio, time
+import threading
 import telegram.error
 import jdatetime
 import requests
@@ -85,22 +86,179 @@ SLOW_UPDATE_SEC = float(os.environ.get("SLOW_UPDATE_SEC", "2"))
 
 _GIST_TIME = {"sec": 0.0, "calls": 0}
 
+# ═══════════ 🗄 کشِ گیست ═══════════
+# گیت‌هاب با هر «خواندنِ یک فایل» کلِ گیست (همهٔ فایل‌ها) را می‌فرستد؛ پایانِ یک بازی ده‌ها
+# بار همین را دانلود می‌کرد → کُندی و جهشِ حافظه. حالا:
+#  • خواندن‌ها تا GIST_CACHE_SEC ثانیه از یک نسخهٔ مشترک جواب می‌گیرند و هم‌زمان فقط یک
+#    دانلود انجام می‌شود (بقیه منتظرِ همان می‌مانند، نه اینکه هر کدام جدا دانلود کنند)
+#  • هر نوشتنِ موفقِ بات همان لحظه در کش هم نوشته می‌شود → کش هیچ‌وقت از نوشته‌های
+#    خودِ بات عقب نیست (خواندن-تغییر-نوشتن مثلِ قبل درست کار می‌کند)
+#  • فایلی که گیت‌هاب «بریده» فرستاده (truncated) کامل از raw_url خوانده می‌شود
+#  ⚠️ ویرایشِ دستیِ گیست حداکثر GIST_CACHE_SEC ثانیه بعد دیده می‌شود.
+GIST_CACHE_SEC = float(os.environ.get("GIST_CACHE_SEC", "30"))
+_GIST_LOCK = threading.Lock()          # از دیکشنریِ کش محافظت می‌کند (همیشه کوتاه)
+_GIST_FETCH_LOCK = threading.Lock()    # فقط یک دانلودِ هم‌زمان
+_GIST_CACHE = {"files": None, "ts": 0.0, "gen": 0, "unknown_gen": 0, "recent": {}}
+_GIST_TRUNC_SEEN: set = set()
+_HTTP_ORIG: dict = {}                  # (ماژول، تابع) → تابعِ اصلیِ httpx/requests
+
+
+class _GistResp:
+    """🗄 جوابِ ساخته‌شده از کش — همان چیزهایی که بقیهٔ کد از جوابِ گیت‌هاب برمی‌دارد."""
+
+    def __init__(self, files, status_code=200, text=""):
+        self._files, self.status_code, self.text = files, status_code, text
+        self.ok = 200 <= status_code < 300
+
+    def json(self):
+        if self._files is None:
+            return {"message": self.text}
+        return {"files": {n: {"filename": n, "content": c, "truncated": False}
+                          for n, c in self._files.items()}}
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise RuntimeError(f"gist {self.status_code}: {self.text}")
+
+
+def _gist_fetch(real_get, a, k):
+    """دانلودِ واقعیِ گیست → (فایل‌ها، None) یا (None، جوابِ خطا)."""
+    k = dict(k)
+    if not k.get("timeout"):
+        k["timeout"] = 20      # ⏱ بی‌تایم‌اوت ممکن بود تا ابد گیر کند و قفلِ دانلود را نگه دارد
+    r = real_get(*a, **k)
+    if getattr(r, "status_code", 0) != 200:
+        return None, r
+    files = {}
+    for name, f in ((r.json() or {}).get("files") or {}).items():
+        f = f or {}
+        content = f.get("content")
+        if f.get("truncated"):
+            raw = f.get("raw_url")
+            rr = real_get(raw, headers=k.get("headers"), timeout=k["timeout"]) if raw else None
+            if getattr(rr, "status_code", 0) != 200:
+                # ⚠️ نسخهٔ بریده هرگز به جای فایلِ کامل داده نمی‌شود (ذخیرهٔ بعدی پاکش می‌کرد)
+                return None, _GistResp(None, 502, f"{name}: فایلِ کامل خوانده نشد")
+            content = rr.content.decode("utf-8")
+            if name not in _GIST_TRUNC_SEEN:
+                _GIST_TRUNC_SEEN.add(name)
+                print(f"🗄 گیست: «{name}» بریده آمده بود — کاملش از raw_url خوانده شد "
+                      f"({len(content)} نویسه)")
+        files[name] = content
+    return files, None
+
+
+def _gist_fresh():
+    files = _GIST_CACHE["files"]
+    if files is not None and time.time() - _GIST_CACHE["ts"] < GIST_CACHE_SEC:
+        return files
+    return None
+
+
+def _gist_cached_get(real_get, a, k):
+    with _GIST_LOCK:
+        files = _gist_fresh()
+    if files is not None:
+        return _GistResp(files)
+    got = _GIST_FETCH_LOCK.acquire(timeout=40)   # اگر دانلودِ دیگری گیر کرد، بی‌کش برو
+    try:
+        if got:
+            with _GIST_LOCK:                       # شاید همین حالا کسِ دیگری تازه‌اش کرده
+                files = _gist_fresh()
+            if files is not None:
+                return _GistResp(files)
+        with _GIST_LOCK:
+            gen0 = _GIST_CACHE["gen"]
+        t0 = time.time()
+        files, err = _gist_fetch(real_get, a, k)
+        if files is None:
+            return err
+        with _GIST_LOCK:
+            # ✍️ نوشته‌هایی که وسطِ دانلود رسیدند از دانلود تازه‌ترند
+            for n, (g, c) in list(_GIST_CACHE["recent"].items()):
+                if g > gen0:
+                    if c is None:
+                        files.pop(n, None)
+                    else:
+                        files[n] = c
+            if got and _GIST_CACHE["unknown_gen"] <= gen0:
+                _GIST_CACHE.update(files=files, ts=t0)
+                _GIST_CACHE["recent"] = {}
+        return _GistResp(files)
+    finally:
+        if got:
+            _GIST_FETCH_LOCK.release()
+
+
+def _gist_note_write(sent):
+    """✍️ نوشتنِ موفق → همان فایل‌ها در کش هم. شکلِ ناشناخته یا نتیجهٔ نامعلوم → کش کنار."""
+    with _GIST_LOCK:
+        _GIST_CACHE["gen"] += 1
+        g = _GIST_CACHE["gen"]
+        changes, ok = {}, isinstance(sent, dict)
+        if ok:
+            for n, v in sent.items():
+                if v is None:
+                    changes[n] = None                       # حذفِ فایل
+                elif (isinstance(v, dict) and isinstance(v.get("content"), str)
+                      and v.get("filename") in (None, n)):
+                    changes[n] = v["content"] or None
+                else:
+                    ok = False
+                    break
+        if not ok:
+            _GIST_CACHE.update(files=None, unknown_gen=g)
+            return
+        files = _GIST_CACHE["files"]
+        if files is not None:
+            files = dict(files)                             # کپی: خواننده‌های قبلی دست نخورند
+            for n, c in changes.items():
+                if c is None:
+                    files.pop(n, None)
+                else:
+                    files[n] = c
+            _GIST_CACHE["files"] = files
+        for n, c in changes.items():
+            _GIST_CACHE["recent"][n] = (g, c)
+
+
+def _gist_tracked_patch(real_patch, a, k):
+    body = k.get("json")
+    sent = body.get("files") if isinstance(body, dict) else None
+    try:
+        r = real_patch(*a, **k)
+    except Exception:
+        _gist_note_write(None)          # معلوم نیست نوشته شد یا نه → کش کنار
+        raise
+    if getattr(r, "status_code", 0) in (200, 201):
+        _gist_note_write(sent)
+    return r
+
 
 def _wrap_gist_http(mod, name):
-    """⏱ زمانِ درخواست‌های api.github.com را جمع می‌زند.
-    بقیهٔ درخواست‌ها دست‌نخورده رد می‌شوند (هیچ رفتاری عوض نمی‌شود)."""
-    orig = getattr(mod, name)
+    """⏱ زمانِ درخواست‌های api.github.com را جمع می‌زند + 🗄 کشِ خواندن/نوشتنِ گیست.
+    بقیهٔ درخواست‌ها دست‌نخورده رد می‌شوند."""
+    key = (mod.__name__, name)
+    _HTTP_ORIG[key] = getattr(mod, name)
+
+    def real(*a, **k):
+        t0 = time.perf_counter()
+        try:
+            return _HTTP_ORIG[key](*a, **k)
+        finally:
+            _GIST_TIME["sec"] += time.perf_counter() - t0
+            _GIST_TIME["calls"] += 1
 
     def wrapper(*a, **k):
         url = a[0] if a else k.get("url", "")
         if "api.github.com" not in str(url):
-            return orig(*a, **k)
-        t0 = time.perf_counter()
-        try:
-            return orig(*a, **k)
-        finally:
-            _GIST_TIME["sec"] += time.perf_counter() - t0
-            _GIST_TIME["calls"] += 1
+            return _HTTP_ORIG[key](*a, **k)
+        if GIST_ID and str(url).rstrip("/") == GIST_API_URL and not k.get("params"):
+            if name == "get":
+                return _gist_cached_get(real, a, k)
+            if name == "patch":
+                return _gist_tracked_patch(real, a, k)
+        return real(*a, **k)
 
     return wrapper
 
@@ -3010,6 +3168,7 @@ def format_player_stats(p: dict) -> str:
 # ─── آمار هفتگی (لیدربرد) ───────────────────────────────────────
 WEEKLY_META_FILENAME = "weekly_meta.json"   # {"last_sent": ts, "snapshot": {...}}
 WEEKLY_PERIOD_SEC = 7 * 24 * 3600           # هر ۷ روز
+_WEEKLY_META_BROKEN = {"at": 0.0}           # 🩹 فایل خوانده شد ولی JSONِ سالم نبود (نه خطای شبکه)
 
 def load_weekly_meta() -> dict:
     try:
@@ -3022,7 +3181,14 @@ def load_weekly_meta() -> dict:
         if response.status_code == 200:
             gist_data = response.json()
             content = gist_data["files"].get(WEEKLY_META_FILENAME, {}).get("content", "{}")
-            return json.loads(content) or {}
+            try:
+                meta = json.loads(content) or {}
+            except ValueError as e:
+                _WEEKLY_META_BROKEN["at"] = time.time()
+                print("❌ load_weekly_meta: فایل خراب است (JSONِ ناقص):", e)
+                return None
+            _WEEKLY_META_BROKEN["at"] = 0.0
+            return meta
         print("❌ load_weekly_meta bad status:", response.status_code)
         return None   # ⚠️ خطا ≠ «فایل خالی» — نباید ساعتِ هفتگی صفر شود
     except Exception as e:
@@ -3043,9 +3209,11 @@ def save_weekly_meta(meta: dict):
                 }
             }
         }
-        httpx.patch(url, headers=headers, json=data)
+        r = httpx.patch(url, headers=headers, json=data)
+        return getattr(r, "status_code", 0) in (200, 201)
     except Exception as e:
         print("❌ save_weekly_meta error:", e)
+        return False
 
 
 def _weekly_delta(current: dict, snapshot: dict) -> dict:
@@ -6551,6 +6719,8 @@ async def broadcast_weekly_stats(bot, force: bool = False):
     """در صورت رسیدن موعد هفتگی، لیدربرد را به همهٔ گروه‌های فعال می‌فرستد."""
     meta = load_weekly_meta()
     if meta is None:
+        if _WEEKLY_META_BROKEN.get("at"):
+            return await _weekly_meta_repair(bot)
         # ⚠️ خواندنِ متا خطا داد → این دور را رد کن؛ ساعتِ هفتگی دست نمی‌خورد
         return {"sent": 0, "reason": "meta_load_failed"}
     now = datetime.now().timestamp()
@@ -6631,6 +6801,28 @@ async def broadcast_weekly_stats(bot, force: bool = False):
         reason = "no_data" if not current else "no_activity"
         return {"sent": 0, "reason": reason}
     return {"sent": sent, "reason": "ok", "groups": len(store.active_groups)}
+
+
+async def _weekly_meta_repair(bot):
+    """🩹 weekly_meta.json در گیست خراب است (نیمه‌کاره، JSONِ ناقص) — نه خطای شبکه.
+    اسنپ‌شاتِ هفتهٔ قبل قابلِ بازیابی نیست؛ خطِ مبنای تازه از آمارِ فعلی ساخته می‌شود و
+    هفتهٔ جدید از همین لحظه شمرده می‌شود. وگرنه آمارِ هفتگی تا ابد بی‌صدا رد می‌شد."""
+    current = load_player_stats()
+    if current is None:
+        return {"sent": 0, "reason": "meta_load_failed"}
+    if not save_weekly_meta({"last_sent": datetime.now().timestamp(), "snapshot": current}):
+        return {"sent": 0, "reason": "meta_load_failed"}
+    _WEEKLY_META_BROKEN["at"] = 0.0
+    print("🩹 weekly_meta.json خراب بود — خطِ مبنای تازه ساخته شد")
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "🩹 فایلِ آمارِ هفتگی (<code>weekly_meta.json</code>) در گیست خراب بود و از نو ساخته شد.\n"
+            "آمارِ هفتهٔ گذشته قابلِ بازیابی نبود؛ هفتهٔ جدید از همین الان شمرده می‌شود.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+    return {"sent": 0, "reason": "meta_repaired"}
 
 
 async def weekly_scheduler(app):
@@ -29822,6 +30014,10 @@ async def weekly_now_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     elif reason == "no_activity":
         await update.message.reply_text("ℹ️ آماری برای نمایش وجود دارد ولی ارسال نشد.")
+    elif reason == "meta_repaired":
+        await update.message.reply_text(
+            "🩹 فایلِ آمارِ هفتگی در گیست خراب بود و از نو ساخته شد — آمارِ هفتهٔ گذشته "
+            "قابلِ بازیابی نبود؛ هفتهٔ جدید از همین الان شمرده می‌شود.")
     elif not store.active_groups:
         await update.message.reply_text("⚠️ هیچ گروه فعالی وجود ندارد (active_groups خالی است).")
     else:
