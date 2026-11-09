@@ -90,15 +90,24 @@ _GIST_TIME = {"sec": 0.0, "calls": 0}
 # گیت‌هاب با هر «خواندنِ یک فایل» کلِ گیست (همهٔ فایل‌ها) را می‌فرستد؛ پایانِ یک بازی ده‌ها
 # بار همین را دانلود می‌کرد → کُندی و جهشِ حافظه. حالا:
 #  • خواندن‌ها تا GIST_CACHE_SEC ثانیه از یک نسخهٔ مشترک جواب می‌گیرند و هم‌زمان فقط یک
-#    دانلود انجام می‌شود (بقیه منتظرِ همان می‌مانند، نه اینکه هر کدام جدا دانلود کنند)
-#  • هر نوشتنِ موفقِ بات همان لحظه در کش هم نوشته می‌شود → کش هیچ‌وقت از نوشته‌های
-#    خودِ بات عقب نیست (خواندن-تغییر-نوشتن مثلِ قبل درست کار می‌کند)
+#    دانلود انجام می‌شود (بقیه منتظرِ همان می‌مانند — اگر شکست خورد، همان شکست را می‌گیرند)
+#  • هر نوشتنِ قطعیِ بات همان لحظه در کش هم نوشته می‌شود و تا GIST_CACHE_SEC ثانیه روی هر
+#    دانلودِ تازه هم گذاشته می‌شود → حتی اگر گیت‌هاب کمی دیرتر نسخهٔ نو را بدهد، بات از
+#    نوشته‌های خودش عقب نمی‌ماند (خواندن-تغییر-نوشتن مثلِ قبل درست است)
+#  • نوشتنی که نتیجه‌اش معلوم نیست (تایم‌اوت، ۵xx، دو نوشتنِ هم‌زمان روی یک فایل) → کش کنار
+#    می‌رود و تا GIST_CACHE_SEC ثانیه هر خواندن مستقیم از گیت‌هاب است (مثلِ قبل از کش)
 #  • فایلی که گیت‌هاب «بریده» فرستاده (truncated) کامل از raw_url خوانده می‌شود
 #  ⚠️ ویرایشِ دستیِ گیست حداکثر GIST_CACHE_SEC ثانیه بعد دیده می‌شود.
 GIST_CACHE_SEC = float(os.environ.get("GIST_CACHE_SEC", "30"))
-_GIST_LOCK = threading.Lock()          # از دیکشنریِ کش محافظت می‌کند (همیشه کوتاه)
+_GIST_LOCK = threading.Lock()          # از وضعیتِ کش محافظت می‌کند (همیشه کوتاه، بی I/O)
 _GIST_FETCH_LOCK = threading.Lock()    # فقط یک دانلودِ هم‌زمان
-_GIST_CACHE = {"files": None, "ts": 0.0, "gen": 0, "unknown_gen": 0, "recent": {}}
+_GIST_CACHE = {
+    "files": None, "ts": 0.0,          # نسخهٔ مشترک + زمانِ شروعِ دانلودش (monotonic)
+    "recent": {},                      # فایل → (زمان، محتوا)ِ آخرین نوشتنِ قطعیِ خودِ بات
+    "unsure_until": 0.0,               # تا این لحظه هیچ دانلودی ذخیره نمی‌شود
+    "fail": (0.0, None),               # آخرین دانلودِ ناموفق — برای کسانی که منتظرش بودند
+    "inflight": {}, "overlap": set(),  # نوشتن‌های در جریان روی هر فایل
+}
 _GIST_TRUNC_SEEN: set = set()
 _HTTP_ORIG: dict = {}                  # (ماژول، تابع) → تابعِ اصلیِ httpx/requests
 
@@ -121,11 +130,11 @@ class _GistResp:
             raise RuntimeError(f"gist {self.status_code}: {self.text}")
 
 
-def _gist_fetch(real_get, a, k):
+def _gist_fetch(real_get, mod_name, a, k):
     """دانلودِ واقعیِ گیست → (فایل‌ها، None) یا (None، جوابِ خطا)."""
     k = dict(k)
-    if not k.get("timeout"):
-        k["timeout"] = 20      # ⏱ بی‌تایم‌اوت ممکن بود تا ابد گیر کند و قفلِ دانلود را نگه دارد
+    if "timeout" not in k and mod_name == "requests":
+        k["timeout"] = 20      # ⏱ requests بی‌تایم‌اوت تا ابد صبر می‌کند (httpx خودش ۵ ثانیه دارد)
     r = real_get(*a, **k)
     if getattr(r, "status_code", 0) != 200:
         return None, r
@@ -135,7 +144,10 @@ def _gist_fetch(real_get, a, k):
         content = f.get("content")
         if f.get("truncated"):
             raw = f.get("raw_url")
-            rr = real_get(raw, headers=k.get("headers"), timeout=k["timeout"]) if raw else None
+            kw = {"headers": k.get("headers")}
+            if "timeout" in k:
+                kw["timeout"] = k["timeout"]
+            rr = real_get(raw, **kw) if raw else None
             if getattr(rr, "status_code", 0) != 200:
                 # ⚠️ نسخهٔ بریده هرگز به جای فایلِ کامل داده نمی‌شود (ذخیرهٔ بعدی پاکش می‌کرد)
                 return None, _GistResp(None, 502, f"{name}: فایلِ کامل خوانده نشد")
@@ -150,89 +162,132 @@ def _gist_fetch(real_get, a, k):
 
 def _gist_fresh():
     files = _GIST_CACHE["files"]
-    if files is not None and time.time() - _GIST_CACHE["ts"] < GIST_CACHE_SEC:
+    if files is not None and time.monotonic() - _GIST_CACHE["ts"] < GIST_CACHE_SEC:
         return files
     return None
 
 
-def _gist_cached_get(real_get, a, k):
+def _gist_overlay(files, now):
+    """✍️ نوشته‌های قطعیِ اخیرِ خودِ بات روی نسخهٔ دانلودشده (زیرِ _GIST_LOCK)."""
+    rec = _GIST_CACHE["recent"]
+    for n, (t, c) in list(rec.items()):
+        if now - t >= GIST_CACHE_SEC:
+            rec.pop(n, None)
+        elif c is None:
+            files.pop(n, None)
+        else:
+            files[n] = c
+
+
+def _gist_cached_get(real_get, mod_name, a, k):
     with _GIST_LOCK:
         files = _gist_fresh()
     if files is not None:
         return _GistResp(files)
-    got = _GIST_FETCH_LOCK.acquire(timeout=40)   # اگر دانلودِ دیگری گیر کرد، بی‌کش برو
+    t_wait = time.monotonic()
+    got = _GIST_FETCH_LOCK.acquire(timeout=20)   # اگر دانلودِ دیگری گیر کرد، بی‌کش برو
     try:
         if got:
             with _GIST_LOCK:                       # شاید همین حالا کسِ دیگری تازه‌اش کرده
                 files = _gist_fresh()
+                ft, ferr = _GIST_CACHE["fail"]
             if files is not None:
                 return _GistResp(files)
-        with _GIST_LOCK:
-            gen0 = _GIST_CACHE["gen"]
-        t0 = time.time()
-        files, err = _gist_fetch(real_get, a, k)
+            if ferr is not None and ft >= t_wait:
+                return ferr                        # دانلودی که منتظرش بودیم شکست خورد — دوباره نزن
+        t0 = time.monotonic()
+        files, err = _gist_fetch(real_get, mod_name, a, k)
         if files is None:
+            with _GIST_LOCK:
+                _GIST_CACHE["fail"] = (time.monotonic(), err)
             return err
         with _GIST_LOCK:
-            # ✍️ نوشته‌هایی که وسطِ دانلود رسیدند از دانلود تازه‌ترند
-            for n, (g, c) in list(_GIST_CACHE["recent"].items()):
-                if g > gen0:
-                    if c is None:
-                        files.pop(n, None)
-                    else:
-                        files[n] = c
-            if got and _GIST_CACHE["unknown_gen"] <= gen0:
+            now = time.monotonic()
+            _gist_overlay(files, now)
+            if got and now >= _GIST_CACHE["unsure_until"]:
                 _GIST_CACHE.update(files=files, ts=t0)
-                _GIST_CACHE["recent"] = {}
         return _GistResp(files)
     finally:
         if got:
             _GIST_FETCH_LOCK.release()
 
 
-def _gist_note_write(sent):
-    """✍️ نوشتنِ موفق → همان فایل‌ها در کش هم. شکلِ ناشناخته یا نتیجهٔ نامعلوم → کش کنار."""
-    with _GIST_LOCK:
-        _GIST_CACHE["gen"] += 1
-        g = _GIST_CACHE["gen"]
-        changes, ok = {}, isinstance(sent, dict)
-        if ok:
-            for n, v in sent.items():
-                if v is None:
-                    changes[n] = None                       # حذفِ فایل
-                elif (isinstance(v, dict) and isinstance(v.get("content"), str)
-                      and v.get("filename") in (None, n)):
-                    changes[n] = v["content"] or None
-                else:
-                    ok = False
-                    break
-        if not ok:
-            _GIST_CACHE.update(files=None, unknown_gen=g)
-            return
-        files = _GIST_CACHE["files"]
-        if files is not None:
-            files = dict(files)                             # کپی: خواننده‌های قبلی دست نخورند
-            for n, c in changes.items():
-                if c is None:
-                    files.pop(n, None)
-                else:
-                    files[n] = c
-            _GIST_CACHE["files"] = files
+def _gist_changes(sent):
+    """فایل → محتوای تازه (None = حذف)، یا None اگر شکلِ نوشتن را نمی‌شناسیم."""
+    if not isinstance(sent, dict):
+        return None
+    changes = {}
+    for n, v in sent.items():
+        if v is None:
+            changes[n] = None
+        elif (isinstance(v, dict) and isinstance(v.get("content"), str)
+              and v.get("filename") in (None, n)):
+            changes[n] = v["content"] or None
+        else:
+            return None
+    return changes
+
+
+def _gist_note_write_locked(sent, sure):
+    """✍️ (زیرِ _GIST_LOCK) نوشتنِ قطعی → همان فایل‌ها در کش. نامعلوم → کش کنار + مدتی بی‌کش."""
+    now = time.monotonic()
+    changes = _gist_changes(sent)
+    rec = _GIST_CACHE["recent"]
+    if not sure or changes is None:
+        _GIST_CACHE["files"] = None
+        _GIST_CACHE["unsure_until"] = now + GIST_CACHE_SEC
+        if changes is None:
+            rec.clear()
+        else:
+            for n in changes:
+                rec.pop(n, None)       # محتوای قبلیِ ما دیگر معتبر نیست
+        return
+    files = _GIST_CACHE["files"]
+    if files is not None:
+        files = dict(files)            # کپی: خواننده‌های قبلی دست نخورند
         for n, c in changes.items():
-            _GIST_CACHE["recent"][n] = (g, c)
+            if c is None:
+                files.pop(n, None)
+            else:
+                files[n] = c
+        _GIST_CACHE["files"] = files
+    for n, c in changes.items():
+        rec[n] = (now, c)
 
 
 def _gist_tracked_patch(real_patch, a, k):
     body = k.get("json")
     sent = body.get("files") if isinstance(body, dict) else None
+    names = list(sent) if isinstance(sent, dict) else []
+    with _GIST_LOCK:
+        inf = _GIST_CACHE["inflight"]
+        for n in names:
+            if inf.get(n):
+                _GIST_CACHE["overlap"].add(n)   # دو نوشتنِ هم‌زمان روی یک فایل — ترتیب معلوم نیست
+            inf[n] = inf.get(n, 0) + 1
+    outcome = "unsure"                         # sure | rejected | unsure
     try:
         r = real_patch(*a, **k)
-    except Exception:
-        _gist_note_write(None)          # معلوم نیست نوشته شد یا نه → کش کنار
-        raise
-    if getattr(r, "status_code", 0) in (200, 201):
-        _gist_note_write(sent)
-    return r
+        st = getattr(r, "status_code", 0) or 0
+        if st in (200, 201):
+            outcome = "sure"
+        elif 400 <= st < 500:
+            outcome = "rejected"               # گیت‌هاب رد کرد → چیزی عوض نشد
+        return r                               # ۵xx: شاید نوشته شده باشد → «نامعلوم»
+    finally:
+        with _GIST_LOCK:
+            inf, ov = _GIST_CACHE["inflight"], _GIST_CACHE["overlap"]
+            if outcome == "sure" and any(n in ov for n in names):
+                outcome = "unsure"
+            for n in names:
+                c = inf.get(n, 1) - 1
+                if c <= 0:
+                    inf.pop(n, None)
+                    ov.discard(n)
+                else:
+                    inf[n] = c
+            if outcome != "rejected":
+                _gist_note_write_locked(sent, outcome == "sure")
 
 
 def _wrap_gist_http(mod, name):
@@ -255,13 +310,12 @@ def _wrap_gist_http(mod, name):
             return _HTTP_ORIG[key](*a, **k)
         if GIST_ID and str(url).rstrip("/") == GIST_API_URL and not k.get("params"):
             if name == "get":
-                return _gist_cached_get(real, a, k)
+                return _gist_cached_get(real, key[0], a, k)
             if name == "patch":
                 return _gist_tracked_patch(real, a, k)
         return real(*a, **k)
 
     return wrapper
-
 
 for _mod, _fn in ((httpx, "get"), (httpx, "patch"), (httpx, "post"),
                   (requests, "get"), (requests, "patch"), (requests, "post")):
@@ -3171,6 +3225,7 @@ WEEKLY_PERIOD_SEC = 7 * 24 * 3600           # هر ۷ روز
 _WEEKLY_META_BROKEN = {"at": 0.0}           # 🩹 فایل خوانده شد ولی JSONِ سالم نبود (نه خطای شبکه)
 
 def load_weekly_meta() -> dict:
+    _WEEKLY_META_BROKEN["at"] = 0.0      # علامت فقط مالِ همین خواندن است (نه یک خرابیِ قدیمی)
     try:
         url = f"https://api.github.com/gists/{GIST_ID}"
         headers = {
