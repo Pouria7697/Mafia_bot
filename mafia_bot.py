@@ -22133,6 +22133,8 @@ async def _resolve_mythic(ctx, chat_id, g):
     will = getattr(g, "my_shot_will", None)
     will_txt = " با وصیت بسته" if will == "closed" else " با وصیت باز"
     if st and st in g.seats and st not in (g.striked or set()):
+        if will == "closed":
+            g.my_will_closed_used = True   # 🔒 وصیتِ بسته با زدن مصرف می‌شود — حتی اگر شات سیو شود
         if st in doc_saved:
             await _night_report(ctx, g, f"💉 سیوِ دکتر جلوی شاتِ مافیا روی {st} را گرفت.")
         elif bgs == st:
@@ -22152,8 +22154,6 @@ async def _resolve_mythic(ctx, chat_id, g):
         else:
             dead.add(st); reasons[st] = "شات مافیا" + will_txt
             notes.append(f"🕊 خداحافظی می‌کنیم با <b>{_nm(st)}</b> — به شات مافیا{will_txt}")
-            if will == "closed":
-                g.my_will_closed_used = True
             g.my_wills[st] = will or "open"
 
     # 🎯 شاتِ اسنایپر
