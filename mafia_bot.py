@@ -3709,6 +3709,7 @@ def save_bot_settings(data: dict):
 # ═════════════════════════════════════════════════════════════
 TOURN_FILENAME = "tournament.json"
 TOURN_GAMES_PER_SEASON = 14
+TOURN_SCORED_MAX = 10          # 🔟 هر شرکت‌کننده در هر فصل فقط ۱۰ بازیِ امتیازدار دارد؛ از بازیِ ۱۱ بی‌امتیاز
 TOURN_ADD_WINDOW = 600        # ⏳ حالتِ افزودنِ شرکت‌کننده بعد از ۱۰ دقیقه خودش بسته می‌شود
 TOURN_EDIT_WINDOW = 900       # ⏳ حالتِ «✏️ اصلاح» بعد از ۱۵ دقیقه بی‌کاری بسته می‌شود
 _TOURN_CACHE = {"data": None, "ok": False, "fail_ts": 0.0}
@@ -5036,6 +5037,9 @@ def _tourn_recalc(t, game):
     judges = _tourn_judges(game)
     by_uid = {}
     for r in game.get("rows") or []:
+        if r.get("capped"):
+            r["pts"] = 0.0           # 🔟 سقفِ ۱۰ بازیِ امتیازدار — نه امتیاز، نه سهم در جمع
+            continue
         vals = [_tourn_ref_pts(r, j) for j in judges] or [round(float(r.get("base", 0) or 0), 1)]
         r["pts"] = round(sum(vals) / len(vals), 1)
         c = r.get("credit")
@@ -5146,6 +5150,9 @@ async def _tourn_void_event(ctx, chat_id, event_num) -> str:
         for u in (gm.get("scores") or {}):
             t["plays"][u] = max(0, int(t["plays"].get(u, 0) or 0) - 1)
             t.setdefault("played", {})[u] = max(0, int(t["played"].get(u, 0) or 0) - 1)
+        for r in gm.get("rows") or []:
+            if r.get("capped") and r.get("credit"):
+                t["plays"][r["credit"]] = max(0, int(t["plays"].get(r["credit"], 0) or 0) - 1)
     gm["counted"] = False
     gm["status"] = "void"
     for k in [k for k, v in _TOURN_CRIT_ST.items() if v.get("chat") == chat_id and v.get("idx") == idx]:
@@ -5337,6 +5344,12 @@ def _tourn_crit_card_text(t, game, public=False, ref=None) -> str:
         mark = _tourn_mark(row)
         nm = escape(str(row.get("name", "")), quote=False)
         sub = f" (به‌جای {escape(str(row.get('for_name')), quote=False)})" if row.get("for_name") else ""
+        if row.get("capped"):
+            _cl = (f"{mark}{row['seat']}. {nm}{sub} — ⛔ بی‌امتیاز "
+                   f"({_sc_fmt(TOURN_SCORED_MAX)} بازیِ امتیازدارِ فصل کامل شده)")
+            lines.append(_cl)
+            compact.append(_cl)
+            continue
         if ref is not None and not public:
             vals = _tourn_ref_crit(row, ref)
             _w = _sc_fmt(row.get('warns', 0) or 0)
@@ -5414,7 +5427,7 @@ def _tourn_crit_ask_text(t, game, ref) -> str:
     body = _tourn_crit_card_text(t, game, public=True, ref=ref).split(chr(10), 1)[-1]
     lines = ["❓ <b>مطمئنی؟</b> فهرستِ نهاییِ تو برای این بازی:", body.strip(), ""]
     miss = [str(r.get("seat")) for r in (game.get("rows") or [])
-            if _tourn_crit_done(_tourn_ref_crit(r, ref)) < len(_TOURN_CRIT_KEYS)]
+            if not r.get("capped") and _tourn_crit_done(_tourn_ref_crit(r, ref)) < len(_TOURN_CRIT_KEYS)]
     if miss:
         lines.append(f"⚠️ صندلیِ {'، '.join(miss)} همهٔ موردهایش پر نشده — خالی‌ها صفر حساب می‌شوند.")
     lines.append("با «بله» فهرستت در گروه اعلام می‌شود" + (" و امتیازِ نهایی میانگینِ همهٔ داورهاست."
@@ -5432,6 +5445,8 @@ def _tourn_crit_kb(t, game, chat_id, idx, ref, view, seat=None):
     if view == "seats":
         btns = []
         for r in game.get("rows") or []:
+            if r.get("capped"):
+                continue             # 🔟 بی‌امتیاز — داور نمره نمی‌دهد
             d = _tourn_crit_done(_tourn_ref_crit(r, ref))
             tick = " ✅" if d >= len(_TOURN_CRIT_KEYS) else (" ✏️" if d else "")
             btns.append(B(f"{_tourn_mark(r)}{r['seat']}. {str(r.get('name', ''))[:16]}{tick}",
@@ -5476,7 +5491,7 @@ def _tourn_crit_render(t, game, chat_id, idx, ref):
         return _tourn_crit_card_text(t, game, ref=ref), None
     st = _tourn_crit_state(ref, chat_id, idx) if str(ref).isdigit() else None
     view = (st or {}).get("view") or "main"
-    if view in ("seat", "key") and _tourn_crit_row(game, st.get("seat")) is not None:
+    if view in ("seat", "key") and not (_tourn_crit_row(game, st.get("seat")) or {"capped": 1}).get("capped"):
         return (_tourn_crit_seat_text(t, game, ref, st["seat"], st.get("key") if view == "key" else None),
                 _tourn_crit_kb(t, game, chat_id, idx, ref, view, st["seat"]))
     if view == "ask":
@@ -5551,7 +5566,11 @@ async def handle_tourn_crit_callback(update, ctx):
         _TOURN_CRIT_ST.pop(uid, None)
         await _tourn_ref_confirm(ctx, chat_id, t, idx, uid)
         return
-    seats = [int(r.get("seat", 0)) for r in game.get("rows") or []]
+    seats = [int(r.get("seat", 0)) for r in game.get("rows") or [] if not r.get("capped")]
+    if act in ("seat", "key") and (_tourn_crit_row(game, seat) or {}).get("capped"):
+        await safe_q_answer(q, f"⛔ این بازیکن {TOURN_SCORED_MAX} بازیِ امتیازدارِ این فصل را کرده — "
+                               f"این بازی برایش امتیازی ثبت نمی‌شود.", show_alert=True)
+        return
     st = {"chat": chat_id, "idx": idx, "tid": tid, "view": "main", "seat": None, "key": None, "ts": time.time()}
     if act == "seats":
         st["view"] = "seats"
@@ -5625,6 +5644,10 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
     if row is None:
         await msg.reply_text("✏️ اول روی «ویرایش» بزن و صندلی را انتخاب کن؛ بعد عدد بفرست.")
         return True
+    if row.get("capped"):
+        await msg.reply_text(f"⛔ این بازیکن {TOURN_SCORED_MAX} بازیِ امتیازدارِ این فصل را کرده — "
+                             f"این بازی برایش امتیازی ثبت نمی‌شود.")
+        return True
     if vals is None:
         await msg.reply_text("⚠️ فقط عدد بفرست — مثلاً ۲۰ یا ۱۲٫۵. برای «تأثیرگذاری منفی» هم عددِ مثبت "
                              "(۰ تا ۱۰) بنویس؛ خودش کم می‌شود.")
@@ -5653,7 +5676,7 @@ async def _tourn_crit_input(ctx, msg, uid) -> bool:
             st.update(view="seat", key=None)
     else:
         rest = [int(r["seat"]) for r in game.get("rows") or []
-                if _tourn_crit_done(_tourn_ref_crit(r, uid)) < len(_TOURN_CRIT_KEYS)]
+                if not r.get("capped") and _tourn_crit_done(_tourn_ref_crit(r, uid)) < len(_TOURN_CRIT_KEYS)]
         nxt = next((s for s in rest if s > int(seat)), rest[0] if rest else None)
         if nxt is not None:
             st.update(view="seat", seat=nxt, key=None)           # ⏭ صندلیِ بعدیِ ناقص
@@ -5699,6 +5722,8 @@ async def _tourn_game_done(ctx, chat_id, g, scores, event_num, date_str):
                "warns": int(warns.get(seat, 0) or 0)}
         if credit and credit != str(uid):
             row["for_name"] = roster.get(credit, credit)
+        if credit and int((t.get("played") or {}).get(credit, 0) or 0) >= TOURN_SCORED_MAX:
+            row["capped"] = True     # 🔟 سقفِ بازیِ امتیازدارِ فصل پر است — داور هم نمره نمی‌دهد
         rows.append(row)
     season = t.get("season", 1)
     no = len([x for x in t.get("games") or []
@@ -5712,6 +5737,10 @@ async def _tourn_game_done(ctx, chat_id, g, scores, event_num, date_str):
     for u in (game.get("scores") or {}):
         t["plays"][u] = int(t["plays"].get(u, 0) or 0) + 1
         t.setdefault("played", {})[u] = int(t["played"].get(u, 0) or 0) + 1
+    for r in rows:
+        if r.get("capped") and r.get("credit"):
+            # 🔁 نشست (نوبتِ چرخش شمرده می‌شود) ولی بازیِ امتیازدار نیست (played جلو نمی‌رود)
+            t["plays"][r["credit"]] = int(t["plays"].get(r["credit"], 0) or 0) + 1
     t.setdefault("games", []).append(game)
     idx = len(t["games"]) - 1
     t["pending"] = idx
@@ -6199,7 +6228,7 @@ async def handle_tourn_edit_pm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     done, bad = [], []
     for op in ops:
         row = seats.get(op[1])
-        if row is None:
+        if row is None or row.get("capped"):
             bad.append(str(op[1]))
             continue
         mine = row.setdefault("adj_by", {}).setdefault(me, [])
