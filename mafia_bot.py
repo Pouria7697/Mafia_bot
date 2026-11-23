@@ -8139,6 +8139,8 @@ async def _offer_auto_defense(ctx, chat_id, g, counts=None):
             await _night_report(ctx, g, f"⚖️ انتخابِ دادستان ({_pr_who(g, pt)}) خودش رأی آورده → در گروه اعلام نمی‌شود.")
         else:
             qualified.append(pt)
+            # 🔢 جایش در صف = جای صندلی‌اش در ترتیبِ دفاعیه (همان ترتیبِ رأی‌گیریِ اولیه)، نه ته صف
+            qualified.sort(key=lambda t: order.index(t) if t in order else len(order))
             pr_pick = pt
             pr_note = f"⚖️ به دستورِ دادستان: {_pr_who(g, pt)} واردِ دفاعیه می‌شود."
             if pt in dropped:
