@@ -16557,8 +16557,8 @@ def _find_active_night_game(uid, q):
 
 def _bzp_detective_positive(g, seat) -> bool:
     rn = _seat_role_norm(g, seat)
-    # نقش‌هایی که معمولاً مثبت‌اند: شیاد، ناتو، و فرد یاکوزایی‌شده
-    positive_role = (seat in (g.negotiated_seats or set())) or (rn in (_R_SHIAD, _R_NATO))
+    # نقش‌هایی که معمولاً مثبت‌اند: شیاد، ناتو، مافیا ساده (۱۳ نفره)، و فرد یاکوزایی‌شده
+    positive_role = (seat in (g.negotiated_seats or set())) or (rn in (_R_SHIAD, _R_NATO, _R_SIMPLE_MAFIA))
     if not positive_role:
         return False  # گادفادر و شهروندان منفی
     # اگر شیاد کاراگاه را درست حدس زده باشد → استتار (هر سه منفی می‌شوند)
